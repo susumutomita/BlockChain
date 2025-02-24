@@ -2,17 +2,28 @@ const std = @import("std");
 const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
 
-/// ブロックチェーンの1ブロックを表す構造体
-/// - index: ブロック番号（u32）
-/// - timestamp: ブロック生成時のタイムスタンプ（u64）
-/// - prev_hash: 前ブロックのハッシュ（32バイトの固定長配列）
-/// - data: ブロックに含まれるデータ（可変長スライス）
-/// - hash: このブロックのハッシュ（SHA-256の結果、32バイト固定長配列）
+/// トランザクションの構造体
+/// 送信者(sender), 受信者(receiver), 金額(amount) の3つだけを持つ。
+const Transaction = struct {
+    sender: []const u8,
+    receiver: []const u8,
+    amount: u64,
+    // 本来は署名やトランザクションIDなどの要素が必要
+};
+
+/// ブロックの構造体
+/// - index: ブロック番号
+/// - timestamp: 作成時刻
+/// - prev_hash: 前ブロックのハッシュ（32バイト）
+/// - transactions: 動的配列を使って複数のトランザクションを保持
+/// - data: 既存コードとの互換を保つために残す(省略可)
+/// - hash: このブロックのSHA-256ハッシュ(32バイト)
 const Block = struct {
     index: u32,
     timestamp: u64,
     prev_hash: [32]u8,
-    data: []const u8,
+    transactions: std.ArrayList(Transaction),
+    data: []const u8, // (必要に応じて省略可能)
     hash: [32]u8,
 };
 
@@ -25,40 +36,63 @@ fn toBytes(comptime T: type, value: T) []const u8 {
     return bytes[0..@sizeOf(T)];
 }
 
-/// calculateHash関数は、ブロックの各フィールドからバイト列を生成し、
-/// それらを順次ハッシュ計算コンテキストに入力して最終的なSHA-256ハッシュを得る関数です。
+/// calculateHash関数
+/// ブロックの各フィールドを順番にハッシュ計算へ渡し、最終的なSHA-256ハッシュを得る。
 fn calculateHash(block: *const Block) [32]u8 {
-    // SHA-256のハッシュ計算コンテキストを初期化する
     var hasher = Sha256.init(.{});
 
-    // ブロックのindex (u32) をバイト列に変換してハッシュに追加
+    // indexとtimestampをバイト列へ変換
     hasher.update(toBytes(u32, block.index));
-
-    // ブロックのtimestamp (u64) をバイト列に変換してハッシュに追加
     hasher.update(toBytes(u64, block.timestamp));
 
-    // 前ブロックのハッシュ（固定長配列）は既にスライスになっているのでそのまま追加
+    // 前のブロックのハッシュは配列→スライスで渡す
     hasher.update(block.prev_hash[0..]);
 
-    // ブロック内のデータ（可変長スライス）もそのまま追加
+    // ブロックに保持されているトランザクション一覧をまとめてハッシュ
+    for (block.transactions.items) |tx| {
+        hasher.update(tx.sender);
+        hasher.update(tx.receiver);
+        hasher.update(toBytes(u64, tx.amount));
+    }
+
+    // 既存コードとの互換を保つため、dataもハッシュに含める
     hasher.update(block.data);
 
-    // これまでの入力からSHA-256ハッシュを計算して返す（32バイト配列）
     return hasher.finalResult();
 }
 
 /// main関数：ブロックの初期化、ハッシュ計算、及び結果の出力を行います。
 pub fn main() !void {
+    // メモリ割り当て用アロケータを用意（ページアロケータを簡易使用）
+    const allocator = std.heap.page_allocator;
     const stdout = std.io.getStdOut().writer();
 
-    // genesis_block（最初のブロック）を作成
+    // ジェネシスブロック(最初のブロック)を作成
     var genesis_block = Block{
         .index = 0,
-        .timestamp = 1672531200, // 例としてUnixタイムスタンプを指定
-        .prev_hash = [_]u8{0} ** 32, // 初回は前ブロックのハッシュは全0
+        .timestamp = 1672531200,
+        .prev_hash = [_]u8{0} ** 32, // 前ブロックが無いので全0にする
+        // アロケータの初期化は後で行うため、いったんundefinedに
+        .transactions = undefined,
         .data = "Hello, Zig Blockchain!",
-        .hash = [_]u8{0} ** 32, // 初期値は全0。後で計算結果で上書きする
+        .hash = [_]u8{0} ** 32,
     };
+
+    // transactionsフィールドを動的配列として初期化
+    genesis_block.transactions = std.ArrayList(Transaction).init(allocator);
+    defer genesis_block.transactions.deinit();
+
+    // トランザクションを2件追加
+    try genesis_block.transactions.append(Transaction{
+        .sender = "Alice",
+        .receiver = "Bob",
+        .amount = 100,
+    });
+    try genesis_block.transactions.append(Transaction{
+        .sender = "Charlie",
+        .receiver = "Dave",
+        .amount = 50,
+    });
 
     // calculateHash()でブロックの全フィールドからハッシュを計算し、hashフィールドに保存する
     genesis_block.hash = calculateHash(&genesis_block);
@@ -67,8 +101,12 @@ pub fn main() !void {
     try stdout.print("Block index: {d}\n", .{genesis_block.index});
     try stdout.print("Timestamp  : {d}\n", .{genesis_block.timestamp});
     try stdout.print("Data       : {s}\n", .{genesis_block.data});
-    try stdout.print("Hash       : ", .{});
-    // 32バイトのハッシュを1バイトずつ16進数（小文字）で出力する
+    try stdout.print("Transactions:\n", .{});
+    for (genesis_block.transactions.items) |tx| {
+        try stdout.print("  {s} -> {s} : {d}\n", .{ tx.sender, tx.receiver, tx.amount });
+    }
+    try stdout.print("Hash       : ", .{}); // ← ここはプレースホルダなし、引数なし
+    // 32バイトのハッシュを1バイトずつ16進数で出力
     for (genesis_block.hash) |byte| {
         try stdout.print("{x}", .{byte});
     }
