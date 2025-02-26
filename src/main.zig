@@ -16,6 +16,7 @@ const Transaction = struct {
 /// - timestamp: 作成時刻
 /// - prev_hash: 前ブロックのハッシュ（32バイト）
 /// - transactions: 動的配列を使って複数のトランザクションを保持
+/// - nonce: PoW用のnonce
 /// - data: 既存コードとの互換を保つために残す(省略可)
 /// - hash: このブロックのSHA-256ハッシュ(32バイト)
 const Block = struct {
@@ -24,6 +25,7 @@ const Block = struct {
     prev_hash: [32]u8,
     transactions: std.ArrayList(Transaction),
     data: []const u8, // (必要に応じて省略可能)
+    nonce: u64, // PoW用のnonce
     hash: [32]u8,
 };
 
@@ -75,6 +77,7 @@ pub fn main() !void {
         // アロケータの初期化は後で行うため、いったんundefinedに
         .transactions = undefined,
         .data = "Hello, Zig Blockchain!",
+        .nonce = 0, //nonceフィールドを初期化(0から始める)
         .hash = [_]u8{0} ** 32,
     };
 
@@ -93,13 +96,13 @@ pub fn main() !void {
         .receiver = "Dave",
         .amount = 50,
     });
-
     // calculateHash()でブロックの全フィールドからハッシュを計算し、hashフィールドに保存する
     genesis_block.hash = calculateHash(&genesis_block);
 
     // 結果を出力
     try stdout.print("Block index: {d}\n", .{genesis_block.index});
     try stdout.print("Timestamp  : {d}\n", .{genesis_block.timestamp});
+    try stdout.print("Nonce      : {d}\n", .{genesis_block.nonce});
     try stdout.print("Data       : {s}\n", .{genesis_block.data});
     try stdout.print("Transactions:\n", .{});
     for (genesis_block.transactions.items) |tx| {
