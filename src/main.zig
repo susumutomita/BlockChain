@@ -107,7 +107,8 @@ fn calculateHash(block: *const Block) [32]u8 {
 
 fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
     // 難易度チェック：先頭 difficulty バイトがすべて 0 であれば成功
-    for (hash[0..difficulty]) |byte| {
+    const limit = if (difficulty <= 32) difficulty else 32;
+    for (hash[0..limit]) |byte| {
         if (byte != 0) return false;
     }
     return true;
