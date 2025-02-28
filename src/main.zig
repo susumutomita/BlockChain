@@ -45,17 +45,17 @@ fn truncateU64ToU8(x: u64) u8 {
 }
 
 /// u32 値をリトルエンディアンのバイト列に変換
-fn toBytesU32(value: u32) [4]u8 {
+fn toBytesU32(value: u32) []const u8 {
     var bytes: [4]u8 = undefined;
     bytes[0] = truncateU32ToU8(value & @as(u32, 0xff));
     bytes[1] = truncateU32ToU8((value >> 8) & @as(u32, 0xff));
     bytes[2] = truncateU32ToU8((value >> 16) & @as(u32, 0xff));
     bytes[3] = truncateU32ToU8((value >> 24) & @as(u32, 0xff));
-    return bytes;
+    return &bytes;
 }
 
 /// u64 値をリトルエンディアンのバイト列に変換
-fn toBytesU64(value: u64) [8]u8 {
+fn toBytesU64(value: u64) []const u8 {
     var bytes: [8]u8 = undefined;
     bytes[0] = truncateU64ToU8(value & @as(u64, 0xff));
     bytes[1] = truncateU64ToU8((value >> 8) & @as(u64, 0xff));
@@ -65,10 +65,8 @@ fn toBytesU64(value: u64) [8]u8 {
     bytes[5] = truncateU64ToU8((value >> 40) & @as(u64, 0xff));
     bytes[6] = truncateU64ToU8((value >> 48) & @as(u64, 0xff));
     bytes[7] = truncateU64ToU8((value >> 56) & @as(u64, 0xff));
-    return bytes;
+    return &bytes;
 }
-
-// Note: Adjust the `toBytes` function (if present) to properly handle the returned static arrays.
 
 /// toBytes関数は、任意の型Tの値をそのメモリ表現に基づく固定長のバイト配列に再解釈し、
 /// その全要素を含むスライス([]const u8)として返します。
