@@ -117,13 +117,6 @@ fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
 fn mineBlock(block: *Block, difficulty: u8) void {
     while (true) {
         const new_hash = calculateHash(block);
-
-        // std.debug.print("Nonce: {d}, Hash: ", .{block.nonce});
-        // for (new_hash) |byte| {
-        //     std.debug.print("{x}", .{byte});
-        // }
-        // std.debug.print("\n", .{});
-
         if (meetsDifficulty(new_hash, difficulty)) {
             block.hash = new_hash;
             break;
