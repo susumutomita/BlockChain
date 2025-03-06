@@ -1,44 +1,63 @@
+//! ブロックチェーンの基本実装
+//! このファイルは、シンプルなブロックチェーンの実装を通じて、
+//! 以下の要素について学ぶことができます：
+//! - ブロック構造
+//! - トランザクション
+//! - ハッシュ計算
+//! - Proof of Work (PoW)
+
 const std = @import("std");
 const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
 
+//------------------------------------------------------------------------------
+// デバッグ機能
+//------------------------------------------------------------------------------
+
 /// デバッグ出力の制御フラグ
+/// true: デバッグ情報を出力する
+/// false: デバッグ情報を出力しない（本番環境用）
 const debug_logging = false;
 
 /// デバッグ出力用のヘルパー関数
+/// コンパイル時に最適化され、debug_logging = false の場合は
+/// 実行コードから完全に除去される
 fn debugLog(comptime format: []const u8, args: anytype) void {
     if (comptime debug_logging) {
         std.debug.print(format, args);
     }
 }
 
+//------------------------------------------------------------------------------
+// 基本データ構造の定義
+//------------------------------------------------------------------------------
+
 /// トランザクションの構造体
-/// 送信者(sender), 受信者(receiver), 金額(amount) の3つだけを持つ。
+/// ブロックチェーン上で行われる取引を表現する
 const Transaction = struct {
-    sender: []const u8,
-    receiver: []const u8,
-    amount: u64,
+    sender: []const u8, // 送信者のアドレス（文字列）
+    receiver: []const u8, // 受信者のアドレス（文字列）
+    amount: u64, // 取引金額（整数）
 };
 
 /// ブロックの構造体
-/// - index: ブロック番号
-/// - timestamp: 作成時刻
-/// - prev_hash: 前ブロックのハッシュ（32バイト）
-/// - transactions: 動的配列を使って複数のトランザクションを保持
-/// - nonce: PoW用のnonce
-/// - data: 既存コードとの互換を保つために残す(省略可)
-/// - hash: このブロックのSHA-256ハッシュ(32バイト)
+/// ブロックチェーンの各ブロックを表現する
 const Block = struct {
-    index: u32,
-    timestamp: u64,
-    prev_hash: [32]u8,
-    transactions: std.ArrayList(Transaction),
-    nonce: u64,
-    data: []const u8,
-    hash: [32]u8,
+    index: u32, // ブロック番号（0から始まる連番）
+    timestamp: u64, // ブロック生成時のUNIXタイムスタンプ
+    prev_hash: [32]u8, // 前のブロックのハッシュ値
+    transactions: std.ArrayList(Transaction), // このブロックに含まれる取引のリスト
+    nonce: u64, // Proof of Work用の値
+    data: []const u8, // 追加データ（オプション）
+    hash: [32]u8, // このブロック自身のハッシュ値
 };
 
-/// u32 から u8 への安全な変換ヘルパー関数
+//------------------------------------------------------------------------------
+// バイト変換ヘルパー関数
+//------------------------------------------------------------------------------
+
+/// u32 から u8 への安全な変換
+/// 値が u8 の範囲を超える場合はパニックする
 fn truncateU32ToU8(x: u32) u8 {
     if (x > 0xff) {
         @panic("u32 value out of u8 range");
@@ -46,7 +65,8 @@ fn truncateU32ToU8(x: u32) u8 {
     return @truncate(x);
 }
 
-/// u64 から u8 への安全な変換ヘルパー関数
+/// u64 から u8 への安全な変換
+/// 値が u8 の範囲を超える場合はパニックする
 fn truncateU64ToU8(x: u64) u8 {
     if (x > 0xff) {
         @panic("u64 value out of u8 range");
@@ -78,25 +98,35 @@ fn toBytesU64(value: u64) [8]u8 {
     return bytes;
 }
 
-/// toBytes関数は、任意の型Tの値を固定長配列として返し、呼び出し側でスライスに変換する
+/// 任意の型の値をバイト列に変換する汎用関数
+/// comptime: コンパイル時に型チェックと最適化が行われる
 fn toBytes(comptime T: type, value: T) []const u8 {
     if (T == u32) {
         return toBytesU32(@as(u32, value))[0..];
     } else if (T == u64) {
         return toBytesU64(@as(u64, value))[0..];
     } else {
-        // 他の型の場合はビットキャストして固定長配列にし、スライスを返す
         const bytes: [@sizeOf(T)]u8 = @bitCast(value);
         return bytes[0..];
     }
 }
 
-/// calculateHash関数
-/// ブロックの各フィールドを順番にハッシュ計算へ渡し、最終的なSHA-256ハッシュを得る。
+//------------------------------------------------------------------------------
+// ハッシュ計算と採掘（マイニング）機能
+//------------------------------------------------------------------------------
+
+/// ブロックのハッシュ値を計算する
+/// 以下の要素を順番に連結してハッシュを計算：
+/// - ブロック番号
+/// - タイムスタンプ
+/// - nonce値
+/// - 前ブロックのハッシュ
+/// - 全トランザクション
+/// - 追加データ
 fn calculateHash(block: *const Block) [32]u8 {
     var hasher = Sha256.init(.{});
 
-    // nonceのバイト列を作成して確認
+    // nonceのバイト列を作成して確認（デバッグ用）
     const nonce_bytes = toBytesU64(block.nonce);
     debugLog("nonce bytes: ", .{});
     if (comptime debug_logging) {
@@ -106,10 +136,13 @@ fn calculateHash(block: *const Block) [32]u8 {
         std.debug.print("\n", .{});
     }
 
+    // 各フィールドをハッシュ計算に追加
     hasher.update(toBytes(u32, block.index));
     hasher.update(toBytes(u64, block.timestamp));
-    hasher.update(&nonce_bytes); // スライスではなく配列への参照を渡す
+    hasher.update(&nonce_bytes);
     hasher.update(block.prev_hash[0..]);
+
+    // すべてのトランザクションを処理
     for (block.transactions.items) |tx| {
         hasher.update(tx.sender);
         hasher.update(tx.receiver);
@@ -122,6 +155,8 @@ fn calculateHash(block: *const Block) [32]u8 {
     return hash;
 }
 
+/// ハッシュ値が指定された難易度を満たすかチェック
+/// difficulty: 先頭何バイトが0である必要があるか
 fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
     const limit = if (difficulty <= 32) difficulty else 32;
     for (hash[0..limit]) |byte| {
@@ -130,6 +165,8 @@ fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
     return true;
 }
 
+/// ブロックの採掘（マイニング）を行う
+/// 指定された難易度を満たすハッシュ値が見つかるまでnonceを増やし続ける
 fn mineBlock(block: *Block, difficulty: u8) void {
     while (true) {
         const new_hash = calculateHash(block);
@@ -141,7 +178,15 @@ fn mineBlock(block: *Block, difficulty: u8) void {
     }
 }
 
-/// main関数：ブロックの初期化、ハッシュ計算、及び結果の出力を行います。
+//------------------------------------------------------------------------------
+// メイン処理
+//------------------------------------------------------------------------------
+
+/// メイン関数
+/// 1. ジェネシスブロック（最初のブロック）の作成
+/// 2. トランザクションの追加
+/// 3. ブロックの採掘
+/// 4. 結果の表示
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     const stdout = std.io.getStdOut().writer();
