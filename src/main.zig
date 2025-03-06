@@ -2,6 +2,16 @@ const std = @import("std");
 const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
 
+/// デバッグ出力の制御フラグ
+const debug_logging = false;
+
+/// デバッグ出力用のヘルパー関数
+fn debugLog(comptime format: []const u8, args: anytype) void {
+    if (comptime debug_logging) {
+        std.debug.print(format, args);
+    }
+}
+
 /// トランザクションの構造体
 /// 送信者(sender), 受信者(receiver), 金額(amount) の3つだけを持つ。
 const Transaction = struct {
@@ -44,38 +54,38 @@ fn truncateU64ToU8(x: u64) u8 {
     return @truncate(x);
 }
 
-/// u32 値をリトルエンディアンのバイト列に変換
-fn toBytesU32(value: u32) []const u8 {
+/// u32 値をリトルエンディアンの4バイト配列に変換して返す
+fn toBytesU32(value: u32) [4]u8 {
     var bytes: [4]u8 = undefined;
-    bytes[0] = truncateU32ToU8(value & @as(u32, 0xff));
-    bytes[1] = truncateU32ToU8((value >> 8) & @as(u32, 0xff));
-    bytes[2] = truncateU32ToU8((value >> 16) & @as(u32, 0xff));
-    bytes[3] = truncateU32ToU8((value >> 24) & @as(u32, 0xff));
-    return &bytes;
+    bytes[0] = truncateU32ToU8(value & 0xff);
+    bytes[1] = truncateU32ToU8((value >> 8) & 0xff);
+    bytes[2] = truncateU32ToU8((value >> 16) & 0xff);
+    bytes[3] = truncateU32ToU8((value >> 24) & 0xff);
+    return bytes;
 }
 
-/// u64 値をリトルエンディアンのバイト列に変換
-fn toBytesU64(value: u64) []const u8 {
+/// u64 値をリトルエンディアンの8バイト配列に変換して返す
+fn toBytesU64(value: u64) [8]u8 {
     var bytes: [8]u8 = undefined;
-    bytes[0] = truncateU64ToU8(value & @as(u64, 0xff));
-    bytes[1] = truncateU64ToU8((value >> 8) & @as(u64, 0xff));
-    bytes[2] = truncateU64ToU8((value >> 16) & @as(u64, 0xff));
-    bytes[3] = truncateU64ToU8((value >> 24) & @as(u64, 0xff));
-    bytes[4] = truncateU64ToU8((value >> 32) & @as(u64, 0xff));
-    bytes[5] = truncateU64ToU8((value >> 40) & @as(u64, 0xff));
-    bytes[6] = truncateU64ToU8((value >> 48) & @as(u64, 0xff));
-    bytes[7] = truncateU64ToU8((value >> 56) & @as(u64, 0xff));
-    return &bytes;
+    bytes[0] = truncateU64ToU8(value & 0xff);
+    bytes[1] = truncateU64ToU8((value >> 8) & 0xff);
+    bytes[2] = truncateU64ToU8((value >> 16) & 0xff);
+    bytes[3] = truncateU64ToU8((value >> 24) & 0xff);
+    bytes[4] = truncateU64ToU8((value >> 32) & 0xff);
+    bytes[5] = truncateU64ToU8((value >> 40) & 0xff);
+    bytes[6] = truncateU64ToU8((value >> 48) & 0xff);
+    bytes[7] = truncateU64ToU8((value >> 56) & 0xff);
+    return bytes;
 }
 
-/// toBytes関数は、任意の型Tの値をそのメモリ表現に基づく固定長のバイト配列に再解釈し、
-/// その全要素を含むスライス([]const u8)として返します。
+/// toBytes関数は、任意の型Tの値を固定長配列として返し、呼び出し側でスライスに変換する
 fn toBytes(comptime T: type, value: T) []const u8 {
     if (T == u32) {
-        return toBytesU32(@as(u32, value));
+        return toBytesU32(@as(u32, value))[0..];
     } else if (T == u64) {
-        return toBytesU64(@as(u64, value));
+        return toBytesU64(@as(u64, value))[0..];
     } else {
+        // 他の型の場合はビットキャストして固定長配列にし、スライスを返す
         const bytes: [@sizeOf(T)]u8 = @bitCast(value);
         return bytes[0..];
     }
@@ -86,27 +96,33 @@ fn toBytes(comptime T: type, value: T) []const u8 {
 fn calculateHash(block: *const Block) [32]u8 {
     var hasher = Sha256.init(.{});
 
-    // indexとtimestampをバイト列へ変換
+    // nonceのバイト列を作成して確認
+    const nonce_bytes = toBytesU64(block.nonce);
+    debugLog("nonce bytes: ", .{});
+    if (comptime debug_logging) {
+        for (nonce_bytes) |byte| {
+            std.debug.print("{x:0>2},", .{byte});
+        }
+        std.debug.print("\n", .{});
+    }
+
     hasher.update(toBytes(u32, block.index));
     hasher.update(toBytes(u64, block.timestamp));
-
-    // 前のブロックのハッシュは配列→スライスで渡す
+    hasher.update(&nonce_bytes); // スライスではなく配列への参照を渡す
     hasher.update(block.prev_hash[0..]);
-    hasher.update(toBytes(u64, block.nonce));
     for (block.transactions.items) |tx| {
         hasher.update(tx.sender);
         hasher.update(tx.receiver);
         hasher.update(toBytes(u64, tx.amount));
     }
-
-    // 既存コードとの互換を保つため、dataもハッシュに含める
     hasher.update(block.data);
 
-    return hasher.finalResult();
+    const hash = hasher.finalResult();
+    debugLog("nonce: {d}, hash: {x}\n", .{ block.nonce, hash });
+    return hash;
 }
 
 fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
-    // 難易度チェック：先頭 difficulty バイトがすべて 0 であれば成功
     const limit = if (difficulty <= 32) difficulty else 32;
     for (hash[0..limit]) |byte| {
         if (byte != 0) return false;
@@ -127,26 +143,22 @@ fn mineBlock(block: *Block, difficulty: u8) void {
 
 /// main関数：ブロックの初期化、ハッシュ計算、及び結果の出力を行います。
 pub fn main() !void {
-    // メモリ割り当て用アロケータを用意（ページアロケータを簡易使用）
     const allocator = std.heap.page_allocator;
     const stdout = std.io.getStdOut().writer();
 
-    // ジェネシスブロック(最初のブロック)を作成
     var genesis_block = Block{
         .index = 0,
         .timestamp = 1672531200,
-        .prev_hash = [_]u8{0} ** 32, // 前ブロックが無いので全0にする
-        .transactions = undefined, // アロケータの初期化は後で行うため、いったんundefinedに
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = undefined,
         .data = "Hello, Zig Blockchain!",
-        .nonce = 0, //nonceフィールドを初期化(0から始める)
+        .nonce = 0,
         .hash = [_]u8{0} ** 32,
     };
 
-    // transactionsフィールドを動的配列として初期化
     genesis_block.transactions = std.ArrayList(Transaction).init(allocator);
     defer genesis_block.transactions.deinit();
 
-    // トランザクションを2件追加
     try genesis_block.transactions.append(Transaction{
         .sender = "Alice",
         .receiver = "Bob",
@@ -158,9 +170,8 @@ pub fn main() !void {
         .amount = 50,
     });
 
-    // calculateHash()でブロックの全フィールドからハッシュを計算し、hashフィールドに保存する
     genesis_block.hash = calculateHash(&genesis_block);
-    // 難易度 1：先頭1バイトが 0 であるかをチェック
+    // 難易度1：先頭1バイトが0ならOK
     mineBlock(&genesis_block, 1);
 
     try stdout.print("Block index: {d}\n", .{genesis_block.index});
