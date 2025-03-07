@@ -20,4 +20,4 @@ COPY --chown=appuser:appgroup . .
 # 一般ユーザーに切り替え
 USER appuser
 
-CMD ["zig", "run", "src/main.zig"]
+CMD ["zig", "build", "run"]

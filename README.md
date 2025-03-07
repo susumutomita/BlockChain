@@ -76,6 +76,15 @@ const debug_logging = false; // デバッグ情報を出力しない
 - [ ] WebAPI インターフェース
 - [ ] ウォレット機能
 
+## テスト実行とカバレッジ測定
+
+### 基本的なテスト実行
+
+```bash
+# テストを実行する
+zig build test
+```
+
 ## ライセンス
 
 MIT License
