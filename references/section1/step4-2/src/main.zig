@@ -3,6 +3,24 @@ const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
 
 //------------------------------------------------------------------------------
+// デバッグ出力関連
+//------------------------------------------------------------------------------
+//
+// このフラグが true であれば、デバッグ用のログ出力を行います。
+// コンパイル時に最適化されるため、false に設定されている場合、
+// debugLog 関数は実行コードから除去されます。
+const debug_logging = false;
+
+/// debugLog:
+/// デバッグログを出力するためのヘルパー関数です。
+/// ※ debug_logging が true の場合のみ std.debug.print を呼び出します。
+fn debugLog(comptime format: []const u8, args: anytype) void {
+    if (comptime debug_logging) {
+        std.debug.print(format, args);
+    }
+}
+
+//------------------------------------------------------------------------------
 // データ構造定義
 //------------------------------------------------------------------------------
 
@@ -95,24 +113,6 @@ fn toBytes(comptime T: type, value: T) []const u8 {
 }
 
 //------------------------------------------------------------------------------
-// デバッグ出力関連
-//------------------------------------------------------------------------------
-//
-// このフラグが true であれば、デバッグ用のログ出力を行います。
-// コンパイル時に最適化されるため、false に設定されている場合、
-// debugLog 関数は実行コードから除去されます。
-const debug_logging = false;
-
-/// debugLog:
-/// デバッグログを出力するためのヘルパー関数です。
-/// ※ debug_logging が true の場合のみ std.debug.print を呼び出します。
-fn debugLog(comptime format: []const u8, args: anytype) void {
-    if (comptime debug_logging) {
-        std.debug.print(format, args);
-    }
-}
-
-//------------------------------------------------------------------------------
 // ハッシュ計算とマイニング処理
 //------------------------------------------------------------------------------
 //
@@ -144,13 +144,14 @@ fn calculateHash(block: *const Block) [32]u8 {
     // nonce のバイト列を追加
     hasher.update(nonce_bytes[0..]);
     // 前ブロックのハッシュ(32バイト)を追加
-    hasher.update(block.prev_hash[0..]);
+    hasher.update(&block.prev_hash);
 
     // すべてのトランザクションについて、各フィールドを追加
     for (block.transactions.items) |tx| {
         hasher.update(tx.sender);
         hasher.update(tx.receiver);
-        hasher.update(toBytes(u64, tx.amount));
+        const amount_bytes = toBytesU64(tx.amount);
+        hasher.update(&amount_bytes);
     }
     // 追加データをハッシュに追加
     hasher.update(block.data);
@@ -228,8 +229,8 @@ pub fn main() !void {
 
     // ブロックの初期ハッシュを計算
     genesis_block.hash = calculateHash(&genesis_block);
-    // 難易度 2(先頭2バイトが 0)になるまで nonce を探索する
-    mineBlock(&genesis_block, 2);
+    // 難易度 1(先頭1バイトが 0)になるまで nonce を探索する
+    mineBlock(&genesis_block, 1);
 
     // 結果を標準出力に表示
     try stdout.print("Block index: {d}\n", .{genesis_block.index});

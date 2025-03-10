@@ -144,13 +144,14 @@ fn calculateHash(block: *const Block) [32]u8 {
     // nonce のバイト列を追加
     hasher.update(nonce_bytes[0..]);
     // 前ブロックのハッシュ(32バイト)を追加
-    hasher.update(block.prev_hash[0..]);
+    hasher.update(&block.prev_hash);
 
     // すべてのトランザクションについて、各フィールドを追加
     for (block.transactions.items) |tx| {
         hasher.update(tx.sender);
         hasher.update(tx.receiver);
-        hasher.update(toBytes(u64, tx.amount));
+        const amount_bytes = toBytesU64(tx.amount);
+        hasher.update(&amount_bytes);
     }
     // 追加データをハッシュに追加
     hasher.update(block.data);
@@ -368,4 +369,20 @@ test "トランザクションリストのテスト" {
     try std.testing.expectEqual(@as(usize, 2), block.transactions.items.len);
     try std.testing.expectEqualStrings("TestSender", block.transactions.items[0].sender);
     try std.testing.expectEqualStrings("Carol", block.transactions.items[1].sender);
+}
+
+test "ブロック改ざん検出テスト" {
+    const allocator = std.testing.allocator;
+    var block = try createTestBlock(allocator);
+    defer block.transactions.deinit();
+
+    // 通常のハッシュ
+    const originalHash = calculateHash(&block);
+
+    // 改ざん(トランザクションの金額を100->999に変える)
+    block.transactions.items[0].amount = 999;
+    const tamperedHash = calculateHash(&block);
+
+    // 改ざん前後のハッシュが異なることを期待
+    try std.testing.expect(!std.mem.eql(u8, originalHash[0..], tamperedHash[0..]));
 }
