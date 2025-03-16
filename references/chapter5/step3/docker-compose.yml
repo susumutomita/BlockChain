@@ -1,0 +1,25 @@
+services:
+  node1:
+    build: .
+    platform: linux/amd64
+    container_name: node1
+    ports:
+      - "3001:3000"
+    environment:
+      - NODE_ID=1
+  node2:
+    build: .
+    platform: linux/amd64
+    container_name: node2
+    ports:
+      - "3002:3000"
+    environment:
+      - NODE_ID=2
+  node3:
+    build: .
+    platform: linux/amd64
+    container_name: node3
+    ports:
+      - "3003:3000"
+    environment:
+      - NODE_ID=3
