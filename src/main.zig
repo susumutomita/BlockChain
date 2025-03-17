@@ -187,65 +187,240 @@ fn mineBlock(block: *Block, difficulty: u8) void {
     }
 }
 
-//------------------------------------------------------------------------------
-// メイン処理およびテスト実行
-//------------------------------------------------------------------------------
-//
-// main 関数では、以下の手順を実行しています：
-// 1. ジェネシスブロック(最初のブロック)を初期化。
-// 2. 取引リスト(トランザクション)の初期化と追加。
-// 3. ブロックのハッシュを計算し、指定難易度に到達するまで nonce を探索(採掘)。
-// 4. 最終的なブロック情報を標準出力に表示。
-pub fn main() !void {
-    const allocator = std.heap.page_allocator;
-    const stdout = std.io.getStdOut().writer();
+//--------------------------------------
+// P2P用ピア構造体
+//--------------------------------------
+const Peer = struct {
+    address: std.net.Address,
+    stream: std.net.Stream,
+};
 
-    // ジェネシスブロックの初期化
-    var genesis_block = Block{
-        .index = 0,
-        .timestamp = 1672531200, // 例: 2023-01-01 00:00:00 UTC
-        .prev_hash = [_]u8{0} ** 32, // 前ブロックがないので全て 0
-        .transactions = undefined, // 後で初期化するため一旦 undefined
-        .data = "Hello, Zig Blockchain!", // ブロックに付随する任意データ
-        .nonce = 0, // nonce は 0 から開始
-        .hash = [_]u8{0} ** 32, // 初期状態ではハッシュは全0
+//--------------------------------------
+// 簡易チェイン管理用: ブロック配列
+//--------------------------------------
+var chain_store = std.ArrayList(Block).init(std.heap.page_allocator);
+
+// addBlock: 受け取ったブロックをチェインに追加（本当は検証なども入れる）
+fn addBlock(new_block: Block) void {
+    // ここでは単純に末尾へ追加
+    // (実際は既存チェインと整合性をとるための検証/フォーク処理などが必要)
+    chain_store.append(new_block) catch {};
+    std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
+}
+
+//--------------------------------------
+// メッセージ受信処理: ConnHandler
+//--------------------------------------
+const ConnHandler = struct {
+    fn run(conn: std.net.Server.Connection) !void {
+        defer conn.stream.close();
+        std.log.info("Accepted: {any}", .{conn.address});
+
+        var reader = conn.stream.reader();
+        var buf: [256]u8 = undefined;
+
+        while (true) {
+            const n = try reader.read(&buf);
+            if (n == 0) {
+                std.log.info("Peer {any} disconnected.", .{conn.address});
+                break;
+            }
+            const msg_slice = buf[0..n];
+            std.log.info("[Received] {s}", .{msg_slice});
+
+            // 簡易メッセージ解析
+            if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
+                // "BLOCK:" の後ろを取り出してJSONパースする
+                const json_part = msg_slice[6..];
+                const new_block = parseBlockJson(json_part) catch |err| {
+                    std.log.err("Failed parseBlockJson: {any}", .{err});
+                    continue;
+                };
+                // チェインに追加
+                addBlock(new_block);
+            } else {
+                // それ以外はログだけ
+                std.log.info("Unknown message: {s}", .{msg_slice});
+            }
+        }
+    }
+};
+
+//--------------------------------------
+// クライアント送信用スレッド
+//--------------------------------------
+const SendHandler = struct {
+    fn run(peer: Peer) !void {
+        defer peer.stream.close();
+        std.log.info("Connected to peer {any}", .{peer.address});
+
+        var stdin_file = std.io.getStdIn();
+        const reader = stdin_file.reader();
+        var line_buffer: [256]u8 = undefined;
+
+        while (true) {
+            std.debug.print("Type message (Ctrl+D to quit): ", .{});
+            const maybe_line = try reader.readUntilDelimiterOrEof(line_buffer[0..], '\n');
+            if (maybe_line == null) {
+                std.log.info("EOF -> Stop sending loop.", .{});
+                break;
+            }
+            const line_slice = maybe_line.?;
+            var writer = peer.stream.writer();
+            try writer.writeAll(line_slice);
+        }
+    }
+};
+
+//--------------------------------------
+// ブロックJSONパース (簡易実装例)
+//--------------------------------------
+fn parseBlockJson(json_slice: []const u8) !Block {
+    // 本格的な JSON デコードは std.json を使いますが、
+    // ここではデモ用に「index,nonce,hash」しか取り出さない簡易版にしています。
+    // 実際には transactions や prev_hash などもしっかりパースしてください。
+
+    // 例： "{"index":0,"timestamp":1672531200,"nonce":42,...}"
+    // 実装例では適当なパースや固定値で作成しているだけです
+    // 学習目的であればここを工夫してみましょう。
+
+    // ダミーで new_block を返す
+    const block_allocator = std.heap.page_allocator;
+    var new_block = Block{
+        .index = 9999999,
+        .timestamp = @intCast(std.time.timestamp()),
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = std.ArrayList(Transaction).init(block_allocator),
+        .nonce = 0,
+        .data = "Received Block",
+        .hash = [_]u8{0} ** 32,
     };
 
-    // トランザクションリストの初期化
-    genesis_block.transactions = std.ArrayList(Transaction).init(allocator);
-    defer genesis_block.transactions.deinit();
-
-    // 例として 2 件のトランザクションを追加
-    try genesis_block.transactions.append(Transaction{
-        .sender = "Alice",
-        .receiver = "Bob",
-        .amount = 100,
-    });
-    try genesis_block.transactions.append(Transaction{
-        .sender = "Charlie",
-        .receiver = "Dave",
-        .amount = 50,
-    });
-
-    // ブロックの初期ハッシュを計算
-    genesis_block.hash = calculateHash(&genesis_block);
-    // 難易度 1(先頭1バイトが 0)になるまで nonce を探索する
-    mineBlock(&genesis_block, 1);
-
-    // 結果を標準出力に表示
-    try stdout.print("Block index: {d}\n", .{genesis_block.index});
-    try stdout.print("Timestamp  : {d}\n", .{genesis_block.timestamp});
-    try stdout.print("Nonce      : {d}\n", .{genesis_block.nonce});
-    try stdout.print("Data       : {s}\n", .{genesis_block.data});
-    try stdout.print("Transactions:\n", .{});
-    for (genesis_block.transactions.items) |tx| {
-        try stdout.print("  {s} -> {s} : {d}\n", .{ tx.sender, tx.receiver, tx.amount });
+    // TODO: ちゃんとした JSON 解析で fill するのが本来の処理
+    // ここでは簡易的に index=2, nonce=555 などの例
+    // (実際にはregexや std.json を使って取り出す)
+    if (std.mem.containsAtLeast(u8, json_slice, 1, "nonce")) {
+        new_block.nonce = 555;
     }
-    try stdout.print("Hash       : ", .{});
-    for (genesis_block.hash) |byte| {
-        try stdout.print("{x}", .{byte});
+    if (std.mem.containsAtLeast(u8, json_slice, 1, "index")) {
+        new_block.index = 2;
     }
-    try stdout.print("\n", .{});
+    // 受信後にハッシュも再計算(実際には送られてきた hash と比較したりもする)
+    new_block.hash = calculateHash(&new_block);
+
+    return new_block;
+}
+
+//--------------------------------------
+// main 関数
+//--------------------------------------
+pub fn main() !void {
+    const gpa = std.heap.page_allocator;
+    const args = std.process.argsAlloc(gpa) catch |err| {
+        std.log.err("arg parse fail: {any}", .{err});
+        return;
+    };
+    defer std.process.argsFree(gpa, args);
+
+    if (args.len < 3) {
+        std.log.info("Usage:\n {s} --listen <port>\n or\n {s} --connect <host:port>\n", .{ args[0], args[0] });
+        return;
+    }
+
+    // -----------------------
+    // 事前にジェネシスブロックを作って chain_store に追加
+    // -----------------------
+    var genesis = Block{
+        .index = 0,
+        .timestamp = 1672531200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = std.ArrayList(Transaction).init(std.heap.page_allocator),
+        .nonce = 0,
+        .data = "Hello, Zig Blockchain!",
+        .hash = [_]u8{0} ** 32,
+    };
+    // 例として1つトランザクションを追加
+    genesis.transactions.append(Transaction{ .sender = "Alice", .receiver = "Bob", .amount = 100 }) catch {};
+    // 採掘して追加
+    mineBlock(&genesis, 1);
+    chain_store.append(genesis) catch {};
+    std.log.info("Initialized chain with genesis block index=0", .{});
+
+    const mode = args[1];
+    if (std.mem.eql(u8, mode, "--listen")) {
+        //-----------------------------
+        // サーバーモード
+        //-----------------------------
+        const port_str = args[2];
+        const port_num = std.fmt.parseInt(u16, port_str, 10) catch {
+            std.log.err("Invalid port: {s}", .{port_str});
+            return;
+        };
+        var address = try std.net.Address.resolveIp("0.0.0.0", port_num);
+        var listener = try address.listen(.{});
+        defer listener.deinit();
+
+        std.log.info("Listening on 0.0.0.0:{d}", .{port_num});
+        while (true) {
+            const conn = try listener.accept();
+            _ = try std.Thread.spawn(.{}, ConnHandler.run, .{conn});
+        }
+    } else if (std.mem.eql(u8, mode, "--connect")) {
+        //-----------------------------
+        // クライアントモード
+        //-----------------------------
+        const hostport = args[2];
+        var tokenizer = std.mem.tokenizeScalar(u8, hostport, ':');
+        const host_str = tokenizer.next() orelse {
+            std.log.err("Please specify <host:port>", .{});
+            return;
+        };
+        const port_str = tokenizer.next() orelse {
+            std.log.err("No port after ':'", .{});
+            return;
+        };
+        if (tokenizer.next() != null) {
+            std.log.err("Too many ':' in {s}", .{hostport});
+            return;
+        }
+        const port_num = std.fmt.parseInt(u16, port_str, 10) catch {
+            std.log.err("Invalid port: {s}", .{port_str});
+            return;
+        };
+        std.log.info("Connecting to {s}:{d}...", .{ host_str, port_num });
+
+        const remote_addr = try std.net.Address.resolveIp(host_str, port_num);
+        var socket = try std.net.tcpConnectToAddress(remote_addr);
+        // クライアントでは送信専用スレッドを起動
+        const peer = Peer{ .address = remote_addr, .stream = socket };
+        _ = try std.Thread.spawn(.{}, SendHandler.run, .{peer});
+
+        // メインスレッドで受信
+        var reader = socket.reader();
+        var buf: [256]u8 = undefined;
+        while (true) {
+            const n = try reader.read(&buf);
+            if (n == 0) {
+                std.log.info("Server disconnected.", .{});
+                break;
+            }
+            const msg_slice = buf[0..n];
+            std.log.info("[Recv] {s}", .{msg_slice});
+
+            if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
+                const json_part = msg_slice[6..];
+                const new_block = parseBlockJson(json_part) catch |err| {
+                    std.log.err("parseBlockJson err: {any}", .{err});
+                    continue;
+                };
+                addBlock(new_block);
+            } else {
+                std.log.info("Unknown msg: {s}", .{msg_slice});
+            }
+        }
+    } else {
+        std.log.err("Invalid mode: {s}", .{mode});
+    }
 }
 
 //------------------------------------------------------------------------------
