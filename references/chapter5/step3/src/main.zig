@@ -288,7 +288,7 @@ fn parseBlockJson(json_slice: []const u8) !Block {
     const block_allocator = std.heap.page_allocator;
     var new_block = Block{
         .index = 9999999,
-        .timestamp = std.time.posixTime() catch 0, // 適当な値
+        .timestamp = @intCast(std.time.timestamp()),
         .prev_hash = [_]u8{0} ** 32,
         .transactions = std.ArrayList(Transaction).init(block_allocator),
         .nonce = 0,
@@ -299,10 +299,10 @@ fn parseBlockJson(json_slice: []const u8) !Block {
     // TODO: ちゃんとした JSON 解析で fill するのが本来の処理
     // ここでは簡易的に index=2, nonce=555 などの例
     // (実際にはregexや std.json を使って取り出す)
-    if (std.mem.containsAtLeast(u8, json_slice, "nonce")) {
+    if (std.mem.containsAtLeast(u8, json_slice, 1, "nonce")) {
         new_block.nonce = 555;
     }
-    if (std.mem.containsAtLeast(u8, json_slice, "index")) {
+    if (std.mem.containsAtLeast(u8, json_slice, 1, "index")) {
         new_block.index = 2;
     }
     // 受信後にハッシュも再計算(実際には送られてきた hash と比較したりもする)
