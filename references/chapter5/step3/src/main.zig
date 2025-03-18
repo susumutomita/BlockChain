@@ -200,10 +200,26 @@ const Peer = struct {
 //--------------------------------------
 var chain_store = std.ArrayList(Block).init(std.heap.page_allocator);
 
+const DIFFICULTY = 1; // 先頭1バイトが0になるかチェック
+
+fn verifyBlockPow(b: *const Block) bool {
+    // 1) `calculateHash(b)` → meetsDifficulty
+    const recalculated = calculateHash(b);
+    if (!std.mem.eql(u8, recalculated[0..], b.hash[0..])) {
+        return false; // hashフィールドと再計算が一致しない
+    }
+    if (!meetsDifficulty(recalculated, DIFFICULTY)) {
+        return false; // PoWが難易度を満たしていない
+    }
+    return true;
+}
+
 // addBlock: 受け取ったブロックをチェインに追加（本当は検証なども入れる）
 fn addBlock(new_block: Block) void {
-    // ここでは単純に末尾へ追加
-    // (実際は既存チェインと整合性をとるための検証/フォーク処理などが必要)
+    if (!verifyBlockPow(&new_block)) {
+        std.log.err("Received block fails PoW check. Rejecting it.", .{});
+        return;
+    }
     chain_store.append(new_block) catch {};
     std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
 }
@@ -275,40 +291,107 @@ const SendHandler = struct {
 //--------------------------------------
 // ブロックJSONパース (簡易実装例)
 //--------------------------------------
+
+/// hexDecode: 16進文字列をバイナリへ (返り値: 実際に変換できたバイト数)
+fn hexDecode(src: []const u8, dst: *[256]u8) !usize {
+    if (src.len % 2 != 0) return error.InvalidHexLength;
+    var i: usize = 0;
+    while (i < src.len) : (i += 2) {
+        const hi = parseHexDigit(src[i]) catch return error.InvalidHexChar;
+        const lo = parseHexDigit(src[i + 1]) catch return error.InvalidHexChar;
+        dst[i / 2] = (hi << 4) | lo;
+    }
+    return src.len / 2;
+}
+
+fn parseHexDigit(c: u8) !u8 {
+    switch (c) {
+        '0'...'9' => return c - '0',
+        'a'...'f' => return 10 + (c - 'a'),
+        'A'...'F' => return 10 + (c - 'A'),
+        else => return error.InvalidHexChar,
+    }
+}
+
 fn parseBlockJson(json_slice: []const u8) !Block {
-    // 本格的な JSON デコードは std.json を使いますが、
-    // ここではデモ用に「index,nonce,hash」しか取り出さない簡易版にしています。
-    // 実際には transactions や prev_hash などもしっかりパースしてください。
-
-    // 例： "{"index":0,"timestamp":1672531200,"nonce":42,...}"
-    // 実装例では適当なパースや固定値で作成しているだけです
-    // 学習目的であればここを工夫してみましょう。
-
-    // ダミーで new_block を返す
     const block_allocator = std.heap.page_allocator;
-    var new_block = Block{
-        .index = 9999999,
-        .timestamp = @intCast(std.time.timestamp()),
+    const parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, json_slice, .{});
+    defer parsed.deinit();
+    const root_value = parsed.value;
+
+    // getType() を使わずに、switch でパターンマッチする
+    const obj = switch (root_value) {
+        .object => |o| o,
+        else => return error.InvalidFormat,
+    };
+
+    // ブロック構造体を一旦デフォルト初期化
+    var b = Block{
+        .index = 0,
+        .timestamp = 0,
         .prev_hash = [_]u8{0} ** 32,
         .transactions = std.ArrayList(Transaction).init(block_allocator),
         .nonce = 0,
-        .data = "Received Block",
+        .data = "P2P Received Block",
         .hash = [_]u8{0} ** 32,
     };
 
-    // TODO: ちゃんとした JSON 解析で fill するのが本来の処理
-    // ここでは簡易的に index=2, nonce=555 などの例
-    // (実際にはregexや std.json を使って取り出す)
-    if (std.mem.containsAtLeast(u8, json_slice, 1, "nonce")) {
-        new_block.nonce = 555;
+    // 1) index (u32)
+    if (obj.get("index")) |idx_val| {
+        const idx_num: i64 = switch (idx_val) {
+            .integer => idx_val.integer,
+            .float => @as(i64, @intFromFloat(idx_val.float)),
+            else => return error.InvalidFormat,
+        };
+        if (idx_num < 0 or idx_num > @as(i64, std.math.maxInt(u32))) {
+            return error.InvalidFormat;
+        }
+        b.index = @intCast(idx_num);
     }
-    if (std.mem.containsAtLeast(u8, json_slice, 1, "index")) {
-        new_block.index = 2;
-    }
-    // 受信後にハッシュも再計算(実際には送られてきた hash と比較したりもする)
-    new_block.hash = calculateHash(&new_block);
 
-    return new_block;
+    // 2) timestamp (u64)
+    if (obj.get("timestamp")) |ts_val| {
+        const ts_num: i64 = switch (ts_val) {
+            .integer => if (ts_val.integer < 0) return error.InvalidFormat else ts_val.integer,
+            .float => @intFromFloat(ts_val.float),
+            else => return error.InvalidFormat,
+        };
+        b.timestamp = @intCast(ts_num);
+    }
+
+    // 3) nonce (u64)
+    if (obj.get("nonce")) |nonce_val| {
+        const nonce_num: i64 = switch (nonce_val) {
+            .integer => nonce_val.integer,
+            .float => @intFromFloat(nonce_val.float),
+            else => return error.InvalidFormat,
+        };
+        if (nonce_num < 0 or nonce_num > @as(f64, std.math.maxInt(u64))) {
+            return error.InvalidFormat;
+        }
+        b.nonce = @intCast(nonce_num);
+    }
+
+    // 4) hash (hex文字列 → 32バイト配列)
+    if (obj.get("hash")) |hash_val| {
+        const hash_str = switch (hash_val) {
+            .string => hash_val.string,
+            else => return error.InvalidFormat,
+        };
+        // 一時バッファとして 256 バイトの配列を用意する
+        var long_buf: [256]u8 = undefined;
+        const actual_len = try hexDecode(hash_str, &long_buf);
+        if (actual_len != 32) return error.InvalidFormat;
+        var tmp_hash: [32]u8 = undefined;
+        var i: usize = 0;
+        while (i < 32) : (i += 1) {
+            tmp_hash[i] = long_buf[i];
+        }
+        b.hash = tmp_hash;
+    }
+
+    // (省略) prev_hash, transactions なども取りたい場合は同様に実装
+    return b;
 }
 
 //--------------------------------------
