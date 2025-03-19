@@ -1,6 +1,7 @@
 const std = @import("std");
 const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
+const DIFFICULTY: u8 = 1;
 
 //------------------------------------------------------------------------------
 // デバッグ出力関連
@@ -187,6 +188,51 @@ fn mineBlock(block: *Block, difficulty: u8) void {
     }
 }
 
+//------------------------------------------------------------------------------
+// ブロックのシリアライズ（JSON形式の簡易実装）
+//------------------------------------------------------------------------------
+fn serializeBlock(block: Block) ![]const u8 {
+    const allocator = std.heap.page_allocator;
+    // 簡易に各フィールドをフォーマットした JSON 文字列を生成する例
+    // ※実際は正確な JSON エスケープ等が必要ですが、ここではシンプルな例です
+    return std.fmt.formatAlloc(allocator, "{" ++
+        "\"index\":{d}," ++
+        "\"timestamp\":{d}," ++
+        "\"nonce\":{d}," ++
+        "\"data\":\"{s}\"," ++
+        "\"hash\":\"{x}\"" ++
+        "}", .{ block.index, block.timestamp, block.nonce, block.data, block.hash });
+}
+
+//------------------------------------------------------------------------------
+// ブロック生成（メッセージから）
+//------------------------------------------------------------------------------
+fn createBlock(input: []const u8, prevBlock: Block) Block {
+    // 前ブロックの hash を prev_hash に設定し、index を 1 増やす
+    return Block{
+        .index = prevBlock.index + 1,
+        .timestamp = std.time.milliTimestamp(),
+        .prev_hash = prevBlock.hash,
+        .transactions = std.ArrayList(Transaction).init(std.heap.page_allocator),
+        .nonce = 0,
+        .data = input,
+        .hash = [_]u8{0} ** 32,
+    };
+}
+
+//------------------------------------------------------------------------------
+// ブロック送信
+//------------------------------------------------------------------------------
+fn sendBlock(block: Block, remote_addr: std.net.Address) !void {
+    const json_data = serializeBlock(block) catch |err| {
+        std.debug.print("Serialize error: {any}\n", .{err});
+        return err;
+    };
+    var socket = try std.net.tcpConnectToAddress(remote_addr);
+    var writer = socket.writer();
+    try writer.writeAll("BLOCK:" ++ json_data);
+}
+
 //--------------------------------------
 // P2P用ピア構造体
 //--------------------------------------
@@ -199,8 +245,6 @@ const Peer = struct {
 // 簡易チェイン管理用: ブロック配列
 //--------------------------------------
 var chain_store = std.ArrayList(Block).init(std.heap.page_allocator);
-
-const DIFFICULTY = 1; // 先頭1バイトが0になるかチェック
 
 fn verifyBlockPow(b: *const Block) bool {
     // 1) `calculateHash(b)` → meetsDifficulty
