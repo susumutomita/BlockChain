@@ -1,7 +1,7 @@
 const std = @import("std");
 const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
-const DIFFICULTY: u8 = 1;
+const DIFFICULTY: u8 = 2;
 
 pub const ChainError = error{
     InvalidHexLength,
@@ -138,6 +138,7 @@ fn calculateHash(block: *const Block) [32]u8 {
     const nonce_bytes = toBytesU64(block.nonce);
     debugLog("nonce bytes: ", .{});
     if (comptime debug_logging) {
+        std.log.info("[Received] {x:0>2}", .{nonce_bytes});
         for (nonce_bytes) |byte| {
             std.debug.print("{x:0>2},", .{byte});
         }
@@ -207,7 +208,7 @@ fn serializeBlock(block: Block) ![]const u8 {
         "\"nonce\":{d}," ++
         "\"data\":\"{s}\"," ++
         "\"hash\":\"{x}\"" ++
-        "}}", .{ block.index, block.timestamp, block.nonce, block.data, block.hash });
+        "}}", .{ block.index, block.timestamp, block.nonce, block.data, block.hash[0..] });
 }
 
 //------------------------------------------------------------------------------
@@ -460,8 +461,17 @@ fn clientSendLoop(peer: Peer, lastBlock: *Block) !void {
         var new_block = createBlock(user_input, lastBlock.*);
         mineBlock(&new_block, DIFFICULTY);
         var writer = peer.stream.writer();
-        try writer.writeAll("BLOCK:");
-        try writer.writeAll(serializeBlock(new_block) catch unreachable);
+        const block_json = serializeBlock(new_block) catch unreachable;
+        // 必要なサイズのバッファを用意して "BLOCK:" と block_json を連結する
+        var buf = try std.heap.page_allocator.alloc(u8, "BLOCK:".len + block_json.len);
+        defer std.heap.page_allocator.free(buf);
+
+        // バッファに連結
+        @memcpy(buf[0.."BLOCK:".len], "BLOCK:");
+        @memcpy(buf["BLOCK:".len..], block_json);
+
+        // 1回の書き出しで送信
+        try writer.writeAll(buf);
         lastBlock.* = new_block;
     }
 }
