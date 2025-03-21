@@ -198,17 +198,36 @@ fn mineBlock(block: *Block, difficulty: u8) void {
 //------------------------------------------------------------------------------
 // ブロックのシリアライズ（JSON形式の簡易実装）
 //------------------------------------------------------------------------------
+fn hexEncode(slice: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    // 2文字×バイト数 + null終端不要なら省略
+    var buf = try allocator.alloc(u8, slice.len * 2);
+    var j: usize = 0;
+    for (slice) |byte| {
+        const high = byte >> 4;
+        const low = byte & 0x0F;
+        buf[j] = if (high < 10) '0' + high else 'a' + (high - 10);
+        j += 1;
+        buf[j] = if (low < 10) '0' + low else 'a' + (low - 10);
+        j += 1;
+    }
+    return buf;
+}
+
 fn serializeBlock(block: Block) ![]const u8 {
     const allocator = std.heap.page_allocator;
-    // 簡易に各フィールドをフォーマットした JSON 文字列を生成する例
-    // ※実際は正確な JSON エスケープ等が必要ですが、ここではシンプルな例です
-    return std.fmt.allocPrintZ(allocator, "{{" ++
+    const hash_str = hexEncode(block.hash[0..], allocator) catch unreachable;
+    const prev_hash_str = hexEncode(block.prev_hash[0..], allocator) catch unreachable;
+    const json = try std.fmt.allocPrintZ(allocator, "{{" ++
         "\"index\":{d}," ++
         "\"timestamp\":{d}," ++
         "\"nonce\":{d}," ++
         "\"data\":\"{s}\"," ++
-        "\"hash\":\"{x}\"" ++
-        "}}", .{ block.index, block.timestamp, block.nonce, block.data, block.hash[0..] });
+        "\"prev_hash\":\"{s}\"," ++
+        "\"hash\":\"{s}\"" ++
+        "}}", .{ block.index, block.timestamp, block.nonce, block.data, prev_hash_str, hash_str });
+    allocator.free(hash_str);
+    allocator.free(prev_hash_str);
+    return json;
 }
 
 //------------------------------------------------------------------------------
