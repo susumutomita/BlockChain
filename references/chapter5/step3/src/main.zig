@@ -389,13 +389,11 @@ fn parseBlockJson(json_slice: []const u8) !Block {
     defer parsed.deinit();
     const root_value = parsed.value;
 
-    // getType() を使わずに、switch でパターンマッチする
     const obj = switch (root_value) {
         .object => |o| o,
         else => return ChainError.InvalidFormat,
     };
 
-    // ブロック構造体を一旦デフォルト初期化
     var b = Block{
         .index = 0,
         .timestamp = 0,
@@ -406,7 +404,7 @@ fn parseBlockJson(json_slice: []const u8) !Block {
         .hash = [_]u8{0} ** 32,
     };
 
-    // 1) index (u32)
+    // index の読み込み
     if (obj.get("index")) |idx_val| {
         const idx_num: i64 = switch (idx_val) {
             .integer => idx_val.integer,
@@ -419,7 +417,7 @@ fn parseBlockJson(json_slice: []const u8) !Block {
         b.index = @intCast(idx_num);
     }
 
-    // 2) timestamp (u64)
+    // timestamp の読み込み
     if (obj.get("timestamp")) |ts_val| {
         const ts_num: i64 = switch (ts_val) {
             .integer => if (ts_val.integer < 0) return error.InvalidFormat else ts_val.integer,
@@ -429,7 +427,7 @@ fn parseBlockJson(json_slice: []const u8) !Block {
         b.timestamp = @intCast(ts_num);
     }
 
-    // 3) nonce (u64)
+    // nonce の読み込み
     if (obj.get("nonce")) |nonce_val| {
         const nonce_num: i64 = switch (nonce_val) {
             .integer => nonce_val.integer,
@@ -442,25 +440,7 @@ fn parseBlockJson(json_slice: []const u8) !Block {
         b.nonce = @intCast(nonce_num);
     }
 
-    // 4) hash (hex文字列 → 32バイト配列)
-    if (obj.get("hash")) |hash_val| {
-        const hash_str = switch (hash_val) {
-            .string => hash_val.string,
-            else => return error.InvalidFormat,
-        };
-        // 一時バッファとして 256 バイトの配列を用意する
-        var long_buf: [256]u8 = undefined;
-        const actual_len = try hexDecode(hash_str, &long_buf);
-        if (actual_len != 32) return error.InvalidFormat;
-        var tmp_hash: [32]u8 = undefined;
-        var i: usize = 0;
-        while (i < 32) : (i += 1) {
-            tmp_hash[i] = long_buf[i];
-        }
-        b.hash = tmp_hash;
-    }
-
-    // 4-1) prev_hash (hex文字列 → 32バイト配列)
+    // prev_hash の読み込み（追加）
     if (obj.get("prev_hash")) |ph_val| {
         const ph_str = switch (ph_val) {
             .string => ph_val.string,
@@ -477,7 +457,32 @@ fn parseBlockJson(json_slice: []const u8) !Block {
         b.prev_hash = tmp_ph;
     }
 
-    // (省略) prev_hash, transactions なども取りたい場合は同様に実装
+    // hash の読み込み
+    if (obj.get("hash")) |hash_val| {
+        const hash_str = switch (hash_val) {
+            .string => hash_val.string,
+            else => return error.InvalidFormat,
+        };
+        var long_buf: [256]u8 = undefined;
+        const actual_len = try hexDecode(hash_str, &long_buf);
+        if (actual_len != 32) return error.InvalidFormat;
+        var tmp_hash: [32]u8 = undefined;
+        var i: usize = 0;
+        while (i < 32) : (i += 1) {
+            tmp_hash[i] = long_buf[i];
+        }
+        b.hash = tmp_hash;
+    }
+
+    // 5) data の読み込み（追加）
+    if (obj.get("data")) |data_val| {
+        const data_str = switch (data_val) {
+            .string => data_val.string,
+            else => return error.InvalidFormat,
+        };
+        b.data = data_str;
+    }
+    // （必要に応じて、トランザクション等の他のフィールドも読み込む）
     return b;
 }
 
