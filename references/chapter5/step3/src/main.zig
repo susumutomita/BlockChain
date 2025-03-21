@@ -3,6 +3,13 @@ const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
 const DIFFICULTY: u8 = 1;
 
+pub const ChainError = error{
+    InvalidHexLength,
+    InvalidHexChar,
+    InvalidFormat,
+};
+
+
 //------------------------------------------------------------------------------
 // デバッグ出力関連
 //------------------------------------------------------------------------------
@@ -338,11 +345,11 @@ const SendHandler = struct {
 
 /// hexDecode: 16進文字列をバイナリへ (返り値: 実際に変換できたバイト数)
 fn hexDecode(src: []const u8, dst: *[256]u8) !usize {
-    if (src.len % 2 != 0) return error.InvalidHexLength;
+    if (src.len % 2 != 0) return ChainError.InvalidHexLength;
     var i: usize = 0;
     while (i < src.len) : (i += 2) {
-        const hi = parseHexDigit(src[i]) catch return error.InvalidHexChar;
-        const lo = parseHexDigit(src[i + 1]) catch return error.InvalidHexChar;
+        const hi = parseHexDigit(src[i]) catch return ChainError.InvalidHexChar;
+        const lo = parseHexDigit(src[i + 1]) catch return ChainError.InvalidHexChar;
         dst[i / 2] = (hi << 4) | lo;
     }
     return src.len / 2;
@@ -366,7 +373,7 @@ fn parseBlockJson(json_slice: []const u8) !Block {
     // getType() を使わずに、switch でパターンマッチする
     const obj = switch (root_value) {
         .object => |o| o,
-        else => return error.InvalidFormat,
+        else => return ChainError.InvalidFormat,
     };
 
     // ブロック構造体を一旦デフォルト初期化
