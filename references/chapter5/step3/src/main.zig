@@ -201,13 +201,13 @@ fn serializeBlock(block: Block) ![]const u8 {
     const allocator = std.heap.page_allocator;
     // 簡易に各フィールドをフォーマットした JSON 文字列を生成する例
     // ※実際は正確な JSON エスケープ等が必要ですが、ここではシンプルな例です
-    return std.fmt.formatAlloc(allocator, "{" ++
+    return std.fmt.allocPrintZ(allocator, "{{" ++
         "\"index\":{d}," ++
         "\"timestamp\":{d}," ++
         "\"nonce\":{d}," ++
         "\"data\":\"{s}\"," ++
         "\"hash\":\"{x}\"" ++
-        "}", .{ block.index, block.timestamp, block.nonce, block.data, block.hash });
+        "}}", .{ block.index, block.timestamp, block.nonce, block.data, block.hash });
 }
 
 //------------------------------------------------------------------------------
@@ -217,7 +217,7 @@ fn createBlock(input: []const u8, prevBlock: Block) Block {
     // 前ブロックの hash を prev_hash に設定し、index を 1 増やす
     return Block{
         .index = prevBlock.index + 1,
-        .timestamp = std.time.milliTimestamp(),
+        .timestamp = @intCast(std.time.timestamp()),
         .prev_hash = prevBlock.hash,
         .transactions = std.ArrayList(Transaction).init(std.heap.page_allocator),
         .nonce = 0,
@@ -460,7 +460,8 @@ fn clientSendLoop(peer: Peer, lastBlock: *Block) !void {
         var new_block = createBlock(user_input, lastBlock.*);
         mineBlock(&new_block, DIFFICULTY);
         var writer = peer.stream.writer();
-        try writer.writeAll("BLOCK:" ++ (serializeBlock(new_block) catch unreachable));
+        try writer.writeAll("BLOCK:");
+        try writer.writeAll(serializeBlock(new_block) catch unreachable);
         lastBlock.* = new_block;
     }
 }
@@ -473,12 +474,12 @@ const ClientHandler = struct {
     }
 };
 
-fn createTestGenesisBlock(allocator: *std.mem.Allocator) !Block {
+fn createTestGenesisBlock(allocator: std.mem.Allocator) !Block {
     var genesis = Block{
         .index = 0,
         .timestamp = 1672531200,
         .prev_hash = [_]u8{0} ** 32,
-        .transactions = std.ArrayList(Transaction).init(allocator.*),
+        .transactions = std.ArrayList(Transaction).init(allocator),
         .nonce = 0,
         .data = "Hello, Zig Blockchain!",
         .hash = [_]u8{0} ** 32,
@@ -493,59 +494,27 @@ fn createTestGenesisBlock(allocator: *std.mem.Allocator) !Block {
 //--------------------------------------
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
-    const args = std.process.argsAlloc(gpa) catch |err| {
-        std.log.err("arg parse fail: {any}", .{err});
-        return;
-    };
+    const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
-
     if (args.len < 3) {
         std.log.info("Usage:\n {s} --listen <port>\n or\n {s} --connect <host:port>\n", .{ args[0], args[0] });
         return;
     }
-
-    // -----------------------
-    // 事前にジェネシスブロックを作って chain_store に追加
-    // -----------------------
-    var genesis = Block{
-        .index = 0,
-        .timestamp = 1672531200,
-        .prev_hash = [_]u8{0} ** 32,
-        .transactions = std.ArrayList(Transaction).init(std.heap.page_allocator),
-        .nonce = 0,
-        .data = "Hello, Zig Blockchain!",
-        .hash = [_]u8{0} ** 32,
-    };
-    // 例として1つトランザクションを追加
-    genesis.transactions.append(Transaction{ .sender = "Alice", .receiver = "Bob", .amount = 100 }) catch {};
-    // 採掘して追加
-    mineBlock(&genesis, 1);
-    chain_store.append(genesis) catch {};
-    std.log.info("Initialized chain with genesis block index=0", .{});
-
     const mode = args[1];
     if (std.mem.eql(u8, mode, "--listen")) {
-        //-----------------------------
         // サーバーモード
-        //-----------------------------
         const port_str = args[2];
-        const port_num = std.fmt.parseInt(u16, port_str, 10) catch {
-            std.log.err("Invalid port: {s}", .{port_str});
-            return;
-        };
+        const port_num = try std.fmt.parseInt(u16, port_str, 10);
         var address = try std.net.Address.resolveIp("0.0.0.0", port_num);
         var listener = try address.listen(.{});
         defer listener.deinit();
-
         std.log.info("Listening on 0.0.0.0:{d}", .{port_num});
         while (true) {
             const conn = try listener.accept();
             _ = try std.Thread.spawn(.{}, ConnHandler.run, .{conn});
         }
     } else if (std.mem.eql(u8, mode, "--connect")) {
-        //-----------------------------
         // クライアントモード
-        //-----------------------------
         const hostport = args[2];
         var tokenizer = std.mem.tokenizeScalar(u8, hostport, ':');
         const host_str = tokenizer.next() orelse {
@@ -560,19 +529,15 @@ pub fn main() !void {
             std.log.err("Too many ':' in {s}", .{hostport});
             return;
         }
-        const port_num = std.fmt.parseInt(u16, port_str, 10) catch {
-            std.log.err("Invalid port: {s}", .{port_str});
-            return;
-        };
+        const port_num = try std.fmt.parseInt(u16, port_str, 10);
         std.log.info("Connecting to {s}:{d}...", .{ host_str, port_num });
-
         const remote_addr = try std.net.Address.resolveIp(host_str, port_num);
         var socket = try std.net.tcpConnectToAddress(remote_addr);
-        // クライアントでは送信専用スレッドを起動
-        const peer = Peer{ .address = remote_addr, .stream = socket };
-        _ = try std.Thread.spawn(.{}, SendHandler.run, .{peer});
-
-        // メインスレッドで受信
+        const peer = Peer{
+            .address = remote_addr,
+            .stream = socket,
+        };
+        _ = try std.Thread.spawn(.{}, ClientHandler.run, .{peer});
         var reader = socket.reader();
         var buf: [256]u8 = undefined;
         while (true) {
@@ -583,13 +548,9 @@ pub fn main() !void {
             }
             const msg_slice = buf[0..n];
             std.log.info("[Recv] {s}", .{msg_slice});
-
             if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
                 const json_part = msg_slice[6..];
-                const new_block = parseBlockJson(json_part) catch |err| {
-                    std.log.err("parseBlockJson err: {any}", .{err});
-                    continue;
-                };
+                const new_block = try parseBlockJson(json_part);
                 addBlock(new_block);
             } else {
                 std.log.info("Unknown msg: {s}", .{msg_slice});
