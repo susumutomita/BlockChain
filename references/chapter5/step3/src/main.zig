@@ -9,7 +9,6 @@ pub const ChainError = error{
     InvalidFormat,
 };
 
-
 //------------------------------------------------------------------------------
 // デバッグ出力関連
 //------------------------------------------------------------------------------
@@ -443,6 +442,50 @@ fn parseBlockJson(json_slice: []const u8) !Block {
 
     // (省略) prev_hash, transactions なども取りたい場合は同様に実装
     return b;
+}
+
+//
+// --------------- クライアント側処理 ---------------
+// クライアントはユーザー入力から新規ブロックを生成し、採掘後にサーバーへ送信します。
+//
+fn clientSendLoop(peer: Peer, lastBlock: *Block) !void {
+    var stdin = std.io.getStdIn();
+    var reader = stdin.reader();
+    var line_buffer: [256]u8 = undefined;
+    while (true) {
+        std.debug.print("Enter message for new block: ", .{});
+        const maybe_line = try reader.readUntilDelimiterOrEof(line_buffer[0..], '\n');
+        if (maybe_line == null) break;
+        const user_input = maybe_line.?;
+        var new_block = createBlock(user_input, lastBlock.*);
+        mineBlock(&new_block, DIFFICULTY);
+        var writer = peer.stream.writer();
+        try writer.writeAll("BLOCK:" ++ (serializeBlock(new_block) catch unreachable));
+        lastBlock.* = new_block;
+    }
+}
+
+const ClientHandler = struct {
+    fn run(peer: Peer) !void {
+        // クライアントはローカルに Genesis ブロックを保持（本来はサーバーから同期する）
+        var lastBlock = try createTestGenesisBlock(std.heap.page_allocator);
+        clientSendLoop(peer, &lastBlock) catch unreachable;
+    }
+};
+
+fn createTestGenesisBlock(allocator: *std.mem.Allocator) !Block {
+    var genesis = Block{
+        .index = 0,
+        .timestamp = 1672531200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = std.ArrayList(Transaction).init(allocator.*),
+        .nonce = 0,
+        .data = "Hello, Zig Blockchain!",
+        .hash = [_]u8{0} ** 32,
+    };
+    genesis.transactions.append(Transaction{ .sender = "Alice", .receiver = "Bob", .amount = 100 }) catch {};
+    mineBlock(&genesis, DIFFICULTY);
+    return genesis;
 }
 
 //--------------------------------------
