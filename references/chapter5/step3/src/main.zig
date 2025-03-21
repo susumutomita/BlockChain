@@ -460,6 +460,23 @@ fn parseBlockJson(json_slice: []const u8) !Block {
         b.hash = tmp_hash;
     }
 
+    // 4-1) prev_hash (hex文字列 → 32バイト配列)
+    if (obj.get("prev_hash")) |ph_val| {
+        const ph_str = switch (ph_val) {
+            .string => ph_val.string,
+            else => return error.InvalidFormat,
+        };
+        var ph_buf: [256]u8 = undefined;
+        const ph_len = try hexDecode(ph_str, &ph_buf);
+        if (ph_len != 32) return error.InvalidFormat;
+        var tmp_ph: [32]u8 = undefined;
+        var i: usize = 0;
+        while (i < 32) : (i += 1) {
+            tmp_ph[i] = ph_buf[i];
+        }
+        b.prev_hash = tmp_ph;
+    }
+
     // (省略) prev_hash, transactions なども取りたい場合は同様に実装
     return b;
 }
