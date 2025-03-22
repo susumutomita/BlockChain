@@ -213,6 +213,27 @@ fn hexEncode(slice: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     return buf;
 }
 
+fn serializeTransactions(transactions: std.ArrayList(Transaction), allocator: *std.mem.Allocator) ![]const u8 {
+    var list = std.ArrayList(u8).init(allocator);
+    defer list.deinit();
+    try list.appendSlice("[");
+    var first = true;
+    // ArrayList の items をスライスに変換してループ
+    const tx_slice = transactions.items.toSlice();
+    for (tx_slice) |tx| {
+        if (!first) {
+            try list.appendSlice(",");
+        } else {
+            first = false;
+        }
+        const tx_json = try std.fmt.allocPrintZ(allocator, "{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d}}", .{ tx.sender, tx.receiver, tx.amount });
+        try list.appendSlice(tx_json);
+        allocator.free(tx_json);
+    }
+    try list.appendSlice("]");
+    return list.toOwnedSlice();
+}
+
 fn serializeBlock(block: Block) ![]const u8 {
     const allocator = std.heap.page_allocator;
     const hash_str = hexEncode(block.hash[0..], allocator) catch unreachable;
