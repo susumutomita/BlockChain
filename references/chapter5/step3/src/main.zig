@@ -213,23 +213,24 @@ fn hexEncode(slice: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     return buf;
 }
 
-fn serializeTransactions(transactions: std.ArrayList(Transaction), allocator: *std.mem.Allocator) ![]const u8 {
-    var list = std.ArrayList(u8).init(allocator);
-    defer list.deinit();
-    try list.appendSlice("[");
-    var first = true;
-    // ArrayList の items をスライスに変換してループ
-    const tx_slice = transactions.items.toSlice();
-    for (tx_slice) |tx| {
-        if (!first) {
-            try list.appendSlice(",");
-        } else {
-            first = false;
-        }
-        const tx_json = try std.fmt.allocPrintZ(allocator, "{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d}}", .{ tx.sender, tx.receiver, tx.amount });
-        try list.appendSlice(tx_json);
-        allocator.free(tx_json);
+fn serializeTransactions(transactions: std.ArrayList(Transaction), allocator: std.mem.Allocator) ![]const u8 {
+    if (transactions.items.len == 0) {
+        return allocator.dupe(u8, "[]");
     }
+
+    var list = std.ArrayList(u8).init(allocator);
+    errdefer list.deinit();
+    try list.appendSlice("[");
+
+    for (transactions.items, 0..) |tx, i| {
+        if (i > 0) {
+            try list.appendSlice(",");
+        }
+        const tx_json = try std.fmt.allocPrintZ(allocator, "{{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d}}}", .{ tx.sender, tx.receiver, tx.amount });
+        defer allocator.free(tx_json);
+        try list.appendSlice(tx_json);
+    }
+
     try list.appendSlice("]");
     return list.toOwnedSlice();
 }
@@ -238,16 +239,11 @@ fn serializeBlock(block: Block) ![]const u8 {
     const allocator = std.heap.page_allocator;
     const hash_str = hexEncode(block.hash[0..], allocator) catch unreachable;
     const prev_hash_str = hexEncode(block.prev_hash[0..], allocator) catch unreachable;
-    const json = try std.fmt.allocPrintZ(allocator, "{{" ++
-        "\"index\":{d}," ++
-        "\"timestamp\":{d}," ++
-        "\"nonce\":{d}," ++
-        "\"data\":\"{s}\"," ++
-        "\"prev_hash\":\"{s}\"," ++
-        "\"hash\":\"{s}\"" ++
-        "}}", .{ block.index, block.timestamp, block.nonce, block.data, prev_hash_str, hash_str });
+    const tx_str = try serializeTransactions(block.transactions, allocator);
+    const json = try std.fmt.allocPrintZ(allocator, "{{\"index\":{d},\"timestamp\":{d},\"nonce\":{d},\"data\":\"{s}\",\"prev_hash\":\"{s}\",\"hash\":\"{s}\",\"transactions\":{s}}}", .{ block.index, block.timestamp, block.nonce, block.data, prev_hash_str, hash_str, tx_str });
     allocator.free(hash_str);
     allocator.free(prev_hash_str);
+    allocator.free(tx_str);
     return json;
 }
 
@@ -503,7 +499,44 @@ fn parseBlockJson(json_slice: []const u8) !Block {
         };
         b.data = data_str;
     }
-    // （必要に応じて、トランザクション等の他のフィールドも読み込む）
+    if (obj.get("transactions")) |tx_val| {
+        const tx_str = switch (tx_val) {
+            .string => |s| s,
+            else => return error.InvalidFormat,
+        };
+        // Parse the transactions string as JSON
+        const tx_parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, tx_str, .{});
+        defer tx_parsed.deinit();
+        const tx_array = switch (tx_parsed.value) {
+            .array => |a| a,
+            else => return error.InvalidFormat,
+        };
+        const tx_slice = tx_array.items;
+        for (tx_slice) |elem| {
+            const tx_obj = switch (elem) {
+                .object => |o| o,
+                else => return error.InvalidFormat,
+            };
+            const sender = switch (tx_obj.get("sender") orelse return error.InvalidFormat) {
+                .string => |s| s,
+                else => return error.InvalidFormat,
+            };
+            const receiver = switch (tx_obj.get("receiver") orelse return error.InvalidFormat) {
+                .string => |s| s,
+                else => return error.InvalidFormat,
+            };
+            const amount: u64 = switch (tx_obj.get("amount") orelse return error.InvalidFormat) {
+                .integer => |val| @intCast(val),
+                .float => |val| @intFromFloat(val),
+                else => return error.InvalidFormat,
+            };
+            try b.transactions.append(Transaction{
+                .sender = sender,
+                .receiver = receiver,
+                .amount = amount,
+            });
+        }
+    }
     return b;
 }
 
