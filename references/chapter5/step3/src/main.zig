@@ -517,22 +517,27 @@ fn parseBlockJson(json_slice: []const u8) !Block {
                 .object => |o| o,
                 else => return error.InvalidFormat,
             };
+            // Allocate strings for sender and receiver to avoid use-after-free
             const sender = switch (tx_obj.get("sender") orelse return error.InvalidFormat) {
                 .string => |s| s,
                 else => return error.InvalidFormat,
             };
+            const sender_copy = try block_allocator.dupe(u8, sender);
+        
             const receiver = switch (tx_obj.get("receiver") orelse return error.InvalidFormat) {
                 .string => |s| s,
                 else => return error.InvalidFormat,
             };
+            const receiver_copy = try block_allocator.dupe(u8, receiver);
+        
             const amount: u64 = switch (tx_obj.get("amount") orelse return error.InvalidFormat) {
                 .integer => |val| @intCast(val),
                 .float => |val| @intFromFloat(val),
                 else => return error.InvalidFormat,
             };
             try b.transactions.append(Transaction{
-                .sender = sender,
-                .receiver = receiver,
+                .sender = sender_copy,
+                .receiver = receiver_copy,
                 .amount = amount,
             });
         }
