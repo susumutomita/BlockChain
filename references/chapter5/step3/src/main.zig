@@ -500,10 +500,12 @@ fn parseBlockJson(json_slice: []const u8) !Block {
         b.data = data_str;
     }
     if (obj.get("transactions")) |tx_val| {
+        std.log.info("Found transactions field: {any}", .{tx_val});
         const tx_str = switch (tx_val) {
             .string => |s| s,
             else => return error.InvalidFormat,
         };
+        std.log.info("Parsing transactions JSON string: {s}", .{tx_str});
         // Parse the transactions string as JSON
         const tx_parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, tx_str, .{});
         defer tx_parsed.deinit();
@@ -511,6 +513,7 @@ fn parseBlockJson(json_slice: []const u8) !Block {
             .array => |a| a,
             else => return error.InvalidFormat,
         };
+        std.log.info("Transactions array length: {d}", .{tx_array.items.len});
         const tx_slice = tx_array.items;
         for (tx_slice) |elem| {
             const tx_obj = switch (elem) {
@@ -522,19 +525,22 @@ fn parseBlockJson(json_slice: []const u8) !Block {
                 .string => |s| s,
                 else => return error.InvalidFormat,
             };
+            std.log.info("Sender: {s}", .{sender});
             const sender_copy = try block_allocator.dupe(u8, sender);
-        
+
             const receiver = switch (tx_obj.get("receiver") orelse return error.InvalidFormat) {
                 .string => |s| s,
                 else => return error.InvalidFormat,
             };
+            std.log.info("Receiver: {s}", .{receiver});
             const receiver_copy = try block_allocator.dupe(u8, receiver);
-        
+
             const amount: u64 = switch (tx_obj.get("amount") orelse return error.InvalidFormat) {
                 .integer => |val| @intCast(val),
                 .float => |val| @intFromFloat(val),
                 else => return error.InvalidFormat,
             };
+            std.log.info("Parsed amount: {d}", .{amount});
             try b.transactions.append(Transaction{
                 .sender = sender_copy,
                 .receiver = receiver_copy,
