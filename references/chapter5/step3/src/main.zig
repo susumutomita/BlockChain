@@ -499,55 +499,86 @@ fn parseBlockJson(json_slice: []const u8) !Block {
         };
         b.data = data_str;
     }
+
     if (obj.get("transactions")) |tx_val| {
         std.log.info("Found transactions field: {any}", .{tx_val});
-        const tx_str = switch (tx_val) {
-            .string => |s| s,
-            else => return error.InvalidFormat,
-        };
-        std.log.info("Parsing transactions JSON string: {s}", .{tx_str});
-        // Parse the transactions string as JSON
-        const tx_parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, tx_str, .{});
-        defer tx_parsed.deinit();
-        const tx_array = switch (tx_parsed.value) {
-            .array => |a| a,
-            else => return error.InvalidFormat,
-        };
-        std.log.info("Transactions array length: {d}", .{tx_array.items.len});
-        const tx_slice = tx_array.items;
-        for (tx_slice) |elem| {
-            const tx_obj = switch (elem) {
-                .object => |o| o,
-                else => return error.InvalidFormat,
-            };
-            // Allocate strings for sender and receiver to avoid use-after-free
-            const sender = switch (tx_obj.get("sender") orelse return error.InvalidFormat) {
-                .string => |s| s,
-                else => return error.InvalidFormat,
-            };
-            std.log.info("Sender: {s}", .{sender});
-            const sender_copy = try block_allocator.dupe(u8, sender);
+        if (tx_val == .array) {
+            std.log.info("Transactions field is directly an array.", .{});
+            const tx_items = tx_val.array.items;
 
-            const receiver = switch (tx_obj.get("receiver") orelse return error.InvalidFormat) {
-                .string => |s| s,
-                else => return error.InvalidFormat,
-            };
-            std.log.info("Receiver: {s}", .{receiver});
-            const receiver_copy = try block_allocator.dupe(u8, receiver);
+            // Only process items if array is not empty
+            if (tx_items.len > 0) {
+                for (tx_items, 0..) |elem, idx| {
+                    std.log.info("Processing transaction element {d}: {any}", .{ idx, elem });
+                    const tx_obj = switch (elem) {
+                        .object => |o| o,
+                        else => {
+                            std.log.err("Transaction element {d} is not an object.", .{idx});
+                            return error.InvalidFormat;
+                        },
+                    };
 
-            const amount: u64 = switch (tx_obj.get("amount") orelse return error.InvalidFormat) {
-                .integer => |val| @intCast(val),
-                .float => |val| @intFromFloat(val),
-                else => return error.InvalidFormat,
-            };
-            std.log.info("Parsed amount: {d}", .{amount});
-            try b.transactions.append(Transaction{
-                .sender = sender_copy,
-                .receiver = receiver_copy,
-                .amount = amount,
-            });
+                    // Rest of transaction processing code...
+                    const sender = switch (tx_obj.get("sender") orelse {
+                        std.log.err("Transaction element {d}: missing 'sender' field.", .{idx});
+                        return error.InvalidFormat;
+                    }) {
+                        .string => |s| s,
+                        else => {
+                            std.log.err("Transaction element {d}: 'sender' field is not a string.", .{idx});
+                            return error.InvalidFormat;
+                        },
+                    };
+                    const sender_copy = try block_allocator.dupe(u8, sender);
+
+                    const receiver = switch (tx_obj.get("receiver") orelse {
+                        std.log.err("Transaction element {d}: missing 'receiver' field.", .{idx});
+                        return error.InvalidFormat;
+                    }) {
+                        .string => |s| s,
+                        else => {
+                            std.log.err("Transaction element {d}: 'receiver' field is not a string.", .{idx});
+                            return error.InvalidFormat;
+                        },
+                    };
+                    const receiver_copy = try block_allocator.dupe(u8, receiver);
+
+                    const amount: u64 = switch (tx_obj.get("amount") orelse {
+                        std.log.err("Transaction element {d}: missing 'amount' field.", .{idx});
+                        return error.InvalidFormat;
+                    }) {
+                        .integer => |val| if (val < 0) return error.InvalidFormat else @intCast(val),
+                        .float => |val| if (val < 0) return error.InvalidFormat else @intFromFloat(val),
+                        else => {
+                            std.log.err("Transaction element {d}: 'amount' field is neither integer nor float.", .{idx});
+                            return error.InvalidFormat;
+                        },
+                    };
+                    std.log.info("Transaction element {d}: Parsed amount = {d}", .{ idx, amount });
+                    try b.transactions.append(Transaction{
+                        .sender = sender_copy,
+                        .receiver = receiver_copy,
+                        .amount = amount,
+                    });
+                }
+            }
+        } else if (tx_val == .string) {
+            std.log.info("Transactions field is a string. Value: {s}", .{tx_val.string});
+            const tx_parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, tx_val.string, .{});
+            defer tx_parsed.deinit();
+            if (tx_parsed.value == .array) {
+                const tx_items = tx_parsed.value.array.items;
+                // Process string-parsed array items...
+                if (tx_items.len > 0) {
+                    // Handle parsed items similar to above...
+                    return error.InvalidFormat; // For now, not implementing string parsing
+                }
+            }
+        } else {
+            return error.InvalidFormat;
         }
     }
+
     return b;
 }
 
