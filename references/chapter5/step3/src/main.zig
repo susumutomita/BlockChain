@@ -320,30 +320,30 @@ const ConnHandler = struct {
         std.log.info("Accepted: {any}", .{conn.address});
 
         var reader = conn.stream.reader();
-        var buf: [256]u8 = undefined;
+        var line_buffer: [1024]u8 = undefined; // 充分なサイズのバッファを確保
 
         while (true) {
-            const n = try reader.read(&buf);
-            if (n == 0) {
+            // 改行文字まで読み込む（改行は含まれる）
+            const maybe_line = try reader.readUntilDelimiterOrEof(line_buffer[0..], '\n');
+            if (maybe_line == null) {
                 std.log.info("Peer {any} disconnected.", .{conn.address});
                 break;
             }
-            const msg_slice = buf[0..n];
-            std.log.info("[Received] {s}", .{msg_slice});
+            // 改行文字を取り除く（必要なら）
+            const line = maybe_line.?;
+            const msg = std.mem.trim(u8, line, "\n");
+            std.log.info("[Received complete message] {s}", .{msg});
 
-            // 簡易メッセージ解析
-            if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
-                // "BLOCK:" の後ろを取り出してJSONパースする
-                const json_part = msg_slice[6..];
+            if (std.mem.startsWith(u8, msg, "BLOCK:")) {
+                // "BLOCK:" の後ろの部分を JSON としてパース
+                const json_part = msg[6..];
                 const new_block = parseBlockJson(json_part) catch |err| {
                     std.log.err("Failed parseBlockJson: {any}", .{err});
                     continue;
                 };
-                // チェインに追加
                 addBlock(new_block);
             } else {
-                // それ以外はログだけ
-                std.log.info("Unknown message: {s}", .{msg_slice});
+                std.log.info("Unknown message: {s}", .{msg});
             }
         }
     }
@@ -501,84 +501,88 @@ fn parseBlockJson(json_slice: []const u8) !Block {
     }
 
     if (obj.get("transactions")) |tx_val| {
-        std.log.info("Found transactions field: {any}", .{tx_val});
-        if (tx_val == .array) {
-            std.log.info("Transactions field is directly an array.", .{});
-            const tx_items = tx_val.array.items;
-
-            // Only process items if array is not empty
-            if (tx_items.len > 0) {
-                for (tx_items, 0..) |elem, idx| {
-                    std.log.info("Processing transaction element {d}: {any}", .{ idx, elem });
-                    const tx_obj = switch (elem) {
-                        .object => |o| o,
-                        else => {
-                            std.log.err("Transaction element {d} is not an object.", .{idx});
-                            return error.InvalidFormat;
-                        },
-                    };
-
-                    // Rest of transaction processing code...
-                    const sender = switch (tx_obj.get("sender") orelse {
-                        std.log.err("Transaction element {d}: missing 'sender' field.", .{idx});
-                        return error.InvalidFormat;
-                    }) {
-                        .string => |s| s,
-                        else => {
-                            std.log.err("Transaction element {d}: 'sender' field is not a string.", .{idx});
-                            return error.InvalidFormat;
-                        },
-                    };
-                    const sender_copy = try block_allocator.dupe(u8, sender);
-
-                    const receiver = switch (tx_obj.get("receiver") orelse {
-                        std.log.err("Transaction element {d}: missing 'receiver' field.", .{idx});
-                        return error.InvalidFormat;
-                    }) {
-                        .string => |s| s,
-                        else => {
-                            std.log.err("Transaction element {d}: 'receiver' field is not a string.", .{idx});
-                            return error.InvalidFormat;
-                        },
-                    };
-                    const receiver_copy = try block_allocator.dupe(u8, receiver);
-
-                    const amount: u64 = switch (tx_obj.get("amount") orelse {
-                        std.log.err("Transaction element {d}: missing 'amount' field.", .{idx});
-                        return error.InvalidFormat;
-                    }) {
-                        .integer => |val| if (val < 0) return error.InvalidFormat else @intCast(val),
-                        .float => |val| if (val < 0) return error.InvalidFormat else @intFromFloat(val),
-                        else => {
-                            std.log.err("Transaction element {d}: 'amount' field is neither integer nor float.", .{idx});
-                            return error.InvalidFormat;
-                        },
-                    };
-                    std.log.info("Transaction element {d}: Parsed amount = {d}", .{ idx, amount });
-                    try b.transactions.append(Transaction{
-                        .sender = sender_copy,
-                        .receiver = receiver_copy,
-                        .amount = amount,
-                    });
-                }
-            }
-        } else if (tx_val == .string) {
-            std.log.info("Transactions field is a string. Value: {s}", .{tx_val.string});
-            const tx_parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, tx_val.string, .{});
-            defer tx_parsed.deinit();
-            if (tx_parsed.value == .array) {
-                const tx_items = tx_parsed.value.array.items;
-                // Process string-parsed array items...
+        switch (tx_val) {
+            .array => {
+                std.log.info("Transactions field is directly an array. {any}", .{tx_val});
+                const tx_items = tx_val.array.items;
                 if (tx_items.len > 0) {
-                    // Handle parsed items similar to above...
-                    return error.InvalidFormat; // For now, not implementing string parsing
+                    std.log.info("tx_items.len = {d}", .{tx_items.len});
+                    for (tx_items, 0..tx_items.len) |elem, idx| {
+                        std.log.info("Processing transaction element {d}", .{idx});
+                        const tx_obj = switch (elem) {
+                            .object => |o| o,
+                            else => {
+                                std.log.err("Transaction element {d} is not an object.", .{idx});
+                                return error.InvalidFormat;
+                            },
+                        };
+
+                        const sender = switch (tx_obj.get("sender") orelse {
+                            std.log.err("Transaction element {d}: missing 'sender' field.", .{idx});
+                            return error.InvalidFormat;
+                        }) {
+                            .string => |s| s,
+                            else => {
+                                std.log.err("Transaction element {d}: 'sender' field is not a string.", .{idx});
+                                return error.InvalidFormat;
+                            },
+                        };
+                        const sender_copy = try block_allocator.dupe(u8, sender);
+
+                        const receiver = switch (tx_obj.get("receiver") orelse {
+                            std.log.err("Transaction element {d}: missing 'receiver' field.", .{idx});
+                            return error.InvalidFormat;
+                        }) {
+                            .string => |s| s,
+                            else => {
+                                std.log.err("Transaction element {d}: 'receiver' field is not a string.", .{idx});
+                                return error.InvalidFormat;
+                            },
+                        };
+                        const receiver_copy = try block_allocator.dupe(u8, receiver);
+
+                        const amount: u64 = switch (tx_obj.get("amount") orelse {
+                            std.log.err("Transaction element {d}: missing 'amount' field.", .{idx});
+                            return error.InvalidFormat;
+                        }) {
+                            .integer => |val| if (val < 0) return error.InvalidFormat else @intCast(val),
+                            .float => |val| if (val < 0) return error.InvalidFormat else @intFromFloat(val),
+                            else => {
+                                std.log.err("Transaction element {d}: 'amount' field is neither integer nor float.", .{idx});
+                                return error.InvalidFormat;
+                            },
+                        };
+                        std.log.info("Transaction element {d}: Parsed amount = {d}", .{ idx, amount });
+                        try b.transactions.append(Transaction{
+                            .sender = sender_copy,
+                            .receiver = receiver_copy,
+                            .amount = amount,
+                        });
+                    }
+                    std.log.info("Transactions field is directly an array. end", .{});
                 }
-            }
-        } else {
-            return error.InvalidFormat;
+                std.log.info("565 Transactions field is directly an array. end", .{});
+            },
+            .string => {
+                std.log.info("Transactions field is a string. Value: {s}", .{tx_val.string});
+                const tx_parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, tx_val.string, .{});
+                defer tx_parsed.deinit();
+                switch (tx_parsed.value) {
+                    .array => {
+                        const tx_items = tx_parsed.value.array.items;
+                        if (tx_items.len > 0) {
+                            // 未実装：文字列からパースした配列の処理
+                            return error.InvalidFormat;
+                        }
+                    },
+                    else => return error.InvalidFormat,
+                }
+            },
+            else => return error.InvalidFormat,
         }
     }
-
+    std.log.info("Block info: index={d}, timestamp={d}, prev_hash={any}, transactions={any} nonce={d}, data={s}, hash={any} ", .{ b.index, b.timestamp, b.prev_hash, b.transactions, b.nonce, b.data, b.hash });
+    std.log.info("parseBlockJson end", .{});
     return b;
 }
 
@@ -589,7 +593,7 @@ fn parseBlockJson(json_slice: []const u8) !Block {
 fn clientSendLoop(peer: Peer, lastBlock: *Block) !void {
     var stdin = std.io.getStdIn();
     var reader = stdin.reader();
-    var line_buffer: [256]u8 = undefined;
+    var line_buffer: [1024]u8 = undefined;
     while (true) {
         std.debug.print("Enter message for new block: ", .{});
         const maybe_line = try reader.readUntilDelimiterOrEof(line_buffer[0..], '\n');
@@ -600,14 +604,17 @@ fn clientSendLoop(peer: Peer, lastBlock: *Block) !void {
         var writer = peer.stream.writer();
         const block_json = serializeBlock(new_block) catch unreachable;
         // 必要なサイズのバッファを用意して "BLOCK:" と block_json を連結する
-        var buf = try std.heap.page_allocator.alloc(u8, "BLOCK:".len + block_json.len);
+        const prefix = "BLOCK:";
+        const prefix_len = prefix.len;
+        var buf = try std.heap.page_allocator.alloc(u8, prefix_len + block_json.len + 1);
         defer std.heap.page_allocator.free(buf);
 
-        // バッファに連結
-        @memcpy(buf[0.."BLOCK:".len], "BLOCK:");
-        @memcpy(buf["BLOCK:".len..], block_json);
+        // "BLOCK:" をコピー。buf[0..prefix_len] は長さ prefix_len のスライス
+        @memcpy(buf[0..prefix_len].ptr, prefix);
+        // block_json をコピー。buf[prefix_len .. prefix_len + block_json.len] は block_json.len バイトのスライス
+        @memcpy(buf[prefix_len .. prefix_len + block_json.len].ptr, block_json);
+        buf[prefix_len + block_json.len] = '\n';
 
-        // 1回の書き出しで送信
         try writer.writeAll(buf);
         lastBlock.* = new_block;
     }
