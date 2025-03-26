@@ -398,6 +398,71 @@ const SendHandler = struct {
     }
 };
 
+//------------------------------------------------------------------------------
+// RPCハンドラ (JSON-RPCでトランザクションとマイニングを処理)
+//------------------------------------------------------------------------------
+fn rpcHandler(conn: std.net.Server.Connection, mempool: *std.ArrayList(Transaction), lastBlock: *Block) !void {
+    defer conn.stream.close();
+    var reader = conn.stream.reader();
+    var buf: [1024]u8 = undefined;
+    const maybe_line = try reader.readUntilDelimiterOrEof(buf[0..], '\n');
+    if (maybe_line == null) return;
+    const req_line = std.mem.trim(u8, maybe_line.?, "\n");
+    const allocator = std.heap.page_allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, req_line, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+    const obj = switch (root) {
+        .object => |o| o,
+        else => return ChainError.InvalidFormat,
+    };
+    const method_val = obj.get("method") orelse return ChainError.InvalidFormat;
+    const method = switch (method_val) {
+        .string => method_val.string,
+        else => return ChainError.InvalidFormat,
+    };
+    if (std.mem.eql(u8, method, "sendTransaction")) {
+        const params_val = obj.get("params") orelse return ChainError.InvalidFormat;
+        const params = switch (params_val) {
+            .array => params_val.array.items,
+            else => return ChainError.InvalidFormat,
+        };
+        if (params.len != 3) return ChainError.InvalidFormat;
+        const sender = switch (params[0]) {
+            .string => params[0].string,
+            else => return ChainError.InvalidFormat,
+        };
+        const receiver = switch (params[1]) {
+            .string => params[1].string,
+            else => return ChainError.InvalidFormat,
+        };
+        const amount = switch (params[2]) {
+            .integer => params[2].integer,
+            .float => @as(i64, @intFromFloat(params[2].float)),
+            else => return ChainError.InvalidFormat,
+        };
+        const tx = Transaction{
+            .sender = sender,
+            .receiver = receiver,
+            .amount = @intCast(amount),
+        };
+        try mempool.append(tx);
+        const response = "{\"jsonrpc\":\"2.0\",\"result\":\"Transaction added\",\"id\":1}";
+        try conn.stream.writer().writeAll(response);
+    } else if (std.mem.eql(u8, method, "mine")) {
+        var new_block = try createBlockFromMempool(*lastBlock, mempool, allocator);
+        chain_store.append(new_block) catch {};
+        lastBlock.* = new_block;
+        const hash_str = try hexEncode(new_block.hash[0..], allocator);
+        const response = try std.fmt.allocPrintZ(allocator, "{\"jsonrpc\":\"2.0\",\"result\":\"Block mined: %s\",\"id\":1}", .{hash_str});
+        allocator.free(hash_str);
+        try conn.stream.writer().writeAll(response);
+    } else {
+        const response = "{\"jsonrpc\":\"2.0\",\"error\":\"Unknown method\",\"id\":1}";
+        try conn.stream.writer().writeAll(response);
+    }
+}
+
 //--------------------------------------
 // ブロックJSONパース (簡易実装例)
 //--------------------------------------
