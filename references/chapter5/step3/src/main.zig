@@ -264,6 +264,29 @@ fn createBlock(input: []const u8, prevBlock: Block) Block {
 }
 
 //------------------------------------------------------------------------------
+// mempoolからブロック生成（RPC用）
+//------------------------------------------------------------------------------
+fn createBlockFromMempool(prevBlock: Block, mempool: *std.ArrayList(Transaction), allocator: std.mem.Allocator) !Block {
+    var new_block = Block{
+        .index = prevBlock.index + 1,
+        .timestamp = @intCast(std.time.timestamp()),
+        .prev_hash = prevBlock.hash,
+        .transactions = std.ArrayList(Transaction).init(allocator),
+        .nonce = 0,
+        .data = "Mined via RPC",
+        .hash = [_]u8{0} ** 32,
+    };
+    // mempool内の全取引をコピー
+    for (mempool.items) |tx| {
+        try new_block.transactions.append(tx);
+    }
+    mineBlock(&new_block, DIFFICULTY);
+    // mempoolクリア（全取引をブロックに取り込んだため）
+    mempool.clear();
+    return new_block;
+}
+
+//------------------------------------------------------------------------------
 // ブロック送信
 //------------------------------------------------------------------------------
 fn sendBlock(block: Block, remote_addr: std.net.Address) !void {
