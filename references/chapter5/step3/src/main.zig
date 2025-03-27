@@ -266,11 +266,11 @@ fn createBlock(input: []const u8, prevBlock: Block) Block {
 //------------------------------------------------------------------------------
 // mempoolからブロック生成（RPC用）
 //------------------------------------------------------------------------------
-fn createBlockFromMempool(prevBlock: Block, mempool: *std.ArrayList(Transaction), allocator: std.mem.Allocator) !Block {
+fn createBlockFromMempool(prevBlock: *Block, mempool: *std.ArrayList(Transaction), allocator: std.mem.Allocator) !Block {
     var new_block = Block{
-        .index = prevBlock.index + 1,
+        .index = prevBlock.*.index + 1,
         .timestamp = @intCast(std.time.timestamp()),
-        .prev_hash = prevBlock.hash,
+        .prev_hash = prevBlock.*.hash,
         .transactions = std.ArrayList(Transaction).init(allocator),
         .nonce = 0,
         .data = "Mined via RPC",
@@ -282,7 +282,7 @@ fn createBlockFromMempool(prevBlock: Block, mempool: *std.ArrayList(Transaction)
     }
     mineBlock(&new_block, DIFFICULTY);
     // mempoolクリア（全取引をブロックに取り込んだため）
-    mempool.clear();
+    mempool.*.items = mempool.*.items[0..0];
     return new_block;
 }
 
@@ -450,11 +450,11 @@ fn rpcHandler(conn: std.net.Server.Connection, mempool: *std.ArrayList(Transacti
         const response = "{\"jsonrpc\":\"2.0\",\"result\":\"Transaction added\",\"id\":1}";
         try conn.stream.writer().writeAll(response);
     } else if (std.mem.eql(u8, method, "mine")) {
-        var new_block = try createBlockFromMempool(*lastBlock, mempool, allocator);
+        var new_block = try createBlockFromMempool(lastBlock, mempool, allocator);
         chain_store.append(new_block) catch {};
         lastBlock.* = new_block;
         const hash_str = try hexEncode(new_block.hash[0..], allocator);
-        const response = try std.fmt.allocPrintZ(allocator, "{\"jsonrpc\":\"2.0\",\"result\":\"Block mined: %s\",\"id\":1}", .{hash_str});
+        const response = try std.fmt.allocPrintZ(allocator, "{{\"jsonrpc\":\"2.0\",\"result\":\"Block mined: {s}\",\"id\":1}}", .{hash_str});
         allocator.free(hash_str);
         try conn.stream.writer().writeAll(response);
     } else {
@@ -466,7 +466,6 @@ fn rpcHandler(conn: std.net.Server.Connection, mempool: *std.ArrayList(Transacti
 //--------------------------------------
 // ブロックJSONパース (簡易実装例)
 //--------------------------------------
-
 /// hexDecode: 16進文字列をバイナリへ (返り値: 実際に変換できたバイト数)
 fn hexDecode(src: []const u8, dst: *[256]u8) !usize {
     if (src.len % 2 != 0) return ChainError.InvalidHexLength;
@@ -674,10 +673,9 @@ fn parseBlockJson(json_slice: []const u8) !Block {
     return b;
 }
 
-//
-// --------------- クライアント側処理 ---------------
-// クライアントはユーザー入力から新規ブロックを生成し、採掘後にサーバーへ送信します。
-//
+//------------------------------------------------------------------------------
+// クライアント送信用スレッド (P2P用)
+//------------------------------------------------------------------------------
 fn clientSendLoop(peer: Peer, lastBlock: *Block) !void {
     var stdin = std.io.getStdIn();
     var reader = stdin.reader();
@@ -691,18 +689,13 @@ fn clientSendLoop(peer: Peer, lastBlock: *Block) !void {
         mineBlock(&new_block, DIFFICULTY);
         var writer = peer.stream.writer();
         const block_json = serializeBlock(new_block) catch unreachable;
-        // 必要なサイズのバッファを用意して "BLOCK:" と block_json を連結する
         const prefix = "BLOCK:";
         const prefix_len = prefix.len;
         var buf = try std.heap.page_allocator.alloc(u8, prefix_len + block_json.len + 1);
         defer std.heap.page_allocator.free(buf);
-
-        // "BLOCK:" をコピー。buf[0..prefix_len] は長さ prefix_len のスライス
         @memcpy(buf[0..prefix_len].ptr, prefix);
-        // block_json をコピー。buf[prefix_len .. prefix_len + block_json.len] は block_json.len バイトのスライス
         @memcpy(buf[prefix_len .. prefix_len + block_json.len].ptr, block_json);
         buf[prefix_len + block_json.len] = '\n';
-
         try writer.writeAll(buf);
         lastBlock.* = new_block;
     }
@@ -739,12 +732,11 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
     if (args.len < 3) {
-        std.log.info("Usage:\n {s} --listen <port>\n or\n {s} --connect <host:port>\n", .{ args[0], args[0] });
+        std.log.info("Usage:\n {s} --listen <port>\n or\n {s} --connect <host:port>\n or\n {s} --rpcListen <port>\n", .{ args[0], args[0], args[0] });
         return;
     }
     const mode = args[1];
     if (std.mem.eql(u8, mode, "--listen")) {
-        // サーバーモード
         const port_str = args[2];
         const port_num = try std.fmt.parseInt(u16, port_str, 10);
         var address = try std.net.Address.resolveIp("0.0.0.0", port_num);
@@ -756,7 +748,6 @@ pub fn main() !void {
             _ = try std.Thread.spawn(.{}, ConnHandler.run, .{conn});
         }
     } else if (std.mem.eql(u8, mode, "--connect")) {
-        // クライアントモード
         const hostport = args[2];
         var tokenizer = std.mem.tokenizeScalar(u8, hostport, ':');
         const host_str = tokenizer.next() orelse {
@@ -797,6 +788,21 @@ pub fn main() !void {
             } else {
                 std.log.info("Unknown msg: {s}", .{msg_slice});
             }
+        }
+    } else if (std.mem.eql(u8, mode, "--rpcListen")) {
+        const port_str = args[2];
+        const port_num = try std.fmt.parseInt(u16, port_str, 10);
+        var address = try std.net.Address.resolveIp("0.0.0.0", port_num);
+        var listener = try address.listen(.{});
+        defer listener.deinit();
+        std.log.info("RPC Listening on 0.0.0.0:{d}", .{port_num});
+        // Initialize mempool for RPC
+        var mempool = std.ArrayList(Transaction).init(gpa);
+        // Initialize lastBlock for RPC from genesis block
+        var lastBlock = try createTestGenesisBlock(gpa);
+        while (true) {
+            const conn = try listener.accept();
+            _ = try std.Thread.spawn(.{}, rpcHandler, .{ conn, &mempool, &lastBlock });
         }
     } else {
         std.log.err("Invalid mode: {s}", .{mode});
