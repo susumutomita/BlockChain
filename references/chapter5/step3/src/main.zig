@@ -234,12 +234,12 @@ fn serializeTransactions(transactions: std.ArrayList(Transaction), allocator: st
     try list.appendSlice("]");
     return list.toOwnedSlice();
 }
-
 fn serializeBlock(block: Block) ![]const u8 {
     const allocator = std.heap.page_allocator;
     const hash_str = hexEncode(block.hash[0..], allocator) catch unreachable;
     const prev_hash_str = hexEncode(block.prev_hash[0..], allocator) catch unreachable;
     const tx_str = try serializeTransactions(block.transactions, allocator);
+    // JSON全体を出力するため、外側の中括弧をダブルにする
     const json = try std.fmt.allocPrintZ(allocator, "{{\"index\":{d},\"timestamp\":{d},\"nonce\":{d},\"data\":\"{s}\",\"prev_hash\":\"{s}\",\"hash\":\"{s}\",\"transactions\":{s}}}", .{ block.index, block.timestamp, block.nonce, block.data, prev_hash_str, hash_str, tx_str });
     allocator.free(hash_str);
     allocator.free(prev_hash_str);
@@ -946,4 +946,19 @@ test "ブロック改ざん検出テスト" {
 
     // 改ざん前後のハッシュが異なることを期待
     try std.testing.expect(!std.mem.eql(u8, originalHash[0..], tamperedHash[0..]));
+}
+
+test "json parse with strings" {
+    const User = struct { name: []u8, age: u16 };
+    const allocator = std.testing.allocator;
+
+    const parsed = try std.json.parseFromSlice(User, allocator,
+        \\{ "name": "Joe", "age": 25 }
+    , .{});
+    defer parsed.deinit();
+
+    const user = parsed.value;
+
+    try std.testing.expect(std.mem.eql(u8, user.name, "Joe"));
+    try std.testing.expect(user.age == 25);
 }
