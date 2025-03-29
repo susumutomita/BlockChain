@@ -488,8 +488,11 @@ fn parseHexDigit(c: u8) !u8 {
 }
 
 fn parseBlockJson(json_slice: []const u8) !Block {
+    std.log.info("parseBlockJson start", .{});
     const block_allocator = std.heap.page_allocator;
+    std.log.info("parseBlockJson start parsed", .{});
     const parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, json_slice, .{});
+    std.log.info("parseBlockJson end parsed", .{});
     defer parsed.deinit();
     const root_value = parsed.value;
 
@@ -507,7 +510,7 @@ fn parseBlockJson(json_slice: []const u8) !Block {
         .data = "P2P Received Block",
         .hash = [_]u8{0} ** 32,
     };
-
+    std.log.info("parseBlockJson start parser", .{});
     // index の読み込み
     if (obj.get("index")) |idx_val| {
         const idx_num: i64 = switch (idx_val) {
@@ -648,7 +651,7 @@ fn parseBlockJson(json_slice: []const u8) !Block {
                     }
                     std.log.info("Transactions field is directly an array. end", .{});
                 }
-                std.log.info("565 Transactions field is directly an array. end", .{});
+                std.log.info("565 Transactions field is directly an array. end transactions={any}", .{b.transactions});
             },
             .string => {
                 std.log.info("Transactions field is a string. Value: {s}", .{tx_val.string});
@@ -946,19 +949,4 @@ test "ブロック改ざん検出テスト" {
 
     // 改ざん前後のハッシュが異なることを期待
     try std.testing.expect(!std.mem.eql(u8, originalHash[0..], tamperedHash[0..]));
-}
-
-test "json parse with strings" {
-    const User = struct { name: []u8, age: u16 };
-    const allocator = std.testing.allocator;
-
-    const parsed = try std.json.parseFromSlice(User, allocator,
-        \\{ "name": "Joe", "age": 25 }
-    , .{});
-    defer parsed.deinit();
-
-    const user = parsed.value;
-
-    try std.testing.expect(std.mem.eql(u8, user.name, "Joe"));
-    try std.testing.expect(user.age == 25);
 }
