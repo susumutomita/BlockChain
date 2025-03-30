@@ -6,3 +6,4 @@ build-*/
 docgen_tmp/
 
 .DS_Store
+.vscode/
