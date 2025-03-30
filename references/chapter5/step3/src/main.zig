@@ -488,11 +488,11 @@ fn parseHexDigit(c: u8) !u8 {
 }
 
 fn parseBlockJson(json_slice: []const u8) !Block {
-    std.log.info("parseBlockJson start", .{});
+    std.log.debug("parseBlockJson start", .{});
     const block_allocator = std.heap.page_allocator;
-    std.log.info("parseBlockJson start parsed", .{});
+    std.log.debug("parseBlockJson start parsed", .{});
     const parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, json_slice, .{});
-    std.log.info("parseBlockJson end parsed", .{});
+    std.log.debug("parseBlockJson end parsed", .{});
     defer parsed.deinit();
     const root_value = parsed.value;
 
@@ -510,7 +510,7 @@ fn parseBlockJson(json_slice: []const u8) !Block {
         .data = "P2P Received Block",
         .hash = [_]u8{0} ** 32,
     };
-    std.log.info("parseBlockJson start parser", .{});
+    std.log.debug("parseBlockJson start parser", .{});
     // index の読み込み
     if (obj.get("index")) |idx_val| {
         const idx_num: i64 = switch (idx_val) {
@@ -587,13 +587,13 @@ fn parseBlockJson(json_slice: []const u8) !Block {
             .string => data_val.string,
             else => return error.InvalidFormat,
         };
-        b.data = data_str;
+        b.data = try block_allocator.dupe(u8, data_str);
     }
 
     if (obj.get("transactions")) |tx_val| {
         switch (tx_val) {
             .array => {
-                std.log.info("Transactions field is directly an array. {any}", .{tx_val});
+                std.log.debug("Transactions field is directly an array. ", .{});
                 const tx_items = tx_val.array.items;
                 if (tx_items.len > 0) {
                     std.log.info("tx_items.len = {d}", .{tx_items.len});
@@ -649,9 +649,9 @@ fn parseBlockJson(json_slice: []const u8) !Block {
                             .amount = amount,
                         });
                     }
-                    std.log.info("Transactions field is directly an array. end", .{});
+                    std.log.debug("Transactions field is directly an array. end", .{});
                 }
-                std.log.info("565 Transactions field is directly an array. end transactions={any}", .{b.transactions});
+                std.log.debug("Transactions field is directly an array. end transactions={any}", .{b.transactions});
             },
             .string => {
                 std.log.info("Transactions field is a string. Value: {s}", .{tx_val.string});
@@ -671,8 +671,8 @@ fn parseBlockJson(json_slice: []const u8) !Block {
             else => return error.InvalidFormat,
         }
     }
-    std.log.info("Block info: index={d}, timestamp={d}, prev_hash={any}, transactions={any} nonce={d}, data={s}, hash={any} ", .{ b.index, b.timestamp, b.prev_hash, b.transactions, b.nonce, b.data, b.hash });
-    std.log.info("parseBlockJson end", .{});
+    std.log.debug("Block info: index={d}, timestamp={d}, prev_hash={any}, transactions={any} nonce={d}, data={s}, hash={any} ", .{ b.index, b.timestamp, b.prev_hash, b.transactions, b.nonce, b.data, b.hash });
+    std.log.debug("parseBlockJson end", .{});
     return b;
 }
 
