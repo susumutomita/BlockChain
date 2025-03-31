@@ -1,6 +1,13 @@
 const std = @import("std");
 const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
+const DIFFICULTY: u8 = 2;
+
+pub const ChainError = error{
+    InvalidHexLength,
+    InvalidHexChar,
+    InvalidFormat,
+};
 
 //------------------------------------------------------------------------------
 // デバッグ出力関連
@@ -131,6 +138,7 @@ fn calculateHash(block: *const Block) [32]u8 {
     const nonce_bytes = toBytesU64(block.nonce);
     debugLog("nonce bytes: ", .{});
     if (comptime debug_logging) {
+        std.log.info("[Received] {x:0>2}", .{nonce_bytes});
         for (nonce_bytes) |byte| {
             std.debug.print("{x:0>2},", .{byte});
         }
@@ -187,6 +195,110 @@ fn mineBlock(block: *Block, difficulty: u8) void {
     }
 }
 
+//------------------------------------------------------------------------------
+// ブロックのシリアライズ（JSON形式の簡易実装）
+//------------------------------------------------------------------------------
+fn hexEncode(slice: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    // 2文字×バイト数 + null終端不要なら省略
+    var buf = try allocator.alloc(u8, slice.len * 2);
+    var j: usize = 0;
+    for (slice) |byte| {
+        const high = byte >> 4;
+        const low = byte & 0x0F;
+        buf[j] = if (high < 10) '0' + high else 'a' + (high - 10);
+        j += 1;
+        buf[j] = if (low < 10) '0' + low else 'a' + (low - 10);
+        j += 1;
+    }
+    return buf;
+}
+
+fn serializeTransactions(transactions: std.ArrayList(Transaction), allocator: std.mem.Allocator) ![]const u8 {
+    if (transactions.items.len == 0) {
+        return allocator.dupe(u8, "[]");
+    }
+
+    var list = std.ArrayList(u8).init(allocator);
+    errdefer list.deinit();
+    try list.appendSlice("[");
+
+    for (transactions.items, 0..) |tx, i| {
+        if (i > 0) {
+            try list.appendSlice(",");
+        }
+        const tx_json = try std.fmt.allocPrintZ(allocator, "{{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d}}}", .{ tx.sender, tx.receiver, tx.amount });
+        defer allocator.free(tx_json);
+        try list.appendSlice(tx_json);
+    }
+
+    try list.appendSlice("]");
+    return list.toOwnedSlice();
+}
+fn serializeBlock(block: Block) ![]const u8 {
+    const allocator = std.heap.page_allocator;
+    const hash_str = hexEncode(block.hash[0..], allocator) catch unreachable;
+    const prev_hash_str = hexEncode(block.prev_hash[0..], allocator) catch unreachable;
+    const tx_str = try serializeTransactions(block.transactions, allocator);
+    // JSON全体を出力するため、外側の中括弧をダブルにする
+    const json = try std.fmt.allocPrintZ(allocator, "{{\"index\":{d},\"timestamp\":{d},\"nonce\":{d},\"data\":\"{s}\",\"prev_hash\":\"{s}\",\"hash\":\"{s}\",\"transactions\":{s}}}", .{ block.index, block.timestamp, block.nonce, block.data, prev_hash_str, hash_str, tx_str });
+    allocator.free(hash_str);
+    allocator.free(prev_hash_str);
+    allocator.free(tx_str);
+    return json;
+}
+
+//------------------------------------------------------------------------------
+// ブロック生成（メッセージから）
+//------------------------------------------------------------------------------
+fn createBlock(input: []const u8, prevBlock: Block) Block {
+    // 前ブロックの hash を prev_hash に設定し、index を 1 増やす
+    return Block{
+        .index = prevBlock.index + 1,
+        .timestamp = @intCast(std.time.timestamp()),
+        .prev_hash = prevBlock.hash,
+        .transactions = std.ArrayList(Transaction).init(std.heap.page_allocator),
+        .nonce = 0,
+        .data = input,
+        .hash = [_]u8{0} ** 32,
+    };
+}
+
+//------------------------------------------------------------------------------
+// mempoolからブロック生成（RPC用）
+//------------------------------------------------------------------------------
+fn createBlockFromMempool(prevBlock: *Block, mempool: *std.ArrayList(Transaction), allocator: std.mem.Allocator) !Block {
+    var new_block = Block{
+        .index = prevBlock.*.index + 1,
+        .timestamp = @intCast(std.time.timestamp()),
+        .prev_hash = prevBlock.*.hash,
+        .transactions = std.ArrayList(Transaction).init(allocator),
+        .nonce = 0,
+        .data = "Mined via RPC",
+        .hash = [_]u8{0} ** 32,
+    };
+    // mempool内の全取引をコピー
+    for (mempool.items) |tx| {
+        try new_block.transactions.append(tx);
+    }
+    mineBlock(&new_block, DIFFICULTY);
+    // mempoolクリア（全取引をブロックに取り込んだため）
+    mempool.*.items = mempool.*.items[0..0];
+    return new_block;
+}
+
+//------------------------------------------------------------------------------
+// ブロック送信
+//------------------------------------------------------------------------------
+fn sendBlock(block: Block, remote_addr: std.net.Address) !void {
+    const json_data = serializeBlock(block) catch |err| {
+        std.debug.print("Serialize error: {any}\n", .{err});
+        return err;
+    };
+    var socket = try std.net.tcpConnectToAddress(remote_addr);
+    var writer = socket.writer();
+    try writer.writeAll("BLOCK:" ++ json_data);
+}
+
 //--------------------------------------
 // P2P用ピア構造体
 //--------------------------------------
@@ -200,10 +312,24 @@ const Peer = struct {
 //--------------------------------------
 var chain_store = std.ArrayList(Block).init(std.heap.page_allocator);
 
+fn verifyBlockPow(b: *const Block) bool {
+    // 1) `calculateHash(b)` → meetsDifficulty
+    const recalculated = calculateHash(b);
+    if (!std.mem.eql(u8, recalculated[0..], b.hash[0..])) {
+        return false; // hashフィールドと再計算が一致しない
+    }
+    if (!meetsDifficulty(recalculated, DIFFICULTY)) {
+        return false; // PoWが難易度を満たしていない
+    }
+    return true;
+}
+
 // addBlock: 受け取ったブロックをチェインに追加（本当は検証なども入れる）
 fn addBlock(new_block: Block) void {
-    // ここでは単純に末尾へ追加
-    // (実際は既存チェインと整合性をとるための検証/フォーク処理などが必要)
+    if (!verifyBlockPow(&new_block)) {
+        std.log.err("Received block fails PoW check. Rejecting it.", .{});
+        return;
+    }
     chain_store.append(new_block) catch {};
     std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
 }
@@ -217,30 +343,30 @@ const ConnHandler = struct {
         std.log.info("Accepted: {any}", .{conn.address});
 
         var reader = conn.stream.reader();
-        var buf: [256]u8 = undefined;
+        var line_buffer: [1024]u8 = undefined; // 充分なサイズのバッファを確保
 
         while (true) {
-            const n = try reader.read(&buf);
-            if (n == 0) {
+            // 改行文字まで読み込む（改行は含まれる）
+            const maybe_line = try reader.readUntilDelimiterOrEof(line_buffer[0..], '\n');
+            if (maybe_line == null) {
                 std.log.info("Peer {any} disconnected.", .{conn.address});
                 break;
             }
-            const msg_slice = buf[0..n];
-            std.log.info("[Received] {s}", .{msg_slice});
+            // 改行文字を取り除く（必要なら）
+            const line = maybe_line.?;
+            const msg = std.mem.trim(u8, line, "\n");
+            std.log.info("[Received complete message] {s}", .{msg});
 
-            // 簡易メッセージ解析
-            if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
-                // "BLOCK:" の後ろを取り出してJSONパースする
-                const json_part = msg_slice[6..];
+            if (std.mem.startsWith(u8, msg, "BLOCK:")) {
+                // "BLOCK:" の後ろの部分を JSON としてパース
+                const json_part = msg[6..];
                 const new_block = parseBlockJson(json_part) catch |err| {
                     std.log.err("Failed parseBlockJson: {any}", .{err});
                     continue;
                 };
-                // チェインに追加
                 addBlock(new_block);
             } else {
-                // それ以外はログだけ
-                std.log.info("Unknown message: {s}", .{msg_slice});
+                std.log.info("Unknown message: {s}", .{msg});
             }
         }
     }
@@ -272,43 +398,333 @@ const SendHandler = struct {
     }
 };
 
+//------------------------------------------------------------------------------
+// RPCハンドラ (JSON-RPCでトランザクションとマイニングを処理)
+//------------------------------------------------------------------------------
+fn rpcHandler(conn: std.net.Server.Connection, mempool: *std.ArrayList(Transaction), lastBlock: *Block) !void {
+    defer conn.stream.close();
+    var reader = conn.stream.reader();
+    var buf: [1024]u8 = undefined;
+    const maybe_line = try reader.readUntilDelimiterOrEof(buf[0..], '\n');
+    if (maybe_line == null) return;
+    const req_line = std.mem.trim(u8, maybe_line.?, "\n");
+    const allocator = std.heap.page_allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, req_line, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+    const obj = switch (root) {
+        .object => |o| o,
+        else => return ChainError.InvalidFormat,
+    };
+    const method_val = obj.get("method") orelse return ChainError.InvalidFormat;
+    const method = switch (method_val) {
+        .string => method_val.string,
+        else => return ChainError.InvalidFormat,
+    };
+    if (std.mem.eql(u8, method, "sendTransaction")) {
+        const params_val = obj.get("params") orelse return ChainError.InvalidFormat;
+        const params = switch (params_val) {
+            .array => params_val.array.items,
+            else => return ChainError.InvalidFormat,
+        };
+        if (params.len != 3) return ChainError.InvalidFormat;
+        const sender = switch (params[0]) {
+            .string => params[0].string,
+            else => return ChainError.InvalidFormat,
+        };
+        const receiver = switch (params[1]) {
+            .string => params[1].string,
+            else => return ChainError.InvalidFormat,
+        };
+        const amount = switch (params[2]) {
+            .integer => params[2].integer,
+            .float => @as(i64, @intFromFloat(params[2].float)),
+            else => return ChainError.InvalidFormat,
+        };
+        const tx = Transaction{
+            .sender = sender,
+            .receiver = receiver,
+            .amount = @intCast(amount),
+        };
+        try mempool.append(tx);
+        const response = "{\"jsonrpc\":\"2.0\",\"result\":\"Transaction added\",\"id\":1}";
+        try conn.stream.writer().writeAll(response);
+    } else if (std.mem.eql(u8, method, "mine")) {
+        var new_block = try createBlockFromMempool(lastBlock, mempool, allocator);
+        chain_store.append(new_block) catch {};
+        lastBlock.* = new_block;
+        const hash_str = try hexEncode(new_block.hash[0..], allocator);
+        const response = try std.fmt.allocPrintZ(allocator, "{{\"jsonrpc\":\"2.0\",\"result\":\"Block mined: {s}\",\"id\":1}}", .{hash_str});
+        allocator.free(hash_str);
+        try conn.stream.writer().writeAll(response);
+    } else {
+        const response = "{\"jsonrpc\":\"2.0\",\"error\":\"Unknown method\",\"id\":1}";
+        try conn.stream.writer().writeAll(response);
+    }
+}
+
 //--------------------------------------
 // ブロックJSONパース (簡易実装例)
 //--------------------------------------
+/// hexDecode: 16進文字列をバイナリへ (返り値: 実際に変換できたバイト数)
+fn hexDecode(src: []const u8, dst: *[256]u8) !usize {
+    if (src.len % 2 != 0) return ChainError.InvalidHexLength;
+    var i: usize = 0;
+    while (i < src.len) : (i += 2) {
+        const hi = parseHexDigit(src[i]) catch return ChainError.InvalidHexChar;
+        const lo = parseHexDigit(src[i + 1]) catch return ChainError.InvalidHexChar;
+        dst[i / 2] = (hi << 4) | lo;
+    }
+    return src.len / 2;
+}
+
+fn parseHexDigit(c: u8) !u8 {
+    switch (c) {
+        '0'...'9' => return c - '0',
+        'a'...'f' => return 10 + (c - 'a'),
+        'A'...'F' => return 10 + (c - 'A'),
+        else => return error.InvalidHexChar,
+    }
+}
+
 fn parseBlockJson(json_slice: []const u8) !Block {
-    // 本格的な JSON デコードは std.json を使いますが、
-    // ここではデモ用に「index,nonce,hash」しか取り出さない簡易版にしています。
-    // 実際には transactions や prev_hash などもしっかりパースしてください。
-
-    // 例： "{"index":0,"timestamp":1672531200,"nonce":42,...}"
-    // 実装例では適当なパースや固定値で作成しているだけです
-    // 学習目的であればここを工夫してみましょう。
-
-    // ダミーで new_block を返す
+    std.log.debug("parseBlockJson start", .{});
     const block_allocator = std.heap.page_allocator;
-    var new_block = Block{
-        .index = 9999999,
-        .timestamp = @intCast(std.time.timestamp()),
+    std.log.debug("parseBlockJson start parsed", .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, json_slice, .{});
+    std.log.debug("parseBlockJson end parsed", .{});
+    defer parsed.deinit();
+    const root_value = parsed.value;
+
+    const obj = switch (root_value) {
+        .object => |o| o,
+        else => return ChainError.InvalidFormat,
+    };
+
+    var b = Block{
+        .index = 0,
+        .timestamp = 0,
         .prev_hash = [_]u8{0} ** 32,
         .transactions = std.ArrayList(Transaction).init(block_allocator),
         .nonce = 0,
-        .data = "Received Block",
+        .data = "P2P Received Block",
         .hash = [_]u8{0} ** 32,
     };
-
-    // TODO: ちゃんとした JSON 解析で fill するのが本来の処理
-    // ここでは簡易的に index=2, nonce=555 などの例
-    // (実際にはregexや std.json を使って取り出す)
-    if (std.mem.containsAtLeast(u8, json_slice, 1, "nonce")) {
-        new_block.nonce = 555;
+    std.log.debug("parseBlockJson start parser", .{});
+    // index の読み込み
+    if (obj.get("index")) |idx_val| {
+        const idx_num: i64 = switch (idx_val) {
+            .integer => idx_val.integer,
+            .float => @as(i64, @intFromFloat(idx_val.float)),
+            else => return error.InvalidFormat,
+        };
+        if (idx_num < 0 or idx_num > @as(i64, std.math.maxInt(u32))) {
+            return error.InvalidFormat;
+        }
+        b.index = @intCast(idx_num);
     }
-    if (std.mem.containsAtLeast(u8, json_slice, 1, "index")) {
-        new_block.index = 2;
-    }
-    // 受信後にハッシュも再計算(実際には送られてきた hash と比較したりもする)
-    new_block.hash = calculateHash(&new_block);
 
-    return new_block;
+    // timestamp の読み込み
+    if (obj.get("timestamp")) |ts_val| {
+        const ts_num: i64 = switch (ts_val) {
+            .integer => if (ts_val.integer < 0) return error.InvalidFormat else ts_val.integer,
+            .float => @intFromFloat(ts_val.float),
+            else => return error.InvalidFormat,
+        };
+        b.timestamp = @intCast(ts_num);
+    }
+
+    // nonce の読み込み
+    if (obj.get("nonce")) |nonce_val| {
+        const nonce_num: i64 = switch (nonce_val) {
+            .integer => nonce_val.integer,
+            .float => @intFromFloat(nonce_val.float),
+            else => return error.InvalidFormat,
+        };
+        if (nonce_num < 0 or nonce_num > @as(f64, std.math.maxInt(u64))) {
+            return error.InvalidFormat;
+        }
+        b.nonce = @intCast(nonce_num);
+    }
+
+    // prev_hash の読み込み（追加）
+    if (obj.get("prev_hash")) |ph_val| {
+        const ph_str = switch (ph_val) {
+            .string => ph_val.string,
+            else => return error.InvalidFormat,
+        };
+        var ph_buf: [256]u8 = undefined;
+        const ph_len = try hexDecode(ph_str, &ph_buf);
+        if (ph_len != 32) return error.InvalidFormat;
+        var tmp_ph: [32]u8 = undefined;
+        var i: usize = 0;
+        while (i < 32) : (i += 1) {
+            tmp_ph[i] = ph_buf[i];
+        }
+        b.prev_hash = tmp_ph;
+    }
+
+    // hash の読み込み
+    if (obj.get("hash")) |hash_val| {
+        const hash_str = switch (hash_val) {
+            .string => hash_val.string,
+            else => return error.InvalidFormat,
+        };
+        var long_buf: [256]u8 = undefined;
+        const actual_len = try hexDecode(hash_str, &long_buf);
+        if (actual_len != 32) return error.InvalidFormat;
+        var tmp_hash: [32]u8 = undefined;
+        var i: usize = 0;
+        while (i < 32) : (i += 1) {
+            tmp_hash[i] = long_buf[i];
+        }
+        b.hash = tmp_hash;
+    }
+
+    // 5) data の読み込み（追加）
+    if (obj.get("data")) |data_val| {
+        const data_str = switch (data_val) {
+            .string => data_val.string,
+            else => return error.InvalidFormat,
+        };
+        b.data = try block_allocator.dupe(u8, data_str);
+    }
+
+    if (obj.get("transactions")) |tx_val| {
+        switch (tx_val) {
+            .array => {
+                std.log.debug("Transactions field is directly an array. ", .{});
+                const tx_items = tx_val.array.items;
+                if (tx_items.len > 0) {
+                    std.log.info("tx_items.len = {d}", .{tx_items.len});
+                    for (tx_items, 0..tx_items.len) |elem, idx| {
+                        std.log.info("Processing transaction element {d}", .{idx});
+                        const tx_obj = switch (elem) {
+                            .object => |o| o,
+                            else => {
+                                std.log.err("Transaction element {d} is not an object.", .{idx});
+                                return error.InvalidFormat;
+                            },
+                        };
+
+                        const sender = switch (tx_obj.get("sender") orelse {
+                            std.log.err("Transaction element {d}: missing 'sender' field.", .{idx});
+                            return error.InvalidFormat;
+                        }) {
+                            .string => |s| s,
+                            else => {
+                                std.log.err("Transaction element {d}: 'sender' field is not a string.", .{idx});
+                                return error.InvalidFormat;
+                            },
+                        };
+                        const sender_copy = try block_allocator.dupe(u8, sender);
+
+                        const receiver = switch (tx_obj.get("receiver") orelse {
+                            std.log.err("Transaction element {d}: missing 'receiver' field.", .{idx});
+                            return error.InvalidFormat;
+                        }) {
+                            .string => |s| s,
+                            else => {
+                                std.log.err("Transaction element {d}: 'receiver' field is not a string.", .{idx});
+                                return error.InvalidFormat;
+                            },
+                        };
+                        const receiver_copy = try block_allocator.dupe(u8, receiver);
+
+                        const amount: u64 = switch (tx_obj.get("amount") orelse {
+                            std.log.err("Transaction element {d}: missing 'amount' field.", .{idx});
+                            return error.InvalidFormat;
+                        }) {
+                            .integer => |val| if (val < 0) return error.InvalidFormat else @intCast(val),
+                            .float => |val| if (val < 0) return error.InvalidFormat else @intFromFloat(val),
+                            else => {
+                                std.log.err("Transaction element {d}: 'amount' field is neither integer nor float.", .{idx});
+                                return error.InvalidFormat;
+                            },
+                        };
+                        std.log.info("Transaction element {d}: Parsed amount = {d}", .{ idx, amount });
+                        try b.transactions.append(Transaction{
+                            .sender = sender_copy,
+                            .receiver = receiver_copy,
+                            .amount = amount,
+                        });
+                    }
+                    std.log.debug("Transactions field is directly an array. end", .{});
+                }
+                std.log.debug("Transactions field is directly an array. end transactions={any}", .{b.transactions});
+            },
+            .string => {
+                std.log.info("Transactions field is a string. Value: {s}", .{tx_val.string});
+                const tx_parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, tx_val.string, .{});
+                defer tx_parsed.deinit();
+                switch (tx_parsed.value) {
+                    .array => {
+                        const tx_items = tx_parsed.value.array.items;
+                        if (tx_items.len > 0) {
+                            // 未実装：文字列からパースした配列の処理
+                            return error.InvalidFormat;
+                        }
+                    },
+                    else => return error.InvalidFormat,
+                }
+            },
+            else => return error.InvalidFormat,
+        }
+    }
+    std.log.debug("Block info: index={d}, timestamp={d}, prev_hash={any}, transactions={any} nonce={d}, data={s}, hash={any} ", .{ b.index, b.timestamp, b.prev_hash, b.transactions, b.nonce, b.data, b.hash });
+    std.log.debug("parseBlockJson end", .{});
+    return b;
+}
+
+//------------------------------------------------------------------------------
+// クライアント送信用スレッド (P2P用)
+//------------------------------------------------------------------------------
+fn clientSendLoop(peer: Peer, lastBlock: *Block) !void {
+    var stdin = std.io.getStdIn();
+    var reader = stdin.reader();
+    var line_buffer: [1024]u8 = undefined;
+    while (true) {
+        std.debug.print("Enter message for new block: ", .{});
+        const maybe_line = try reader.readUntilDelimiterOrEof(line_buffer[0..], '\n');
+        if (maybe_line == null) break;
+        const user_input = maybe_line.?;
+        var new_block = createBlock(user_input, lastBlock.*);
+        mineBlock(&new_block, DIFFICULTY);
+        var writer = peer.stream.writer();
+        const block_json = serializeBlock(new_block) catch unreachable;
+        const prefix = "BLOCK:";
+        const prefix_len = prefix.len;
+        var buf = try std.heap.page_allocator.alloc(u8, prefix_len + block_json.len + 1);
+        defer std.heap.page_allocator.free(buf);
+        @memcpy(buf[0..prefix_len].ptr, prefix);
+        @memcpy(buf[prefix_len .. prefix_len + block_json.len].ptr, block_json);
+        buf[prefix_len + block_json.len] = '\n';
+        try writer.writeAll(buf);
+        lastBlock.* = new_block;
+    }
+}
+
+const ClientHandler = struct {
+    fn run(peer: Peer) !void {
+        // クライアントはローカルに Genesis ブロックを保持（本来はサーバーから同期する）
+        var lastBlock = try createTestGenesisBlock(std.heap.page_allocator);
+        clientSendLoop(peer, &lastBlock) catch unreachable;
+    }
+};
+
+fn createTestGenesisBlock(allocator: std.mem.Allocator) !Block {
+    var genesis = Block{
+        .index = 0,
+        .timestamp = 1672531200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = std.ArrayList(Transaction).init(allocator),
+        .nonce = 0,
+        .data = "Hello, Zig Blockchain!",
+        .hash = [_]u8{0} ** 32,
+    };
+    genesis.transactions.append(Transaction{ .sender = "Alice", .receiver = "Bob", .amount = 100 }) catch {};
+    mineBlock(&genesis, DIFFICULTY);
+    return genesis;
 }
 
 //--------------------------------------
@@ -316,59 +732,25 @@ fn parseBlockJson(json_slice: []const u8) !Block {
 //--------------------------------------
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
-    const args = std.process.argsAlloc(gpa) catch |err| {
-        std.log.err("arg parse fail: {any}", .{err});
-        return;
-    };
+    const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
-
     if (args.len < 3) {
-        std.log.info("Usage:\n {s} --listen <port>\n or\n {s} --connect <host:port>\n", .{ args[0], args[0] });
+        std.log.info("Usage:\n {s} --listen <port>\n or\n {s} --connect <host:port>\n or\n {s} --rpcListen <port>\n", .{ args[0], args[0], args[0] });
         return;
     }
-
-    // -----------------------
-    // 事前にジェネシスブロックを作って chain_store に追加
-    // -----------------------
-    var genesis = Block{
-        .index = 0,
-        .timestamp = 1672531200,
-        .prev_hash = [_]u8{0} ** 32,
-        .transactions = std.ArrayList(Transaction).init(std.heap.page_allocator),
-        .nonce = 0,
-        .data = "Hello, Zig Blockchain!",
-        .hash = [_]u8{0} ** 32,
-    };
-    // 例として1つトランザクションを追加
-    genesis.transactions.append(Transaction{ .sender = "Alice", .receiver = "Bob", .amount = 100 }) catch {};
-    // 採掘して追加
-    mineBlock(&genesis, 1);
-    chain_store.append(genesis) catch {};
-    std.log.info("Initialized chain with genesis block index=0", .{});
-
     const mode = args[1];
     if (std.mem.eql(u8, mode, "--listen")) {
-        //-----------------------------
-        // サーバーモード
-        //-----------------------------
         const port_str = args[2];
-        const port_num = std.fmt.parseInt(u16, port_str, 10) catch {
-            std.log.err("Invalid port: {s}", .{port_str});
-            return;
-        };
+        const port_num = try std.fmt.parseInt(u16, port_str, 10);
         var address = try std.net.Address.resolveIp("0.0.0.0", port_num);
         var listener = try address.listen(.{});
         defer listener.deinit();
-
         std.log.info("Listening on 0.0.0.0:{d}", .{port_num});
         while (true) {
             const conn = try listener.accept();
             _ = try std.Thread.spawn(.{}, ConnHandler.run, .{conn});
         }
     } else if (std.mem.eql(u8, mode, "--connect")) {
-        //-----------------------------
-        // クライアントモード
-        //-----------------------------
         const hostport = args[2];
         var tokenizer = std.mem.tokenizeScalar(u8, hostport, ':');
         const host_str = tokenizer.next() orelse {
@@ -383,19 +765,15 @@ pub fn main() !void {
             std.log.err("Too many ':' in {s}", .{hostport});
             return;
         }
-        const port_num = std.fmt.parseInt(u16, port_str, 10) catch {
-            std.log.err("Invalid port: {s}", .{port_str});
-            return;
-        };
+        const port_num = try std.fmt.parseInt(u16, port_str, 10);
         std.log.info("Connecting to {s}:{d}...", .{ host_str, port_num });
-
         const remote_addr = try std.net.Address.resolveIp(host_str, port_num);
         var socket = try std.net.tcpConnectToAddress(remote_addr);
-        // クライアントでは送信専用スレッドを起動
-        const peer = Peer{ .address = remote_addr, .stream = socket };
-        _ = try std.Thread.spawn(.{}, SendHandler.run, .{peer});
-
-        // メインスレッドで受信
+        const peer = Peer{
+            .address = remote_addr,
+            .stream = socket,
+        };
+        _ = try std.Thread.spawn(.{}, ClientHandler.run, .{peer});
         var reader = socket.reader();
         var buf: [256]u8 = undefined;
         while (true) {
@@ -406,17 +784,28 @@ pub fn main() !void {
             }
             const msg_slice = buf[0..n];
             std.log.info("[Recv] {s}", .{msg_slice});
-
             if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
                 const json_part = msg_slice[6..];
-                const new_block = parseBlockJson(json_part) catch |err| {
-                    std.log.err("parseBlockJson err: {any}", .{err});
-                    continue;
-                };
+                const new_block = try parseBlockJson(json_part);
                 addBlock(new_block);
             } else {
                 std.log.info("Unknown msg: {s}", .{msg_slice});
             }
+        }
+    } else if (std.mem.eql(u8, mode, "--rpcListen")) {
+        const port_str = args[2];
+        const port_num = try std.fmt.parseInt(u16, port_str, 10);
+        var address = try std.net.Address.resolveIp("0.0.0.0", port_num);
+        var listener = try address.listen(.{});
+        defer listener.deinit();
+        std.log.info("RPC Listening on 0.0.0.0:{d}", .{port_num});
+        // Initialize mempool for RPC
+        var mempool = std.ArrayList(Transaction).init(gpa);
+        // Initialize lastBlock for RPC from genesis block
+        var lastBlock = try createTestGenesisBlock(gpa);
+        while (true) {
+            const conn = try listener.accept();
+            _ = try std.Thread.spawn(.{}, rpcHandler, .{ conn, &mempool, &lastBlock });
         }
     } else {
         std.log.err("Invalid mode: {s}", .{mode});
