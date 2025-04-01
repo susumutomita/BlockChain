@@ -245,3 +245,16 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
 
     return b;
 }
+
+test "parseBlockJson: ブロック全体をパース" {
+    const block_json_text = "{\"index\": 10,\n\"timestamp\": 1672531201,\n\"nonce\": 42,\n\"prev_hash\": \"00000000000000000000000000000000000000000000000000000000000000ff\",\n\"hash\": \"00000000000000000000000000000000000000000000000000000000000000aa\",\n\"data\": \"Sample Block\",\n\"transactions\": [\n  { \"sender\": \"Alice\", \"receiver\": \"Bob\", \"amount\": 100 }\n]}";
+
+    const block = try parseBlockJson(block_json_text);
+    defer block.transactions.deinit();
+    try std.testing.expectEqual(@as(u32, 10), block.index);
+    try std.testing.expectEqual(@as(u64, 1672531201), block.timestamp);
+    try std.testing.expectEqual(@as(u64, 42), block.nonce);
+    try std.testing.expectEqualStrings("Sample Block", block.data);
+    try std.testing.expectEqual(@as(usize, 1), block.transactions.items.len);
+    try std.testing.expectEqualStrings("Alice", block.transactions.items[0].sender);
+}
