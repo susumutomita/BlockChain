@@ -1,3 +1,12 @@
+<!-- textlint-enable ja-technical-writing/sentence-length -->
+![GitHub last commit (by committer)](https://img.shields.io/github/last-commit/susumutomita/BlockChain)
+![GitHub top language](https://img.shields.io/github/languages/top/susumutomita/BlockChain)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/susumutomita/BlockChain)
+![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/susumutomita/BlockChain)
+![GitHub repo size](https://img.shields.io/github/repo-size/susumutomita/BlockChain)
+[![Zig CI](https://github.com/susumutomita/BlockChain/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/susumutomita/BlockChain/actions/workflows/ci.yml)
+<!-- textlint-enable ja-technical-writing/sentence-length -->
+
 # Zig Simple Blockchain
 
 シンプルなブロックチェーンの Zig 言語による実装です。
