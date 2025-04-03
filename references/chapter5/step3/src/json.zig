@@ -258,3 +258,54 @@ test "parseBlockJson: ブロック全体をパース" {
     try std.testing.expectEqual(@as(usize, 1), block.transactions.items.len);
     try std.testing.expectEqualStrings("Alice", block.transactions.items[0].sender);
 }
+
+test "parseBlockJson: フィールド省略 (index, timestampなし) でもエラーにならない" {
+    // Replace triple-quoted string with regular string using \n for newlines
+    const block_json_text =
+        "{\n" ++
+        "  \"data\": \"No index or timestamp\",\n" ++
+        "  \"transactions\": []\n" ++
+        "}\n";
+    const block = try parseBlockJson(block_json_text);
+    defer block.transactions.deinit();
+
+    // index=0, timestamp=0 で初期値のまま
+    try std.testing.expectEqual(@as(u32, 0), block.index);
+    try std.testing.expectEqual(@as(u64, 0), block.timestamp);
+    try std.testing.expectEqualStrings("No index or timestamp", block.data);
+}
+
+test "serializeBlock & parseBlockJson: 相互変換" {
+    const allocator = std.testing.allocator;
+
+    // テスト用のBlockを生成
+    var block = types.Block{
+        .index = 5,
+        .timestamp = 1234567890,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = std.ArrayList(types.Transaction).init(allocator),
+        .nonce = 999,
+        .data = "Hello, Test!",
+        .hash = [_]u8{0xaa} ** 32, // 全て0xaa
+    };
+    defer block.transactions.deinit();
+    // 1トランザクション追加
+    try block.transactions.append(types.Transaction{
+        .sender = "X",
+        .receiver = "Y",
+        .amount = 55,
+    });
+
+    // JSON化
+    const json_text = try serializeBlock(block);
+    // 逆に parseBlockJson して復元
+    const b2 = try parseBlockJson(json_text);
+    defer b2.transactions.deinit();
+
+    // フィールド一致を確認
+    try std.testing.expectEqual(block.index, b2.index);
+    try std.testing.expectEqual(block.timestamp, b2.timestamp);
+    try std.testing.expectEqualStrings(block.data, b2.data);
+    try std.testing.expectEqual(@as(usize, 1), b2.transactions.items.len);
+    try std.testing.expectEqualStrings("X", b2.transactions.items[0].sender);
+}
