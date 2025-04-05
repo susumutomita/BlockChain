@@ -1,4 +1,5 @@
 const std = @import("std");
+const blockchain = @import("blockchain.zig");
 const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
 
@@ -197,55 +198,68 @@ fn mineBlock(block: *Block, difficulty: u8) void {
 // 3. ブロックのハッシュを計算し、指定難易度に到達するまで nonce を探索(採掘)。
 // 4. 最終的なブロック情報を標準出力に表示。
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
-    const stdout = std.io.getStdOut().writer();
-
-    // ジェネシスブロックの初期化
-    var genesis_block = Block{
-        .index = 0,
-        .timestamp = 1672531200, // 例: 2023-01-01 00:00:00 UTC
-        .prev_hash = [_]u8{0} ** 32, // 前ブロックがないので全て 0
-        .transactions = undefined, // 後で初期化するため一旦 undefined
-        .data = "Hello, Zig Blockchain!", // ブロックに付随する任意データ
-        .nonce = 0, // nonce は 0 から開始
-        .hash = [_]u8{0} ** 32, // 初期状態ではハッシュは全0
-    };
-
-    // トランザクションリストの初期化
-    genesis_block.transactions = std.ArrayList(Transaction).init(allocator);
-    defer genesis_block.transactions.deinit();
-
-    // 例として 2 件のトランザクションを追加
-    try genesis_block.transactions.append(Transaction{
-        .sender = "Alice",
-        .receiver = "Bob",
-        .amount = 100,
-    });
-    try genesis_block.transactions.append(Transaction{
-        .sender = "Charlie",
-        .receiver = "Dave",
-        .amount = 50,
-    });
-
-    // ブロックの初期ハッシュを計算
-    genesis_block.hash = calculateHash(&genesis_block);
-    // 難易度 1(先頭1バイトが 0)になるまで nonce を探索する
-    mineBlock(&genesis_block, 1);
-
-    // 結果を標準出力に表示
-    try stdout.print("Block index: {d}\n", .{genesis_block.index});
-    try stdout.print("Timestamp  : {d}\n", .{genesis_block.timestamp});
-    try stdout.print("Nonce      : {d}\n", .{genesis_block.nonce});
-    try stdout.print("Data       : {s}\n", .{genesis_block.data});
-    try stdout.print("Transactions:\n", .{});
-    for (genesis_block.transactions.items) |tx| {
-        try stdout.print("  {s} -> {s} : {d}\n", .{ tx.sender, tx.receiver, tx.amount });
+    const gpa = std.heap.page_allocator;
+    const args = try std.process.argsAlloc(gpa);
+    defer std.process.argsFree(gpa, args);
+    if (args.len < 3) {
+        std.log.info("Usage:\n {s} --listen <port>\n or\n {s} --connect <host:port>\n or\n {s} --rpcListen <port>\n", .{ args[0], args[0], args[0] });
+        return;
     }
-    try stdout.print("Hash       : ", .{});
-    for (genesis_block.hash) |byte| {
-        try stdout.print("{x}", .{byte});
+    const mode = args[1];
+    if (std.mem.eql(u8, mode, "--listen")) {
+        const port_str = args[2];
+        const port_num = try std.fmt.parseInt(u16, port_str, 10);
+        var address = try std.net.Address.resolveIp("0.0.0.0", port_num);
+        var listener = try address.listen(.{});
+        defer listener.deinit();
+        std.log.info("Listening on 0.0.0.0:{d}", .{port_num});
+        while (true) {
+            const conn = try listener.accept();
+            _ = try std.Thread.spawn(.{}, blockchain.ConnHandler.run, .{conn});
+        }
+    } else if (std.mem.eql(u8, mode, "--connect")) {
+        const hostport = args[2];
+        var tokenizer = std.mem.tokenizeScalar(u8, hostport, ':');
+        const host_str = tokenizer.next() orelse {
+            std.log.err("Please specify <host:port>", .{});
+            return;
+        };
+        const port_str = tokenizer.next() orelse {
+            std.log.err("No port after ':'", .{});
+            return;
+        };
+        if (tokenizer.next() != null) {
+            std.log.err("Too many ':' in {s}", .{hostport});
+            return;
+        }
+        const port_num = try std.fmt.parseInt(u16, port_str, 10);
+        std.log.info("Connecting to {s}:{d}...", .{ host_str, port_num });
+        const remote_addr = try std.net.Address.resolveIp(host_str, port_num);
+        var socket = try std.net.tcpConnectToAddress(remote_addr);
+        const peer = blockchain.Peer{
+            .address = remote_addr,
+            .stream = socket,
+        };
+        _ = try std.Thread.spawn(.{}, blockchain.ClientHandler.run, .{peer});
+        var reader = socket.reader();
+        var buf: [256]u8 = undefined;
+        while (true) {
+            const n = try reader.read(&buf);
+            if (n == 0) {
+                std.log.info("Server disconnected.", .{});
+                break;
+            }
+            const msg_slice = buf[0..n];
+            std.log.info("[Recv] {s}", .{msg_slice});
+            if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
+                const json_part = msg_slice[6..];
+                const new_block = try blockchain.parseBlockJson(json_part);
+                blockchain.addBlock(new_block);
+            } else {
+                std.log.info("Unknown msg: {s}", .{msg_slice});
+            }
+        }
     }
-    try stdout.print("\n", .{});
 }
 
 //------------------------------------------------------------------------------
@@ -386,4 +400,3 @@ test "ブロック改ざん検出テスト" {
     // 改ざん前後のハッシュが異なることを期待
     try std.testing.expect(!std.mem.eql(u8, originalHash[0..], tamperedHash[0..]));
 }
-
