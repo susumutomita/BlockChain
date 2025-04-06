@@ -45,7 +45,6 @@ pub fn main() !void {
     // 3. 初期ハッシュを計算
     genesis_block.hash = blockchain.calculateHash(&genesis_block);
     // 4. マイニング(難易度=1)
-    try stdout.print("Start Minig: {d}\n", .{genesis_block.index});
     blockchain.mineBlock(&genesis_block, 1);
 
     // 5. 結果を表示

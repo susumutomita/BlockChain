@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const debug_logging = true;
+pub const debug_logging = false;
 
 /// debugLog:
 /// デバッグログを出力するためのヘルパー関数です。

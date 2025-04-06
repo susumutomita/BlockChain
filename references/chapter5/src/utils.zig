@@ -15,17 +15,17 @@ pub fn debugLog(comptime format: []const u8, args: anytype) void {
 // ヘルパー関数
 //------------------------------------------------------------------------------
 
-fn truncateU32ToU8(x: u32) u8 {
+pub fn truncateU32ToU8(x: u32) u8 {
     if (x > 0xff) @panic("u32 out of u8 range");
     return @truncate(x);
 }
 
-fn truncateU64ToU8(x: u64) u8 {
+pub fn truncateU64ToU8(x: u64) u8 {
     if (x > 0xff) @panic("u64 out of u8 range");
     return @truncate(x);
 }
 
-fn toBytesU32(value: u32) [4]u8 {
+pub fn toBytesU32(value: u32) [4]u8 {
     var buf: [4]u8 = undefined;
     buf[0] = truncateU32ToU8(value & 0xff);
     buf[1] = truncateU32ToU8((value >> 8) & 0xff);
@@ -34,7 +34,7 @@ fn toBytesU32(value: u32) [4]u8 {
     return buf;
 }
 
-fn toBytesU64(value: u64) [8]u8 {
+pub fn toBytesU64(value: u64) [8]u8 {
     var buf: [8]u8 = undefined;
     buf[0] = truncateU64ToU8(value & 0xff);
     buf[1] = truncateU64ToU8((value >> 8) & 0xff);
