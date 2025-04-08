@@ -2,10 +2,20 @@ const std = @import("std");
 const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
 const types = @import("types.zig");
+const logger = @import("logger.zig");
 const utils = @import("utils.zig");
-
-pub const DIFFICULTY: u8 = 2;
+const chainError = @import("errors.zig").ChainError;
+const DIFFICULTY: u8 = 2;
 var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
+
+//------------------------------------------------------------------------------
+// ハッシュ計算とマイニング処理
+//------------------------------------------------------------------------------
+//
+// calculateHash 関数では、ブロック内の各フィールドを連結して
+// SHA-256 のハッシュを計算します。
+// mineBlock 関数は、nonce をインクリメントしながら
+// meetsDifficulty による難易度チェックをパスするハッシュを探します。
 
 /// calculateHash:
 /// 指定されたブロックの各フィールドをバイト列に変換し、
@@ -15,9 +25,8 @@ pub fn calculateHash(block: *const types.Block) [32]u8 {
 
     // nonce の値をバイト列に変換(8バイト)し、デバッグ用に出力
     const nonce_bytes = utils.toBytesU64(block.nonce);
-    utils.debugLog("nonce bytes: ", .{});
-    if (comptime utils.debug_logging) {
-        std.log.info("[Received] {x:0>2}", .{nonce_bytes});
+    logger.debugLog("nonce bytes: ", .{});
+    if (comptime logger.debug_logging) {
         for (nonce_bytes) |byte| {
             std.debug.print("{x:0>2},", .{byte});
         }
@@ -45,7 +54,7 @@ pub fn calculateHash(block: *const types.Block) [32]u8 {
 
     // 最終的なハッシュ値を計算
     const hash = hasher.finalResult();
-    utils.debugLog("nonce: {d}, hash: {x}\n", .{ block.nonce, hash });
+    logger.debugLog("nonce: {d}, hash: {x}\n", .{ block.nonce, hash });
     return hash;
 }
 
@@ -237,11 +246,11 @@ pub fn hexEncode(slice: []const u8, allocator: std.mem.Allocator) ![]const u8 {
 
 /// hexDecode: 16進文字列をバイナリへ (返り値: 実際に変換できたバイト数)
 fn hexDecode(src: []const u8, dst: *[256]u8) !usize {
-    if (src.len % 2 != 0) return types.ChainError.InvalidHexLength;
+    if (src.len % 2 != 0) return chainError.InvalidHexLength;
     var i: usize = 0;
     while (i < src.len) : (i += 2) {
-        const hi = parseHexDigit(src[i]) catch return types.ChainError.InvalidHexChar;
-        const lo = parseHexDigit(src[i + 1]) catch return types.ChainError.InvalidHexChar;
+        const hi = parseHexDigit(src[i]) catch return chainError.InvalidHexChar;
+        const lo = parseHexDigit(src[i + 1]) catch return chainError.InvalidHexChar;
         dst[i / 2] = (hi << 4) | lo;
     }
     return src.len / 2;
@@ -301,7 +310,7 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
 
     const obj = switch (root_value) {
         .object => |o| o,
-        else => return types.ChainError.InvalidFormat,
+        else => return chainError.InvalidFormat,
     };
 
     var b = types.Block{

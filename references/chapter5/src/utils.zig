@@ -1,5 +1,4 @@
 const std = @import("std");
-const ChainError = @import("errors.zig").ChainError;
 
 /// デバッグログフラグ
 pub const debug_logging = false;
