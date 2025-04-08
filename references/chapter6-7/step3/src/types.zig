@@ -1,11 +1,5 @@
 const std = @import("std");
 
-pub const ChainError = error{
-    InvalidHexLength,
-    InvalidHexChar,
-    InvalidFormat,
-};
-
 // Transaction 構造体
 // ブロックチェーン上の「取引」を表現します。
 pub const Transaction = struct {
