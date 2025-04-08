@@ -1,11 +1,10 @@
-// main.zig
-
 const std = @import("std");
 const types = @import("types.zig");
 const blockchain = @import("blockchain.zig");
+const mem = std.testing.allocator;
 
 //------------------------------------------------------------------------------
-// メイン処理およびテスト実行
+// メイン処理
 //------------------------------------------------------------------------------
 //
 // main 関数では、以下の手順を実行しています：
@@ -60,4 +59,61 @@ pub fn main() !void {
         try stdout.print("{x}", .{byte});
     }
     try stdout.print("\n", .{});
+}
+
+//------------------------------------------------------------------------------
+// テスト
+//------------------------------------------------------------------------------
+test "トランザクションの初期化テスト" {
+    const tx = types.Transaction{
+        .sender = "Alice",
+        .receiver = "Bob",
+        .amount = 42,
+    };
+    try std.testing.expectEqualStrings("Alice", tx.sender);
+    try std.testing.expectEqualStrings("Bob", tx.receiver);
+    try std.testing.expectEqual(@as(u64, 42), tx.amount);
+}
+
+test "ブロックにトランザクションを追加" {
+    var block = types.Block{
+        .index = 0,
+        .timestamp = 1234567890,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = std.ArrayList(types.Transaction).init(mem),
+        .nonce = 0,
+        .data = "Test block",
+        .hash = [_]u8{0} ** 32,
+    };
+    defer block.transactions.deinit();
+
+    try block.transactions.append(types.Transaction{
+        .sender = "Taro",
+        .receiver = "Hanako",
+        .amount = 100,
+    });
+    try std.testing.expectEqual(@as(usize, 1), block.transactions.items.len);
+}
+
+test "マイニングが先頭1バイト0のハッシュを生成できる" {
+    var block = types.Block{
+        .index = 0,
+        .timestamp = 1672531200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = std.ArrayList(types.Transaction).init(mem),
+        .nonce = 0,
+        .data = "For Mining test",
+        .hash = [_]u8{0} ** 32,
+    };
+    defer block.transactions.deinit();
+
+    // 適当にトランザクションを追加
+    try block.transactions.append(types.Transaction{ .sender = "A", .receiver = "B", .amount = 100 });
+
+    // 初期ハッシュ
+    block.hash = blockchain.calculateHash(&block);
+
+    // 難易度1(先頭1バイトが0)を満たすまでマイニング
+    blockchain.mineBlock(&block, 1);
+    try std.testing.expectEqual(@as(u8, 0), block.hash[0]);
 }
