@@ -1,5 +1,6 @@
 const std = @import("std");
 const blockchain = @import("blockchain.zig");
+const parser = @import("parser.zig");
 
 //------------------------------------------------------------------------------
 // メイン処理およびテスト実行
@@ -66,7 +67,7 @@ pub fn main() !void {
             std.log.info("[Recv] {s}", .{msg_slice});
             if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
                 const json_part = msg_slice[6..];
-                const new_block = try blockchain.parseBlockJson(json_part);
+                const new_block = try parser.parseBlockJson(json_part);
                 blockchain.addBlock(new_block);
             } else {
                 std.log.info("Unknown msg: {s}", .{msg_slice});
