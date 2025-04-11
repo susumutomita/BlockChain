@@ -108,11 +108,6 @@ pub fn addBlock(new_block: types.Block) void {
     std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
 }
 
-pub const Peer = struct {
-    address: std.net.Address,
-    stream: std.net.Stream,
-};
-
 pub fn sendBlock(block: types.Block, remote_addr: std.net.Address) !void {
     const json_data = parser.serializeBlock(block) catch |err| {
         std.debug.print("Serialize error: {any}\n", .{err});
@@ -194,14 +189,14 @@ pub const ConnHandler = struct {
 // クライアント処理
 //--------------------------------------
 pub const ClientHandler = struct {
-    pub fn run(peer: Peer) !void {
+    pub fn run(peer: types.Peer) !void {
         // クライアントはローカルに Genesis ブロックを保持（本来はサーバーから同期する）
         var lastBlock = try createTestGenesisBlock(std.heap.page_allocator);
         clientSendLoop(peer, &lastBlock) catch unreachable;
     }
 };
 
-fn clientSendLoop(peer: Peer, lastBlock: *types.Block) !void {
+fn clientSendLoop(peer: types.Peer, lastBlock: *types.Block) !void {
     var stdin = std.io.getStdIn();
     var reader = stdin.reader();
     var line_buffer: [256]u8 = undefined;

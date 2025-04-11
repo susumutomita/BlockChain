@@ -1,5 +1,6 @@
 const std = @import("std");
 const blockchain = @import("blockchain.zig");
+const types = @import("types.zig");
 const parser = @import("parser.zig");
 
 //------------------------------------------------------------------------------
@@ -50,7 +51,7 @@ pub fn main() !void {
         std.log.info("Connecting to {s}:{d}...", .{ host_str, port_num });
         const remote_addr = try std.net.Address.resolveIp(host_str, port_num);
         var socket = try std.net.tcpConnectToAddress(remote_addr);
-        const peer = blockchain.Peer{
+        const peer = types.Peer{
             .address = remote_addr,
             .stream = socket,
         };
