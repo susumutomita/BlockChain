@@ -156,12 +156,17 @@ pub const ConnHandler = struct {
         std.log.info("Accepted: {any}", .{conn.address});
 
         var reader = conn.stream.reader();
-        var buf: [256]u8 = undefined;
+        var buf: [1024]u8 = undefined;
 
         while (true) {
             const n = try reader.read(&buf);
             if (n == 0) {
                 std.log.info("Peer {any} disconnected.", .{conn.address});
+                // 外部でピアリストが利用可能な場合は切断を通知する
+                if (@hasDecl(@import("main"), "peer_list")) {
+                    const main = @import("main");
+                    main.peer_list.markDisconnected(conn.address);
+                }
                 break;
             }
             const msg_slice = buf[0..n];
@@ -177,6 +182,12 @@ pub const ConnHandler = struct {
                 };
                 // チェインに追加
                 addBlock(new_block);
+                
+                // メッセージを他のピアに伝播（外部のピアリストが利用可能な場合）
+                if (@hasDecl(@import("main"), "broadcastMessage")) {
+                    const main = @import("main");
+                    _ = main.broadcastMessage(msg_slice, std.heap.page_allocator) catch {};
+                }
             } else {
                 // それ以外はログだけ
                 std.log.info("Unknown message: {s}", .{msg_slice});
@@ -192,7 +203,42 @@ pub const ClientHandler = struct {
     pub fn run(peer: types.Peer) !void {
         // クライアントはローカルに Genesis ブロックを保持（本来はサーバーから同期する）
         var lastBlock = try createTestGenesisBlock(std.heap.page_allocator);
-        clientSendLoop(peer, &lastBlock) catch unreachable;
+        
+        // ブロック送信ループはバックグラウンドで実行
+        const thread = try std.Thread.spawn(.{}, clientSendLoop, .{ peer, &lastBlock });
+        _ = thread;
+        
+        // メインスレッドでは受信処理
+        var reader = peer.stream.reader();
+        var buf: [1024]u8 = undefined;
+        
+        while (true) {
+            const n = reader.read(&buf) catch |err| {
+                std.log.err("Error reading from peer {any}: {any}", .{ peer.address, err });
+                break;
+            };
+            
+            if (n == 0) {
+                std.log.info("Peer {any} disconnected", .{peer.address});
+                break;
+            }
+            
+            const msg_slice = buf[0..n];
+            std.log.info("Received from peer {any}: {s}", .{ peer.address, msg_slice });
+            
+            // メッセージ解析
+            if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
+                const json_part = msg_slice[6..];
+                const new_block = parser.parseBlockJson(json_part) catch |err| {
+                    std.log.err("Failed to parse block from peer {any}: {any}", .{ peer.address, err });
+                    continue;
+                };
+                
+                // ブロックチェーンに追加
+                addBlock(new_block);
+                lastBlock.* = new_block;
+            }
+        }
     }
 };
 
