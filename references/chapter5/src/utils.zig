@@ -1,15 +1,5 @@
 const std = @import("std");
 
-/// デバッグログフラグ
-pub const debug_logging = false;
-
-/// デバッグログ
-pub fn debugLog(comptime format: []const u8, args: anytype) void {
-    if (comptime debug_logging) {
-        std.debug.print(format, args);
-    }
-}
-
 //------------------------------------------------------------------------------
 // ヘルパー関数
 //------------------------------------------------------------------------------
