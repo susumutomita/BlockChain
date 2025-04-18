@@ -16,63 +16,62 @@ pub fn main() !void {
     const gpa = std.heap.page_allocator;
     const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
-    if (args.len < 3) {
-        std.log.info("Usage:\n {s} --listen <port>\n or\n {s} --connect <host:port>\n or\n {s} --rpcListen <port>\n", .{ args[0], args[0], args[0] });
+
+    // 引数: <port> [peer1] [peer2] ...
+    if (args.len < 2) {
+        std.log.err("Usage: {s} <port> [host:port]...", .{args[0]});
         return;
     }
-    const mode = args[1];
-    if (std.mem.eql(u8, mode, "--listen")) {
-        const port_str = args[2];
-        const port_num = try std.fmt.parseInt(u16, port_str, 10);
-        var address = try std.net.Address.resolveIp("0.0.0.0", port_num);
-        var listener = try address.listen(.{});
-        defer listener.deinit();
-        std.log.info("Listening on 0.0.0.0:{d}", .{port_num});
-        while (true) {
-            const conn = try listener.accept();
-            _ = try std.Thread.spawn(.{}, blockchain.ConnHandler.run, .{conn});
-        }
-    } else if (std.mem.eql(u8, mode, "--connect")) {
-        const hostport = args[2];
-        var tokenizer = std.mem.tokenizeScalar(u8, hostport, ':');
-        const host_str = tokenizer.next() orelse {
-            std.log.err("Please specify <host:port>", .{});
-            return;
-        };
-        const port_str = tokenizer.next() orelse {
-            std.log.err("No port after ':'", .{});
-            return;
-        };
-        if (tokenizer.next() != null) {
-            std.log.err("Too many ':' in {s}", .{hostport});
-            return;
-        }
-        const port_num = try std.fmt.parseInt(u16, port_str, 10);
-        std.log.info("Connecting to {s}:{d}...", .{ host_str, port_num });
-        const remote_addr = try std.net.Address.resolveIp(host_str, port_num);
-        var socket = try std.net.tcpConnectToAddress(remote_addr);
-        const peer = types.Peer{
-            .address = remote_addr,
-            .stream = socket,
-        };
-        _ = try std.Thread.spawn(.{}, blockchain.ClientHandler.run, .{peer});
-        var reader = socket.reader();
-        var buf: [256]u8 = undefined;
-        while (true) {
-            const n = try reader.read(&buf);
-            if (n == 0) {
-                std.log.info("Server disconnected.", .{});
-                break;
-            }
-            const msg_slice = buf[0..n];
-            std.log.info("[Recv] {s}", .{msg_slice});
-            if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
-                const json_part = msg_slice[6..];
-                const new_block = try parser.parseBlockJson(json_part);
-                blockchain.addBlock(new_block);
-            } else {
-                std.log.info("Unknown msg: {s}", .{msg_slice});
-            }
-        }
+
+    const self_port = try std.fmt.parseInt(u16, args[1], 10);
+    const known_peers = args[2..]; // [][]u8
+
+    // ----- リスナー起動 -----
+    var addr = try std.net.Address.resolveIp("0.0.0.0", self_port);
+    var listener = try addr.listen(.{});
+    _ = try std.Thread.spawn(.{}, listenLoop, .{&listener});
+    std.log.info("Listening on 0.0.0.0:{d}", .{self_port});
+
+    for (known_peers) |peer_str| {
+        const peer_addr = try resolveHostPort(peer_str);
+        _ = try std.Thread.spawn(.{}, connectToPeer, .{peer_addr});
     }
+
+    runMiningConsoleLoop();
+}
+
+/// Accept incoming connections and spawn peer handlers.
+/// TODO: replace stub with real implementation.
+fn listenLoop(listener: *std.net.Server) !void {
+    defer listener.deinit();
+    while (true) {
+        const conn = try listener.accept();
+        // For now, just close the socket to prove compilation.
+        conn.stream.close();
+    }
+}
+
+/// Dial to a remote peer and start the peer loop.
+/// TODO: implement real peer communication.
+fn connectToPeer(addr: std.net.Address) !void {
+    var sock = try std.net.tcpConnectToAddress(addr);
+    defer sock.close();
+    // Placeholder: immediately return after connecting.
+}
+
+/// Parse "host:port" into std.net.Address.
+/// Very small helper for early compilation.
+fn resolveHostPort(spec: []const u8) !std.net.Address {
+    var it = std.mem.tokenizeScalar(u8, spec, ':');
+    const host = it.next() orelse return error.InvalidFormat;
+    const port_str = it.next() orelse return error.InvalidFormat;
+    const port = try std.fmt.parseInt(u16, port_str, 10);
+    return std.net.Address.resolveIp(host, port);
+}
+
+/// Placeholder for the interactive mining loop.
+/// TODO: implement actual user‑input mining logic.
+fn runMiningConsoleLoop() void {
+    // At this stage we only need a no‑op to satisfy the linker.
+    // Insert real code later.
 }
