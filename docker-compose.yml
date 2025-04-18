@@ -7,6 +7,7 @@ services:
       - "3001:3000"
     environment:
       - NODE_ID=1
+    command: /app/zig-out/bin/BlockChain --listen 3000
   node2:
     build: .
     platform: linux/amd64
@@ -15,6 +16,7 @@ services:
       - "3002:3000"
     environment:
       - NODE_ID=2
+    command: /app/zig-out/bin/BlockChain --connect node1:3000
   node3:
     build: .
     platform: linux/amd64
@@ -23,3 +25,4 @@ services:
       - "3003:3000"
     environment:
       - NODE_ID=3
+    command: /app/zig-out/bin/BlockChain --connect node1:3000
