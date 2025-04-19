@@ -7,8 +7,8 @@ const utils = @import("utils.zig");
 const chainError = @import("errors.zig").ChainError;
 const parser = @import("parser.zig");
 const DIFFICULTY: u8 = 2;
-var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
-var peer_list = std.ArrayList(types.Peer).init(std.heap.page_allocator);
+pub var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
+pub var peer_list = std.ArrayList(types.Peer).init(std.heap.page_allocator);
 
 //------------------------------------------------------------------------------
 // ハッシュ計算とマイニング処理
