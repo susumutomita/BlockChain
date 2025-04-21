@@ -7,8 +7,9 @@ const utils = @import("utils.zig");
 const chainError = @import("errors.zig").ChainError;
 const parser = @import("parser.zig");
 const DIFFICULTY: u8 = 2;
+
+/// ブロックチェーンのメインデータストア
 pub var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
-pub var peer_list = std.ArrayList(types.Peer).init(std.heap.page_allocator);
 
 //------------------------------------------------------------------------------
 // ハッシュ計算とマイニング処理
@@ -99,7 +100,7 @@ pub fn verifyBlockPow(b: *const types.Block) bool {
     return true;
 }
 
-// addBlock: 受け取ったブロックをチェインに追加（検証付き）
+/// addBlock: 受け取ったブロックをチェインに追加（検証付き）
 pub fn addBlock(new_block: types.Block) void {
     if (!verifyBlockPow(&new_block)) {
         std.log.err("Received block fails PoW check. Rejecting it.", .{});
@@ -107,28 +108,6 @@ pub fn addBlock(new_block: types.Block) void {
     }
     chain_store.append(new_block) catch {};
     std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
-}
-
-/// 接続 writer にチェーン全体を送信
-fn sendFullChain(writer: anytype) !void {
-    for (chain_store.items) |blk| {
-        const json = try parser.serializeBlock(blk);
-        try writer.writeAll("BLOCK:");
-        try writer.writeAll(json);
-        try writer.writeAll("\n"); // Add newline for message framing
-    }
-}
-
-pub fn sendBlock(block: types.Block, remote_addr: std.net.Address) !void {
-    const json_data = parser.serializeBlock(block) catch |err| {
-        std.debug.print("Serialize error: {any}\n", .{err});
-        return err;
-    };
-    var socket = try std.net.tcpConnectToAddress(remote_addr);
-    var writer = socket.writer();
-    try writer.writeAll("BLOCK:");
-    try writer.writeAll(json_data);
-    try writer.writeAll("\n");
 }
 
 /// createBlock: 新しいブロックを生成
@@ -160,88 +139,47 @@ pub fn createTestGenesisBlock(allocator: std.mem.Allocator) !types.Block {
     return genesis;
 }
 
-//--------------------------------------
-// メッセージ受信処理: ConnHandler
-//--------------------------------------
-pub const ConnHandler = struct {
-    pub fn run(conn: std.net.Server.Connection) !void {
-        defer conn.stream.close();
-        std.log.info("Accepted: {any}", .{conn.address});
+/// ブロックチェーンの同期処理
+/// 別のノードから複数ブロックを受け取った場合の同期処理
+pub fn syncChain(blocks: []types.Block) !void {
+    if (blocks.len == 0) return;
 
-        var reader = conn.stream.reader();
-        var buf: [256]u8 = undefined;
+    // 受信したチェーンが自身より長い場合のみ同期
+    if (blocks.len > chain_store.items.len) {
+        // 自身のチェーンをクリア
+        chain_store.clearRetainingCapacity();
 
-        while (true) {
-            const n = try reader.read(&buf);
-            if (n == 0) {
-                std.log.info("Peer {any} disconnected.", .{conn.address});
-                break;
-            }
-            const msg_slice = buf[0..n];
-            std.log.info("[Received] {s}", .{msg_slice});
-
-            // 簡易メッセージ解析
-            if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
-                // "BLOCK:" の後ろを取り出してJSONパースする
-                const json_part = msg_slice[6..];
-                const new_block = parser.parseBlockJson(json_part) catch |err| {
-                    std.log.err("Failed parseBlockJson: {any}", .{err});
-                    continue;
-                };
-                // チェインに追加
-                addBlock(new_block);
-            } else if (std.mem.startsWith(u8, msg_slice, "GET_CHAIN")) {
-                const w = conn.stream.writer();
-                try sendFullChain(w);
-                std.log.info("Sent full chain (height={d}) to {any}", .{ chain_store.items.len, conn.address });
-            } else {
-                // それ以外はログだけ
-                std.log.info("Unknown message: {s}", .{msg_slice});
-            }
+        // 新しいチェーンをコピー
+        for (blocks) |block| {
+            try chain_store.append(block);
         }
-    }
-};
 
-//--------------------------------------
-// クライアント処理
-//--------------------------------------
-pub const ClientHandler = struct {
-    pub fn run(peer: types.Peer) !void {
-        // クライアントはローカルに Genesis ブロックを保持（本来はサーバーから同期する）
-        var lastBlock = try createTestGenesisBlock(std.heap.page_allocator);
-        clientSendLoop(peer, &lastBlock) catch unreachable;
-    }
-};
-
-fn clientSendLoop(peer: types.Peer, lastBlock: *types.Block) !void {
-    var stdin = std.io.getStdIn();
-    var reader = stdin.reader();
-    var line_buffer: [256]u8 = undefined;
-    while (true) {
-        std.debug.print("Enter message for new block: ", .{});
-        const maybe_line = try reader.readUntilDelimiterOrEof(line_buffer[0..], '\n');
-        if (maybe_line == null) break;
-        const user_input = maybe_line.?;
-        var new_block = createBlock(user_input, lastBlock.*);
-        mineBlock(&new_block, DIFFICULTY);
-        var writer = peer.stream.writer();
-        const block_json = parser.serializeBlock(new_block) catch unreachable;
-        // 必要なサイズのバッファを用意して "BLOCK:" と block_json を連結する
-        var buf = try std.heap.page_allocator.alloc(u8, "BLOCK:".len + block_json.len);
-        defer std.heap.page_allocator.free(buf);
-
-        // バッファに連結
-        @memcpy(buf[0.."BLOCK:".len], "BLOCK:");
-        @memcpy(buf["BLOCK:".len..], block_json);
-
-        // 1回の書き出しで送信
-        try writer.writeAll(buf);
-        lastBlock.* = new_block;
+        std.log.info("Chain synchronized with {d} blocks", .{blocks.len});
+    } else {
+        std.log.info("Received chain ({d} blocks) is not longer than current chain ({d} blocks)", .{ blocks.len, chain_store.items.len });
     }
 }
 
-pub fn requestChain(addr: std.net.Address) !void {
-    var s = try std.net.tcpConnectToAddress(addr);
-    defer s.close();
-    try s.writer().writeAll("GET_CHAIN\n");
+/// 現在のチェーン高さを取得
+pub fn getChainHeight() usize {
+    return chain_store.items.len;
+}
+
+/// 指定インデックスのブロックを取得
+pub fn getBlock(index: usize) ?types.Block {
+    if (index >= chain_store.items.len) return null;
+    return chain_store.items[index];
+}
+
+/// チェーンの現在の状態を表示（デバッグ用）
+pub fn printChainState() void {
+    std.log.info("Current chain state:", .{});
+    std.log.info("- Height: {d} blocks", .{chain_store.items.len});
+
+    if (chain_store.items.len > 0) {
+        const latest = chain_store.items[chain_store.items.len - 1];
+        std.log.info("- Latest block: index={d}, hash={x}", .{ latest.index, latest.hash });
+    } else {
+        std.log.info("- No blocks in chain", .{});
+    }
 }
