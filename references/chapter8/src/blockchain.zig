@@ -109,6 +109,16 @@ pub fn addBlock(new_block: types.Block) void {
     std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
 }
 
+/// 接続 writer にチェーン全体を送信
+fn sendFullChain(writer: anytype) !void {
+    for (chain_store.items) |blk| {
+        const json = try parser.serializeBlock(blk);
+        try writer.writeAll("BLOCK:");
+        try writer.writeAll(json);
+        try writer.writeAll("\n"); // Add newline for message framing
+    }
+}
+
 pub fn sendBlock(block: types.Block, remote_addr: std.net.Address) !void {
     const json_data = parser.serializeBlock(block) catch |err| {
         std.debug.print("Serialize error: {any}\n", .{err});
@@ -116,7 +126,9 @@ pub fn sendBlock(block: types.Block, remote_addr: std.net.Address) !void {
     };
     var socket = try std.net.tcpConnectToAddress(remote_addr);
     var writer = socket.writer();
-    try writer.writeAll("BLOCK:" ++ json_data);
+    try writer.writeAll("BLOCK:");
+    try writer.writeAll(json_data);
+    try writer.writeAll("\n");
 }
 
 /// createBlock: 新しいブロックを生成
@@ -178,6 +190,10 @@ pub const ConnHandler = struct {
                 };
                 // チェインに追加
                 addBlock(new_block);
+            } else if (std.mem.startsWith(u8, msg_slice, "GET_CHAIN")) {
+                const w = conn.stream.writer();
+                try sendFullChain(w);
+                std.log.info("Sent full chain (height={d}) to {any}", .{ chain_store.items.len, conn.address });
             } else {
                 // それ以外はログだけ
                 std.log.info("Unknown message: {s}", .{msg_slice});
@@ -222,4 +238,10 @@ fn clientSendLoop(peer: types.Peer, lastBlock: *types.Block) !void {
         try writer.writeAll(buf);
         lastBlock.* = new_block;
     }
+}
+
+pub fn requestChain(addr: std.net.Address) !void {
+    var s = try std.net.tcpConnectToAddress(addr);
+    defer s.close();
+    try s.writer().writeAll("GET_CHAIN\n");
 }
