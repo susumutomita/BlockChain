@@ -28,6 +28,9 @@ pub fn main() !void {
         _ = try std.Thread.spawn(.{}, dialLoop, .{peer_addr});
     }
 
+    // Add text input thread for interactive block creation
+    _ = try std.Thread.spawn(.{}, textInputLoop, .{});
+
     // main スレッドを維持
     while (true) std.time.sleep(60 * std.time.ns_per_s); // ★ 0.14 は ns_per_s を使う  [oai_citation_attribution:1‡Welcome | zig.guide](https://zig.guide/standard-library/threads/)
 }
@@ -74,43 +77,100 @@ fn peerLoop(peer: types.Peer) !void {
     }
 
     var reader = peer.stream.reader();
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;  // Increased buffer size
+    var total_bytes: usize = 0;
 
     while (true) {
-        const n = try reader.read(&buf);
-        if (n == 0) break;
+        const n = try reader.read(buf[total_bytes..]);
+        if (n == 0) break;  // Connection closed
 
-        const msg = buf[0..n];
+        total_bytes += n;
+        var search_start: usize = 0;
 
-        if (std.mem.startsWith(u8, msg, "BLOCK:")) {
-            const blk = try parser.parseBlockJson(msg[6..]);
-            blockchain.addBlock(blk);
-            broadcastBlock(blk, peer);
-        } else if (std.mem.startsWith(u8, msg, "GET_CHAIN")) {
-            try sendChain(peer);
+        // Process all complete messages in the buffer
+        while (search_start < total_bytes) {
+            // Look for newline as message terminator
+            var newline_pos: ?usize = null;
+            var i: usize = search_start;
+            while (i < total_bytes) : (i += 1) {
+                if (buf[i] == '\n') {
+                    newline_pos = i;
+                    break;
+                }
+            }
+
+            // If we found a complete message
+            if (newline_pos) |pos| {
+                const msg = buf[search_start..pos];
+
+                // Process the message
+                if (std.mem.startsWith(u8, msg, "BLOCK:")) {
+                    const blk = parser.parseBlockJson(msg[6..]) catch |err| {
+                        std.log.err("Parse error: {any}", .{err});
+                        search_start = pos + 1;
+                        continue;
+                    };
+                    blockchain.addBlock(blk);
+                    broadcastBlock(blk, peer);
+                } else if (std.mem.startsWith(u8, msg, "GET_CHAIN")) {
+                    std.log.info("Received GET_CHAIN from {any}", .{peer.address});
+                    try sendChain(peer);
+                } else {
+                    std.log.info("Unknown message: {s}", .{msg});
+                }
+
+                search_start = pos + 1;
+            } else {
+                // We don't have a complete message yet
+                break;
+            }
+        }
+
+        // Compact the buffer if we've processed some messages
+        if (search_start > 0) {
+            if (search_start < total_bytes) {
+                // Move remaining partial data to the beginning of buffer
+                std.mem.copyForwards(u8, &buf, buf[search_start..total_bytes]);
+            }
+            total_bytes -= search_start;
+        }
+
+        // Buffer is full but no complete message - error condition
+        if (total_bytes == buf.len) {
+            std.log.err("Message too long, buffer full", .{});
+            break;
         }
     }
+
+    std.log.info("Peer {any} disconnected.", .{peer.address});
 }
 
 // ── broadcast ----------
-fn broadcastBlock(blk: types.Block, from: types.Peer) void {
+fn broadcastBlock(blk: types.Block, from: ?types.Peer) void {
     const payload = parser.serializeBlock(blk) catch return;
     for (blockchain.peer_list.items) |p| {
-        // ★ getPort() で比較
-        if (p.address.getPort() == from.address.getPort()) continue;
+        // Skip the sender peer if it exists
+        if (from) |sender| {
+            if (p.address.getPort() == sender.address.getPort()) continue;
+        }
+
         var w = p.stream.writer();
         _ = w.writeAll("BLOCK:") catch {}; // ★ 別 write
         _ = w.writeAll(payload) catch {};
+        _ = w.writeAll("\n") catch {}; // Add newline for message framing
     }
 }
 
 // ── chain sync ----------
 fn sendChain(peer: types.Peer) !void {
+    std.log.info("Sending full chain (height={d}) to {any}",
+                 .{ blockchain.chain_store.items.len, peer.address });
     var w = peer.stream.writer();
     for (blockchain.chain_store.items) |b| {
         const j = try parser.serializeBlock(b);
         try w.writeAll("BLOCK:"); // ★
         try w.writeAll(j); // ★
+        try w.writeAll("\n"); // Add newline for message framing
     }
 }
 
@@ -122,5 +182,25 @@ fn removePeer(target: types.Peer) void {
             _ = blockchain.peer_list.orderedRemove(i);
             break;
         }
+    }
+}
+
+fn textInputLoop() !void {
+    var r = std.io.getStdIn().reader();
+    var buf: [256]u8 = undefined;
+    while (true) {
+        std.debug.print("msg> ", .{});
+        const maybe = r.readUntilDelimiterOrEof(buf[0..], '\n') catch null;
+        if (maybe) |line| {
+            const last = if (blockchain.chain_store.items.len == 0)
+                try blockchain.createTestGenesisBlock(std.heap.page_allocator)
+            else
+                blockchain.chain_store.items[blockchain.chain_store.items.len - 1];
+
+            var blk = blockchain.createBlock(line, last);
+            blockchain.mineBlock(&blk, 2);
+            blockchain.addBlock(blk);
+            broadcastBlock(blk, null);
+        } else break;
     }
 }
