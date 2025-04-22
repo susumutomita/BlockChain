@@ -61,8 +61,19 @@ pub fn calculateHash(block: *const types.Block) [32]u8 {
     return hash;
 }
 
+//------------------------------------------------------------------------------
+// マイニング処理
+//------------------------------------------------------------------------------
 /// meetsDifficulty:
-/// ハッシュ値の先頭 'difficulty' バイトがすべて 0 であれば true を返す。
+/// 指定されたハッシュが、指定された難易度を満たしているかどうかを判定する関数。
+/// 具体的には、ハッシュの最初の `difficulty` バイトがすべて 0 であるかをチェックします。
+/// ただし、`difficulty` が 32 を超える場合は 32 に丸めます。
+/// 例: `difficulty` が 2 の場合、最初の 2 バイトが 0 であれば true を返します。
+/// 例: `difficulty` が 5 の場合、最初の 5 バイトが 0 であれば true を返します。
+/// 例: `difficulty` が 32 の場合、最初の 32 バイトが 0 であれば true を返します。
+/// 例: `difficulty` が 33 の場合、最初の 32 バイトが 0 であれば true を返します。
+/// 例: `difficulty` が 0 の場合、最初の 0 バイトが 0 であれば true を返します。
+/// 例: `difficulty` が 1 の場合、最初の 1 バイトが 0 であれば true を返します。
 pub fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
     // difficulty が 32 を超える場合は 32 に丸める
     const limit = if (difficulty <= 32) difficulty else 32;
@@ -72,9 +83,16 @@ pub fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
     return true;
 }
 
+//------------------------------------------------------------------------------
+// マイニング処理
+//------------------------------------------------------------------------------
 /// mineBlock:
-/// 指定された難易度を満たすハッシュが得られるまで、
-/// nonce の値を増やしながらハッシュ計算を繰り返す関数。
+/// 指定されたブロックに対して、指定された難易度を満たすハッシュを見つけるための
+/// マイニング処理を行う関数。
+/// nonce をインクリメントしながら、ハッシュを計算し続けます。
+/// meetsDifficulty を満たすハッシュが見つかったら、そのハッシュをブロックに設定します。
+/// 例: 難易度が 2 の場合、最初の 2 バイトが 0 であれば true を返します。
+/// 例: 難易度が 5 の場合、最初の 5 バイトが 0 であれば true を返します。
 pub fn mineBlock(block: *types.Block, difficulty: u8) void {
     while (true) {
         const new_hash = calculateHash(block);
@@ -182,4 +200,231 @@ pub fn printChainState() void {
     } else {
         std.log.info("- No blocks in chain", .{});
     }
+}
+
+//------------------------------------------------------------------------------
+// テスト関数
+//------------------------------------------------------------------------------
+
+test "calculateHash produces consistent result" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // テスト用のブロックを作成
+    var block = types.Block{
+        .index = 1,
+        .timestamp = 1672531200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = std.ArrayList(types.Transaction).init(allocator),
+        .nonce = 12345,
+        .data = "Test Block",
+        .hash = [_]u8{0} ** 32,
+    };
+    defer block.transactions.deinit();
+
+    try block.transactions.append(types.Transaction{ .sender = "TestSender", .receiver = "TestReceiver", .amount = 50 });
+
+    // 同じ入力で複数回ハッシュ計算を実行
+    const hash1 = calculateHash(&block);
+    const hash2 = calculateHash(&block);
+
+    // 同じ入力からは同じハッシュが生成されることを確認
+    try testing.expectEqual(hash1, hash2);
+}
+
+test "meetsDifficulty with various difficulties" {
+    const testing = std.testing;
+
+    // 先頭4バイトが0、5バイト目が0以外のハッシュを作成
+    var hash1 = [_]u8{0} ** 32;
+    hash1[4] = 1;
+
+    // 難易度のチェック
+    try testing.expect(meetsDifficulty(hash1, 0)); // 難易度0は常にtrue
+    try testing.expect(meetsDifficulty(hash1, 1)); // 先頭1バイトが0
+    try testing.expect(meetsDifficulty(hash1, 4)); // 先頭4バイトが0
+    try testing.expect(!meetsDifficulty(hash1, 5)); // 先頭5バイトは全て0ではない
+
+    // 全て0のハッシュでは最大難易度でもtrue
+    const hash2 = [_]u8{0} ** 32;
+    try testing.expect(meetsDifficulty(hash2, 32));
+
+    // 33以上の難易度は32に丸められる
+    try testing.expect(meetsDifficulty(hash2, 33));
+}
+
+test "mineBlock satisfies difficulty" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // テスト用のブロックを作成
+    var block = types.Block{
+        .index = 2,
+        .timestamp = 1672531200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = std.ArrayList(types.Transaction).init(allocator),
+        .nonce = 0,
+        .data = "Mining Test",
+        .hash = [_]u8{0} ** 32,
+    };
+    defer block.transactions.deinit();
+
+    // 難易度を設定してマイニング
+    const test_difficulty: u8 = 1; // テスト用に低い難易度を設定
+    mineBlock(&block, test_difficulty);
+
+    // マイニング後のハッシュが難易度を満たすことを確認
+    try testing.expect(meetsDifficulty(block.hash, test_difficulty));
+    // nonceが更新されていることを確認
+    try testing.expect(block.nonce > 0);
+}
+
+test "verifyBlockPow validates correct blocks" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // 正当なブロックを作成
+    var valid_block = types.Block{
+        .index = 3,
+        .timestamp = 1672531200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = std.ArrayList(types.Transaction).init(allocator),
+        .nonce = 0,
+        .data = "Valid Block",
+        .hash = [_]u8{0} ** 32,
+    };
+    defer valid_block.transactions.deinit();
+
+    // ブロックをマイニング
+    mineBlock(&valid_block, DIFFICULTY);
+
+    // 検証が成功することを確認
+    try testing.expect(verifyBlockPow(&valid_block));
+
+    // 不正なブロックを作成（ハッシュを改ざん）
+    var invalid_block = valid_block;
+    invalid_block.hash[0] = 0xFF; // ハッシュを変更
+
+    // 検証が失敗することを確認
+    try testing.expect(!verifyBlockPow(&invalid_block));
+}
+
+test "getChainHeight returns correct height" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+
+    // 元々のチェーンを保持
+    const original_chain = chain_store;
+
+    // テスト用の新しいチェーンを作成
+    chain_store = std.ArrayList(types.Block).init(allocator);
+    defer chain_store.deinit();
+
+    // 高さが0であることを確認
+    try testing.expectEqual(@as(usize, 0), getChainHeight());
+
+    // ブロックを追加
+    const genesis = try createTestGenesisBlock(allocator);
+    try chain_store.append(genesis);
+
+    // 高さが1になることを確認
+    try testing.expectEqual(@as(usize, 1), getChainHeight());
+
+    // 元のチェーンを復元（テスト後の状態をクリーンに保つ）
+    chain_store = original_chain;
+}
+
+test "getBlock returns correct block" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+
+    // 元々のチェーンを保持
+    const original_chain = chain_store;
+
+    // テスト用の新しいチェーンを作成
+    chain_store = std.ArrayList(types.Block).init(allocator);
+    defer chain_store.deinit();
+
+    // 存在しないブロックの取得は null を返す
+    try testing.expectEqual(@as(?types.Block, null), getBlock(0));
+
+    // ブロックを追加
+    const genesis = try createTestGenesisBlock(allocator);
+    try chain_store.append(genesis);
+
+    // ブロックが正しく取得できることを確認
+    const block = getBlock(0);
+    try testing.expect(block != null);
+    try testing.expectEqual(genesis.index, block.?.index);
+    try testing.expectEqualSlices(u8, genesis.hash[0..], block.?.hash[0..]);
+
+    // 元のチェーンを復元（テスト後の状態をクリーンに保つ）
+    chain_store = original_chain;
+}
+
+test "syncChain synchronizes with longer chain" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+
+    // 元々のチェーンを保持
+    const original_chain = chain_store;
+
+    // テスト用の新しいチェーンを作成
+    chain_store = std.ArrayList(types.Block).init(allocator);
+    defer chain_store.deinit();
+
+    // テスト用の新しいチェーンを作成
+    var test_blocks = std.ArrayList(types.Block).init(allocator);
+    defer test_blocks.deinit();
+
+    // より長いチェーンを作成
+    const genesis = try createTestGenesisBlock(allocator);
+    try test_blocks.append(genesis);
+
+    var prev_block = genesis;
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        var new_block = createBlock("Test Block", prev_block);
+        mineBlock(&new_block, DIFFICULTY);
+        try test_blocks.append(new_block);
+        prev_block = new_block;
+    }
+
+    // 同期を実行
+    try syncChain(test_blocks.items);
+
+    // チェーンが正しく同期されたことを確認
+    try testing.expectEqual(test_blocks.items.len, chain_store.items.len);
+
+    // 元のチェーンを復元（テスト後の状態をクリーンに保つ）
+    chain_store = original_chain;
+}
+
+// createBlock関数のテスト
+test "createBlock creates a valid next block" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // テスト用の前ブロックを作成
+    var prev_block = types.Block{
+        .index = 5,
+        .timestamp = 1672531200,
+        .prev_hash = [_]u8{1} ** 32,
+        .transactions = std.ArrayList(types.Transaction).init(allocator),
+        .nonce = 12345,
+        .data = "Previous Block",
+        .hash = [_]u8{2} ** 32,
+    };
+    defer prev_block.transactions.deinit();
+
+    // 新しいブロックを作成
+    const data = "New Block Data";
+    const new_block = createBlock(data, prev_block);
+    defer new_block.transactions.deinit();
+
+    // 新しいブロックが正しく作成されていることを確認
+    try testing.expectEqual(prev_block.index + 1, new_block.index);
+    try testing.expectEqualSlices(u8, prev_block.hash[0..], new_block.prev_hash[0..]);
+    try testing.expectEqualSlices(u8, data, new_block.data);
+    try testing.expectEqual(@as(u64, 0), new_block.nonce);
 }
