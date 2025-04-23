@@ -20,13 +20,13 @@ pub var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
 // mineBlock 関数は、nonce をインクリメントしながら
 // meetsDifficulty による難易度チェックをパスするハッシュを探します。
 
-/// calculateHash:
-/// 指定されたブロックの各フィールドをバイト列に変換し、
-/// その連結結果から SHA-256 ハッシュを計算して返す関数。
-pub fn calculateHash(block: *const types.Block) [32]u8 {
+/// computeBlockHash:
+/// ブロックの各フィールドをバイト列に変換し、SHA-256ハッシュを計算します。
+/// 返値: ブロックのSHA-256ハッシュ値
+pub fn computeBlockHash(block: *const types.Block) [32]u8 {
     var hasher = Sha256.init(.{});
 
-    // nonce の値をバイト列に変換(8バイト)し、デバッグ用に出力
+    // ブロックのフィールドをハッシュ計算に追加
     const nonce_bytes = utils.toBytesU64(block.nonce);
     logger.debugLog("nonce bytes: ", .{});
     if (comptime logger.debug_logging) {
@@ -36,26 +36,24 @@ pub fn calculateHash(block: *const types.Block) [32]u8 {
         std.debug.print("\n", .{});
     }
 
-    // ブロック番号 (u32) をバイト列に変換して追加
+    // ブロックの基本情報をハッシュに追加
     hasher.update(utils.toBytes(u32, block.index));
-    // タイムスタンプ (u64) をバイト列に変換して追加
     hasher.update(utils.toBytes(u64, block.timestamp));
-    // nonce のバイト列を追加
     hasher.update(nonce_bytes[0..]);
-    // 前ブロックのハッシュ(32バイト)を追加
     hasher.update(&block.prev_hash);
 
-    // すべてのトランザクションについて、各フィールドを追加
+    // トランザクション情報をハッシュに追加
     for (block.transactions.items) |tx| {
         hasher.update(tx.sender);
         hasher.update(tx.receiver);
         const amount_bytes = utils.toBytesU64(tx.amount);
         hasher.update(&amount_bytes);
     }
+    
     // 追加データをハッシュに追加
     hasher.update(block.data);
 
-    // 最終的なハッシュ値を計算
+    // 最終的なハッシュ値を計算して返す
     const hash = hasher.finalResult();
     logger.debugLog("nonce: {d}, hash: {x}\n", .{ block.nonce, hash });
     return hash;
@@ -64,19 +62,18 @@ pub fn calculateHash(block: *const types.Block) [32]u8 {
 //------------------------------------------------------------------------------
 // マイニング処理
 //------------------------------------------------------------------------------
-/// meetsDifficulty:
-/// 指定されたハッシュが、指定された難易度を満たしているかどうかを判定する関数。
-/// 具体的には、ハッシュの最初の `difficulty` バイトがすべて 0 であるかをチェックします。
-/// ただし、`difficulty` が 32 を超える場合は 32 に丸めます。
-/// 例: `difficulty` が 2 の場合、最初の 2 バイトが 0 であれば true を返します。
-/// 例: `difficulty` が 5 の場合、最初の 5 バイトが 0 であれば true を返します。
-/// 例: `difficulty` が 32 の場合、最初の 32 バイトが 0 であれば true を返します。
-/// 例: `difficulty` が 33 の場合、最初の 32 バイトが 0 であれば true を返します。
-/// 例: `difficulty` が 0 の場合、最初の 0 バイトが 0 であれば true を返します。
-/// 例: `difficulty` が 1 の場合、最初の 1 バイトが 0 であれば true を返します。
-pub fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
-    // difficulty が 32 を超える場合は 32 に丸める
+/// validateHashDifficulty:
+/// ハッシュ値が指定された難易度を満たしているかを検証します。
+/// 難易度は先頭バイトの0の数で表されます。
+/// 引数:
+///   - hash: 検証するハッシュ値
+///   - difficulty: 要求される難易度（0のバイト数）
+/// 返値: 難易度条件を満たす場合はtrue、そうでない場合はfalse
+pub fn validateHashDifficulty(hash: [32]u8, difficulty: u8) bool {
+    // 難易度が32を超える場合は32に制限
     const limit = if (difficulty <= 32) difficulty else 32;
+    
+    // 先頭のlimitバイトが全て0かどうかを確認
     for (hash[0..limit]) |byte| {
         if (byte != 0) return false;
     }
@@ -86,17 +83,15 @@ pub fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
 //------------------------------------------------------------------------------
 // マイニング処理
 //------------------------------------------------------------------------------
-/// mineBlock:
-/// 指定されたブロックに対して、指定された難易度を満たすハッシュを見つけるための
-/// マイニング処理を行う関数。
-/// nonce をインクリメントしながら、ハッシュを計算し続けます。
-/// meetsDifficulty を満たすハッシュが見つかったら、そのハッシュをブロックに設定します。
-/// 例: 難易度が 2 の場合、最初の 2 バイトが 0 であれば true を返します。
-/// 例: 難易度が 5 の場合、最初の 5 バイトが 0 であれば true を返します。
-pub fn mineBlock(block: *types.Block, difficulty: u8) void {
+/// mineBlockWithDifficulty:
+/// 指定された難易度を満たすハッシュ値が見つかるまでブロックのnonceを調整します。
+/// 引数:
+///   - block: マイニングするブロック
+///   - difficulty: 要求される難易度
+pub fn mineBlockWithDifficulty(block: *types.Block, difficulty: u8) void {
     while (true) {
-        const new_hash = calculateHash(block);
-        if (meetsDifficulty(new_hash, difficulty)) {
+        const new_hash = computeBlockHash(block);
+        if (validateHashDifficulty(new_hash, difficulty)) {
             block.hash = new_hash;
             break;
         }
@@ -104,32 +99,40 @@ pub fn mineBlock(block: *types.Block, difficulty: u8) void {
     }
 }
 
-/// verifyBlockPow:
-/// ブロックのProof of Work検証を行う関数
-pub fn verifyBlockPow(b: *const types.Block) bool {
-    // 1) `calculateHash(b)` → meetsDifficulty
-    const recalculated = calculateHash(b);
+/// verifyBlockProofOfWork:
+/// ブロックのProof of Work（作業証明）が有効かどうかを検証します。
+/// ハッシュの再計算と難易度の検証を行います。
+/// 引数:
+///   - b: 検証するブロック
+/// 返値: 検証に成功した場合はtrue、失敗した場合はfalse
+pub fn verifyBlockProofOfWork(b: *const types.Block) bool {
+    const recalculated = computeBlockHash(b);
     if (!std.mem.eql(u8, recalculated[0..], b.hash[0..])) {
-        return false; // hashフィールドと再計算が一致しない
+        return false; // 保存されているハッシュと再計算されたハッシュが一致しない
     }
-    if (!meetsDifficulty(recalculated, DIFFICULTY)) {
-        return false; // PoWが難易度を満たしていない
-    }
-    return true;
+    return validateHashDifficulty(recalculated, DIFFICULTY);
 }
 
-/// addBlock: 受け取ったブロックをチェインに追加（検証付き）
-pub fn addBlock(new_block: types.Block) void {
-    if (!verifyBlockPow(&new_block)) {
-        std.log.err("Received block fails PoW check. Rejecting it.", .{});
+/// addValidatedBlock: 
+/// PoW検証に合格したブロックをチェーンに追加します。
+/// 引数:
+///   - new_block: 追加するブロック
+pub fn addValidatedBlock(new_block: types.Block) void {
+    if (!verifyBlockProofOfWork(&new_block)) {
+        std.log.err("Received block fails PoW verification. Rejecting.", .{});
         return;
     }
     chain_store.append(new_block) catch {};
     std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
 }
 
-/// createBlock: 新しいブロックを生成
-pub fn createBlock(input: []const u8, prevBlock: types.Block) types.Block {
+/// createNewBlock: 
+/// 前ブロックを基に新しいブロックを生成します。
+/// 引数:
+///   - input: ブロックに含めるデータ
+///   - prevBlock: 前ブロック
+/// 返値: 生成された新しいブロック
+pub fn createNewBlock(input: []const u8, prevBlock: types.Block) types.Block {
     return types.Block{
         .index = prevBlock.index + 1,
         .timestamp = @intCast(std.time.timestamp()),

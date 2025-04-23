@@ -5,6 +5,7 @@ const parser = @import("parser.zig");
 const p2p = @import("p2p.zig");
 
 /// プログラムのエントリポイント
+/// ブロックチェーンP2Pネットワークを初期化し、各種サービスを開始します。
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
     const args = try std.process.argsAlloc(gpa);
@@ -22,27 +23,31 @@ pub fn main() !void {
     // 起動時にブロックチェーンの状態を表示
     blockchain.printChainState();
 
-    // リスナースレッドを開始
-    _ = try std.Thread.spawn(.{}, p2p.listenLoop, .{self_port});
+    // リスナーサーバーを開始
+    _ = try std.Thread.spawn(.{}, p2p.startListeningServer, .{self_port});
 
     // 既知のピアへの接続を開始
-    for (known_peers) |spec| {
-        const peer_addr = try resolveHostPort(spec);
-        _ = try std.Thread.spawn(.{}, p2p.connectToPeer, .{peer_addr});
+    for (known_peers) |peer_address| {
+        const peer_addr = try resolveHostAndPort(peer_address);
+        _ = try std.Thread.spawn(.{}, p2p.initiatePeerConnection, .{peer_addr});
     }
 
-    // インタラクティブなテキスト入力用スレッドを開始
-    _ = try std.Thread.spawn(.{}, p2p.textInputLoop, .{});
+    // ユーザー入力処理スレッドを開始
+    _ = try std.Thread.spawn(.{}, p2p.startTextInputProcessor, .{});
 
     // メインスレッドを維持
     while (true) std.time.sleep(60 * std.time.ns_per_s);
 }
 
-/// ホスト名:ポート形式の文字列からアドレスを解決する
-fn resolveHostPort(spec: []const u8) !std.net.Address {
-    var it = std.mem.tokenizeScalar(u8, spec, ':');
-    const host = it.next() orelse return error.Invalid;
-    const port_s = it.next() orelse return error.Invalid;
-    const port = try std.fmt.parseInt(u16, port_s, 10);
+/// resolveHostAndPort:
+/// ホスト名:ポート形式の文字列からネットワークアドレスを解決します。
+/// 引数:
+///   - address_spec: "hostname:port"形式の文字列
+/// 返値: 解決されたネットワークアドレス
+fn resolveHostAndPort(address_spec: []const u8) !std.net.Address {
+    var it = std.mem.tokenizeScalar(u8, address_spec, ':');
+    const host = it.next() orelse return error.InvalidAddressFormat;
+    const port_str = it.next() orelse return error.InvalidAddressFormat;
+    const port = try std.fmt.parseInt(u16, port_str, 10);
     return std.net.Address.resolveIp(host, port);
 }
