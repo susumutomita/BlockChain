@@ -1,12 +1,29 @@
+//! ピアツーピアネットワーキングモジュール
+//!
+//! このモジュールはブロックチェーンアプリケーションのピアツーピアネットワーク層を実装します。
+//! 他のノードとの接続確立、着信接続の待ち受け、ノード間の通信プロトコルの
+//! 処理機能を提供します。このモジュールはネットワーク全体にブロックチェーンデータを
+//! ブロードキャストし、同期することを可能にします。
+
 const std = @import("std");
 const blockchain = @import("blockchain.zig");
 const types = @import("types.zig");
 const parser = @import("parser.zig");
 
-// ピアリスト：現在接続中のピアを管理
+/// 接続済みピアのグローバルリスト
+/// ネットワーク内の他のノードへのアクティブな接続を維持します
 pub var peer_list = std.ArrayList(types.Peer).init(std.heap.page_allocator);
 
-/// リスニングソケットを開始し、接続を受け付ける無限ループ
+/// リッスンソケットを開始し、着信接続を受け入れる
+///
+/// 指定されたポートで着信接続を待機するTCPサーバーを作成します。
+/// 新しい接続ごとに、専用の通信スレッドを生成します。
+///
+/// 引数:
+///     port: リッスンするポート番号
+///
+/// 注意:
+///     この関数は独自のスレッドで無期限に実行されます
 pub fn listenLoop(port: u16) !void {
     var addr = try std.net.Address.resolveIp("0.0.0.0", port);
     var listener = try addr.listen(.{});
@@ -20,18 +37,27 @@ pub fn listenLoop(port: u16) !void {
         try peer_list.append(peer);
         std.log.info("Accepted connection from: {any}", .{conn.address});
 
-        // 各ピア接続ごとに通信処理用のスレッドを起動
+        // ピアとの通信を処理するスレッドを生成
         _ = try std.Thread.spawn(.{}, peerCommunicationLoop, .{peer});
     }
 }
 
-/// 指定されたアドレスに接続し、通信を確立する
-/// 接続に失敗した場合は一定時間後に再試行する
+/// 指定されたピアアドレスに接続する
+///
+/// 指定されたアドレスで別のノードとの接続を確立しようとします。
+/// 接続に失敗した場合、遅延後に再試行します。接続が確立されると、
+/// チェーン同期をリクエストします。
+///
+/// 引数:
+///     addr: 接続するピアのネットワークアドレス
+///
+/// 注意:
+///     この関数は独自のスレッドで無期限に実行され、再接続を処理します
 pub fn connectToPeer(addr: std.net.Address) !void {
     while (true) {
         const sock = std.net.tcpConnectToAddress(addr) catch |err| {
-            std.log.warn("Connection failed to {any}: {any}", .{addr, err});
-            std.time.sleep(5 * std.time.ns_per_s); // 5秒待機してから再接続
+            std.log.warn("Connection failed to {any}: {any}", .{ addr, err });
+            std.time.sleep(5 * std.time.ns_per_s); // 5秒待機してから再試行
             continue;
         };
 
@@ -39,7 +65,7 @@ pub fn connectToPeer(addr: std.net.Address) !void {
         const peer = types.Peer{ .address = addr, .stream = sock };
         try peer_list.append(peer);
 
-        // 新規接続したピアにチェーン同期要求を送信
+        // 新しく接続されたピアからチェーン同期をリクエスト
         try requestChain(peer);
 
         // ピアとの通信ループを開始
@@ -49,13 +75,30 @@ pub fn connectToPeer(addr: std.net.Address) !void {
     }
 }
 
-/// チェーン同期要求を送信
+/// ピアからブロックチェーンデータをリクエストする
+///
+/// ピアのブロックチェーンデータをリクエストするためにGET_CHAINメッセージを送信します。
+///
+/// 引数:
+///     peer: チェーンをリクエストするピア
+///
+/// エラー:
+///     ストリーム書き込みエラー
 fn requestChain(peer: types.Peer) !void {
     try peer.stream.writer().writeAll("GET_CHAIN\n");
     std.log.info("Requested chain from {any}", .{peer.address});
 }
 
-/// ピアとの通信ループ。メッセージの受信と適切な処理を行う。
+/// ピアとの通信を処理する
+///
+/// ピア接続から継続的に読み取り、メッセージを処理し、
+/// 切断を処理します。
+///
+/// 引数:
+///     peer: 通信するピア
+///
+/// 注意:
+///     この関数は終了時に接続をクリーンアップします
 fn peerCommunicationLoop(peer: types.Peer) !void {
     defer {
         removePeerFromList(peer);
@@ -63,19 +106,19 @@ fn peerCommunicationLoop(peer: types.Peer) !void {
     }
 
     var reader = peer.stream.reader();
-    var buf: [4096]u8 = undefined;  // 十分な大きさのバッファ
+    var buf: [4096]u8 = undefined; // 受信メッセージ用のバッファ
     var total_bytes: usize = 0;
 
     while (true) {
         const n = try reader.read(buf[total_bytes..]);
-        if (n == 0) break;  // 接続終了
+        if (n == 0) break; // 接続が閉じられた
 
         total_bytes += n;
         var search_start: usize = 0;
 
         // バッファ内の完全なメッセージを処理
         while (search_start < total_bytes) {
-            // メッセージ終端（改行）を探索
+            // メッセージ区切り文字（改行）を探す
             var newline_pos: ?usize = null;
             var i: usize = search_start;
             while (i < total_bytes) : (i += 1) {
@@ -86,17 +129,17 @@ fn peerCommunicationLoop(peer: types.Peer) !void {
             }
 
             if (newline_pos) |pos| {
-                // 完全なメッセージが見つかった場合の処理
+                // 完全なメッセージを処理
                 const msg = buf[search_start..pos];
                 try handleMessage(msg, peer);
                 search_start = pos + 1;
             } else {
-                // まだ完全なメッセージを受信していない
+                // メッセージがまだ完全ではない
                 break;
             }
         }
 
-        // 処理済みのメッセージをバッファから削除
+        // 処理済みメッセージをバッファから削除
         if (search_start > 0) {
             if (search_start < total_bytes) {
                 std.mem.copyForwards(u8, &buf, buf[search_start..total_bytes]);
@@ -104,7 +147,7 @@ fn peerCommunicationLoop(peer: types.Peer) !void {
             total_bytes -= search_start;
         }
 
-        // バッファが一杯だがメッセージが完結しない場合はエラー
+        // バッファがいっぱいで完全なメッセージがない場合はエラー
         if (total_bytes == buf.len) {
             std.log.err("Message too long, buffer full from peer {any}", .{peer.address});
             break;
@@ -114,60 +157,85 @@ fn peerCommunicationLoop(peer: types.Peer) !void {
     std.log.info("Peer {any} disconnected.", .{peer.address});
 }
 
-/// 受信したメッセージの種類に応じた処理を行う
+/// 種類に基づいて受信メッセージを処理する
+///
+/// BLOCKやGET_CHAINメッセージなど、ピアからの異なるメッセージタイプを
+/// 解析して処理します。
+///
+/// 引数:
+///     msg: 改行区切りのない、メッセージの内容
+///     from_peer: メッセージを送信したピア
+///
+/// エラー:
+///     解析エラーまたは処理エラー
 fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
     if (std.mem.startsWith(u8, msg, "BLOCK:")) {
-        // BLOCKメッセージの処理
+        // BLOCKメッセージを処理
         const blk = parser.parseBlockJson(msg[6..]) catch |err| {
-            std.log.err("Error parsing block from {any}: {any}", .{from_peer.address, err});
+            std.log.err("Error parsing block from {any}: {any}", .{ from_peer.address, err });
             return;
         };
 
-        // ブロックをチェーンに追加
+        // チェーンにブロックを追加
         blockchain.addBlock(blk);
 
-        // 他のピアにブロードキャスト
+        // 他のピアにブロックをブロードキャスト
         broadcastBlock(blk, from_peer);
     } else if (std.mem.startsWith(u8, msg, "GET_CHAIN")) {
-        // GET_CHAINメッセージの処理
+        // GET_CHAINメッセージを処理
         std.log.info("Received GET_CHAIN from {any}", .{from_peer.address});
         try sendFullChain(from_peer);
     } else {
-        // 不明なメッセージの場合
-        std.log.info("Unknown message from {any}: {s}", .{from_peer.address, msg});
+        // 不明なメッセージを処理
+        std.log.info("Unknown message from {any}: {s}", .{ from_peer.address, msg });
     }
 }
 
-/// 全てのピア（送信元を除く）にブロックをブロードキャストする
+/// ソース以外のすべてのピアにブロックをブロードキャストする
+///
+/// ブロックをシリアル化し、接続されているすべてのピアに送信します。
+/// オプションで、送信元のピアを除外することができます。
+///
+/// 引数:
+///     blk: ブロードキャストするブロック
+///     from_peer: ブロードキャストから除外するオプションのソースピア
 pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
     const payload = parser.serializeBlock(blk) catch return;
 
     for (peer_list.items) |peer| {
-        // 送信元ピアにはブロードキャストしない
+        // 指定された場合、送信元のピアをスキップ
         if (from_peer) |sender| {
             if (peer.address.getPort() == sender.address.getPort()) continue;
         }
 
         var writer = peer.stream.writer();
         _ = writer.writeAll("BLOCK:") catch |err| {
-            std.log.err("Error broadcasting to peer {any}: {any}", .{peer.address, err});
+            std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
             continue;
         };
         _ = writer.writeAll(payload) catch |err| {
-            std.log.err("Error broadcasting to peer {any}: {any}", .{peer.address, err});
+            std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
             continue;
         };
         _ = writer.writeAll("\n") catch |err| {
-            std.log.err("Error broadcasting to peer {any}: {any}", .{peer.address, err});
+            std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
             continue;
         };
     }
 }
 
-/// ピアにチェーン全体を送信
+/// 完全なブロックチェーンをピアに送信する
+///
+/// ローカルチェーン内のすべてのブロックをシリアル化し、
+/// 適切なメッセージフレーミングで1つずつ指定されたピアに送信します。
+///
+/// 引数:
+///     peer: チェーンを送信するピア
+///
+/// エラー:
+///     シリアル化またはネットワークエラー
 pub fn sendFullChain(peer: types.Peer) !void {
-    std.log.info("Sending full chain (height={d}) to {any}",
-                 .{blockchain.chain_store.items.len, peer.address});
+    std.log.info("Sending full chain (height={d}) to {any}", .{ blockchain.chain_store.items.len, peer.address });
 
     var writer = peer.stream.writer();
 
@@ -179,7 +247,12 @@ pub fn sendFullChain(peer: types.Peer) !void {
     }
 }
 
-/// ピアリストからピアを削除
+/// ピアリストからピアを削除する
+///
+/// 切断された場合に、グローバルピアリストからピアを検索して削除します。
+///
+/// 引数:
+///     target: 削除するピア
 fn removePeerFromList(target: types.Peer) void {
     var i: usize = 0;
     while (i < peer_list.items.len) : (i += 1) {
@@ -190,7 +263,13 @@ fn removePeerFromList(target: types.Peer) void {
     }
 }
 
-/// テキスト入力からブロックを生成し、ブロードキャストする対話的なループ
+/// ユーザー入力からブロックを作成してブロードキャストするインタラクティブループ
+///
+/// コンソールからテキスト入力を読み取り、それからブロックを作成し、
+/// マイニングして、ネットワークにブロードキャストします。
+///
+/// 注意:
+///     この関数は独自のスレッドで無期限に実行されます
 pub fn textInputLoop() !void {
     var reader = std.io.getStdIn().reader();
     var buf: [256]u8 = undefined;
@@ -200,13 +279,13 @@ pub fn textInputLoop() !void {
         const maybe_line = reader.readUntilDelimiterOrEof(buf[0..], '\n') catch null;
 
         if (maybe_line) |line| {
-            // 最新のブロックを取得、またはジェネシスブロックを作成
+            // チェーンが空の場合は最新のブロックを取得するか、ジェネシスを作成
             const last_block = if (blockchain.chain_store.items.len == 0)
                 try blockchain.createTestGenesisBlock(std.heap.page_allocator)
             else
                 blockchain.chain_store.items[blockchain.chain_store.items.len - 1];
 
-            // 新しいブロックを作成
+            // 新しいブロックを作成してマイニング
             var new_block = blockchain.createBlock(line, last_block);
             blockchain.mineBlock(&new_block, 2); // 難易度2でマイニング
             blockchain.addBlock(new_block);
