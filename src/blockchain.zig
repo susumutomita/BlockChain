@@ -1,3 +1,10 @@
+//! ブロックチェーンコア実装モジュール
+//!
+//! このモジュールはブロック作成、マイニング、検証、チェーン管理などの
+//! コアブロックチェーン機能を実装しています。ブロックハッシュの計算、
+//! プルーフオブワークによる新しいブロックのマイニング、ブロックチェーン状態の
+//! 維持のための関数を提供します。
+
 const std = @import("std");
 const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
@@ -6,25 +13,34 @@ const logger = @import("logger.zig");
 const utils = @import("utils.zig");
 const chainError = @import("errors.zig").ChainError;
 const parser = @import("parser.zig");
+
+/// プルーフオブワークマイニングの難易度設定
+/// 有効なブロックハッシュに必要な先頭のゼロバイト数を表します
 const DIFFICULTY: u8 = 2;
-var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
+
+/// メインブロックチェーンデータストレージ
+/// 完全なブロックチェーンをBlock構造体の動的配列として格納します
+pub var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
 
 //------------------------------------------------------------------------------
-// ハッシュ計算とマイニング処理
+// ハッシュ計算とマイニング関数
 //------------------------------------------------------------------------------
-//
-// calculateHash 関数では、ブロック内の各フィールドを連結して
-// SHA-256 のハッシュを計算します。
-// mineBlock 関数は、nonce をインクリメントしながら
-// meetsDifficulty による難易度チェックをパスするハッシュを探します。
 
-/// calculateHash:
-/// 指定されたブロックの各フィールドをバイト列に変換し、
-/// その連結結果から SHA-256 ハッシュを計算して返す関数。
+/// ブロックの暗号学的ハッシュを計算する
+///
+/// すべての関連フィールド（インデックス、タイムスタンプ、ノンス、
+/// 前のハッシュ、トランザクション、データ）をバイトシーケンスに
+/// 連結してハッシュすることにより、ブロックの内容のSHA-256ハッシュを計算します。
+///
+/// 引数:
+///     block: ハッシュ化するBlock構造体へのポインタ
+///
+/// 戻り値:
+///     [32]u8: ブロックの32バイトのSHA-256ハッシュ
 pub fn calculateHash(block: *const types.Block) [32]u8 {
     var hasher = Sha256.init(.{});
 
-    // nonce の値をバイト列に変換(8バイト)し、デバッグ用に出力
+    // ノンスをバイト配列に変換し、デバッグ用にログ出力
     const nonce_bytes = utils.toBytesU64(block.nonce);
     logger.debugLog("nonce bytes: ", .{});
     if (comptime logger.debug_logging) {
@@ -34,45 +50,62 @@ pub fn calculateHash(block: *const types.Block) [32]u8 {
         std.debug.print("\n", .{});
     }
 
-    // ブロック番号 (u32) をバイト列に変換して追加
+    // ハッシュ計算にブロックフィールドを順番に追加
     hasher.update(utils.toBytes(u32, block.index));
-    // タイムスタンプ (u64) をバイト列に変換して追加
     hasher.update(utils.toBytes(u64, block.timestamp));
-    // nonce のバイト列を追加
     hasher.update(nonce_bytes[0..]);
-    // 前ブロックのハッシュ(32バイト)を追加
     hasher.update(&block.prev_hash);
 
-    // すべてのトランザクションについて、各フィールドを追加
+    // すべてのトランザクションデータをハッシュに追加
     for (block.transactions.items) |tx| {
         hasher.update(tx.sender);
         hasher.update(tx.receiver);
         const amount_bytes = utils.toBytesU64(tx.amount);
         hasher.update(&amount_bytes);
     }
-    // 追加データをハッシュに追加
+
+    // 追加のデータフィールドをハッシュに追加
     hasher.update(block.data);
 
-    // 最終的なハッシュ値を計算
+    // ハッシュを確定して返す
     const hash = hasher.finalResult();
     logger.debugLog("nonce: {d}, hash: {x}\n", .{ block.nonce, hash });
     return hash;
 }
 
-/// meetsDifficulty:
-/// ハッシュ値の先頭 'difficulty' バイトがすべて 0 であれば true を返す。
+/// ハッシュが必要なプルーフオブワークの難易度を満たしているかチェックする
+///
+/// ハッシュが難易度パラメータで指定された必要な先頭ゼロバイト数を
+/// 持っているかを検証します。
+///
+/// 引数:
+///     hash: チェックする32バイトのハッシュ
+///     difficulty: 必要な先頭ゼロバイト数（32を上限とする）
+///
+/// 戻り値:
+///     bool: ハッシュが難易度要件を満たす場合はtrue、そうでなければfalse
 pub fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
-    // difficulty が 32 を超える場合は 32 に丸める
+    // 難易度を32バイト（256ビット）に制限
     const limit = if (difficulty <= 32) difficulty else 32;
+
+    // 最初の 'limit' バイトがすべてゼロであることを確認
     for (hash[0..limit]) |byte| {
         if (byte != 0) return false;
     }
     return true;
 }
 
-/// mineBlock:
-/// 指定された難易度を満たすハッシュが得られるまで、
-/// nonce の値を増やしながらハッシュ計算を繰り返す関数。
+/// 有効なプルーフオブワークを見つけてブロックをマイニングする
+///
+/// 指定された難易度要件（先頭のゼロバイト）を満たすハッシュを
+/// 見つけるまでブロックのノンス値を段階的に調整します。
+///
+/// 引数:
+///     block: マイニングするBlock構造体へのポインタ（その場で変更される）
+///     difficulty: ハッシュに必要な先頭ゼロバイト数
+///
+/// 注意:
+///     この関数はブロックのノンスとハッシュフィールドを更新することでブロックを変更します
 pub fn mineBlock(block: *types.Block, difficulty: u8) void {
     while (true) {
         const new_hash = calculateHash(block);
@@ -84,21 +117,41 @@ pub fn mineBlock(block: *types.Block, difficulty: u8) void {
     }
 }
 
-/// verifyBlockPow:
-/// ブロックのProof of Work検証を行う関数
+/// ブロックのプルーフオブワークを検証する
+///
+/// ブロックの保存されたハッシュが再計算されたハッシュと一致し、
+/// ハッシュが必要な難易度レベルを満たしていることを確認します。
+///
+/// 引数:
+///     b: 検証するBlock構造体へのポインタ
+///
+/// 戻り値:
+///     bool: ブロックが有効なプルーフオブワークを持つ場合はtrue、そうでなければfalse
 pub fn verifyBlockPow(b: *const types.Block) bool {
-    // 1) `calculateHash(b)` → meetsDifficulty
+    // ハッシュを再計算し、保存されたハッシュと一致するか確認
     const recalculated = calculateHash(b);
     if (!std.mem.eql(u8, recalculated[0..], b.hash[0..])) {
-        return false; // hashフィールドと再計算が一致しない
+        return false; // ハッシュフィールドが再計算されたハッシュと一致しない
     }
+
+    // ハッシュが必要な難易度を満たしているか確認
     if (!meetsDifficulty(recalculated, DIFFICULTY)) {
-        return false; // PoWが難易度を満たしていない
+        return false; // ハッシュが難易度要件を満たしていない
     }
+
     return true;
 }
 
-// addBlock: 受け取ったブロックをチェインに追加（検証付き）
+/// 検証済みブロックをブロックチェーンに追加する
+///
+/// チェーンに追加する前にブロックのプルーフオブワークを検証します。
+/// 検証に失敗したブロックは拒否されます。
+///
+/// 引数:
+///     new_block: チェーンに追加するBlock構造体
+///
+/// 注意:
+///     この関数は成功または失敗のメッセージをログに記録します
 pub fn addBlock(new_block: types.Block) void {
     if (!verifyBlockPow(&new_block)) {
         std.log.err("Received block fails PoW check. Rejecting it.", .{});
@@ -108,17 +161,17 @@ pub fn addBlock(new_block: types.Block) void {
     std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
 }
 
-pub fn sendBlock(block: types.Block, remote_addr: std.net.Address) !void {
-    const json_data = parser.serializeBlock(block) catch |err| {
-        std.debug.print("Serialize error: {any}\n", .{err});
-        return err;
-    };
-    var socket = try std.net.tcpConnectToAddress(remote_addr);
-    var writer = socket.writer();
-    try writer.writeAll("BLOCK:" ++ json_data);
-}
-
-/// createBlock: 新しいブロックを生成
+/// 前のブロックにリンクされた新しいブロックを作成する
+///
+/// 新しいブロックをデフォルト値で初期化し、そのインデックスを
+/// 前のブロックよりも1つ多く設定し、prev_hashを介してリンクします。
+///
+/// 引数:
+///     input: 新しいブロックに格納するデータ文字列
+///     prevBlock: リンクする前のブロック
+///
+/// 戻り値:
+///     types.Block: 未確定の新しいブロック（まだマイニングが必要）
 pub fn createBlock(input: []const u8, prevBlock: types.Block) types.Block {
     return types.Block{
         .index = prevBlock.index + 1,
@@ -131,7 +184,19 @@ pub fn createBlock(input: []const u8, prevBlock: types.Block) types.Block {
     };
 }
 
-/// createTestGenesisBlock: テスト用のジェネシスブロックを生成
+/// テスト用のジェネシスブロックを作成する
+///
+/// ブロックチェーンの最初のブロックを事前定義された値で初期化し、
+/// マイニングして有効なジェネシスブロックを生成します。
+///
+/// 引数:
+///     allocator: トランザクションリストに使用するメモリアロケータ
+///
+/// 戻り値:
+///     types.Block: マイニングされたジェネシスブロック
+///
+/// エラー:
+///     トランザクション追加に失敗した場合のアロケータエラー
 pub fn createTestGenesisBlock(allocator: std.mem.Allocator) !types.Block {
     var genesis = types.Block{
         .index = 0,
@@ -147,78 +212,69 @@ pub fn createTestGenesisBlock(allocator: std.mem.Allocator) !types.Block {
     return genesis;
 }
 
-//--------------------------------------
-// メッセージ受信処理: ConnHandler
-//--------------------------------------
-pub const ConnHandler = struct {
-    pub fn run(conn: std.net.Server.Connection) !void {
-        defer conn.stream.close();
-        std.log.info("Accepted: {any}", .{conn.address});
+/// より長いチェーンとブロックチェーンを同期する
+///
+/// 提供されたチェーンが現在のチェーンより長い場合、ローカルのブロックチェーンを
+/// 置き換えます。これは「最長チェーン」コンセンサスルールを実装しています。
+///
+/// 引数:
+///     blocks: ブロックチェーンを表すブロックの配列
+///
+/// エラー:
+///     ブロック追加時にアロケーターエラーが発生する可能性あり
+///
+/// 注意:
+///     これはブロックチェーンのコンセンサスとP2P同期の重要な部分です
+pub fn syncChain(blocks: []types.Block) !void {
+    if (blocks.len == 0) return;
 
-        var reader = conn.stream.reader();
-        var buf: [256]u8 = undefined;
+    // 受信したチェーンが現在のチェーンより長い場合のみ同期
+    if (blocks.len > chain_store.items.len) {
+        // 現在のチェーンをクリア
+        chain_store.clearRetainingCapacity();
 
-        while (true) {
-            const n = try reader.read(&buf);
-            if (n == 0) {
-                std.log.info("Peer {any} disconnected.", .{conn.address});
-                break;
-            }
-            const msg_slice = buf[0..n];
-            std.log.info("[Received] {s}", .{msg_slice});
-
-            // 簡易メッセージ解析
-            if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
-                // "BLOCK:" の後ろを取り出してJSONパースする
-                const json_part = msg_slice[6..];
-                const new_block = parser.parseBlockJson(json_part) catch |err| {
-                    std.log.err("Failed parseBlockJson: {any}", .{err});
-                    continue;
-                };
-                // チェインに追加
-                addBlock(new_block);
-            } else {
-                // それ以外はログだけ
-                std.log.info("Unknown message: {s}", .{msg_slice});
-            }
+        // 新しいチェーンからブロックをコピー
+        for (blocks) |block| {
+            try chain_store.append(block);
         }
+
+        std.log.info("Chain synchronized with {d} blocks", .{blocks.len});
+    } else {
+        std.log.info("Received chain ({d} blocks) is not longer than current chain ({d} blocks)", .{ blocks.len, chain_store.items.len });
     }
-};
+}
 
-//--------------------------------------
-// クライアント処理
-//--------------------------------------
-pub const ClientHandler = struct {
-    pub fn run(peer: types.Peer) !void {
-        // クライアントはローカルに Genesis ブロックを保持（本来はサーバーから同期する）
-        var lastBlock = try createTestGenesisBlock(std.heap.page_allocator);
-        clientSendLoop(peer, &lastBlock) catch unreachable;
-    }
-};
+/// 現在のブロックチェーンの高さ（ブロック数）を取得する
+///
+/// 戻り値:
+///     usize: ブロックチェーン内のブロック数
+pub fn getChainHeight() usize {
+    return chain_store.items.len;
+}
 
-fn clientSendLoop(peer: types.Peer, lastBlock: *types.Block) !void {
-    var stdin = std.io.getStdIn();
-    var reader = stdin.reader();
-    var line_buffer: [256]u8 = undefined;
-    while (true) {
-        std.debug.print("Enter message for new block: ", .{});
-        const maybe_line = try reader.readUntilDelimiterOrEof(line_buffer[0..], '\n');
-        if (maybe_line == null) break;
-        const user_input = maybe_line.?;
-        var new_block = createBlock(user_input, lastBlock.*);
-        mineBlock(&new_block, DIFFICULTY);
-        var writer = peer.stream.writer();
-        const block_json = parser.serializeBlock(new_block) catch unreachable;
-        // 必要なサイズのバッファを用意して "BLOCK:" と block_json を連結する
-        var buf = try std.heap.page_allocator.alloc(u8, "BLOCK:".len + block_json.len);
-        defer std.heap.page_allocator.free(buf);
+/// インデックスでブロックを取得する
+///
+/// 引数:
+///     index: 取得するブロックのインデックス
+///
+/// 戻り値:
+///     ?types.Block: 要求されたブロック、見つからない場合はnull
+pub fn getBlock(index: usize) ?types.Block {
+    if (index >= chain_store.items.len) return null;
+    return chain_store.items[index];
+}
 
-        // バッファに連結
-        @memcpy(buf[0.."BLOCK:".len], "BLOCK:");
-        @memcpy(buf["BLOCK:".len..], block_json);
+/// デバッグ用に現在のブロックチェーン状態を出力する
+///
+/// チェーンの高さと最新ブロックに関する情報をログに記録します
+pub fn printChainState() void {
+    std.log.info("Current chain state:", .{});
+    std.log.info("- Height: {d} blocks", .{chain_store.items.len});
 
-        // 1回の書き出しで送信
-        try writer.writeAll(buf);
-        lastBlock.* = new_block;
+    if (chain_store.items.len > 0) {
+        const latest = chain_store.items[chain_store.items.len - 1];
+        std.log.info("- Latest block: index={d}, hash={x}", .{ latest.index, latest.hash });
+    } else {
+        std.log.info("- No blocks in chain", .{});
     }
 }

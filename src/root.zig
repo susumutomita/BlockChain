@@ -1,10 +1,15 @@
+//! ブロックチェーンプロジェクト: ルートモジュール
+//!
+//! このファイルはブロックチェーンライブラリのルートソースファイルです。
+//! テスト用のエントリーポイントを提供し、ブロックチェーン実装に必要な
+//! 依存関係をインポートします。規約上、ライブラリを作成する際の
+//! ルートソースファイルはroot.zigとなります。
+//! 実行可能ファイルを作成する場合は、このファイルを削除して
+//! 代わりにmain.zigから始めるのが一般的です。
+
 const std = @import("std");
-const testing = std.testing;
 
-export fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
-
-test "basic add functionality" {
-    try testing.expect(add(3, 7) == 10);
+test "collect all decls recursively" {
+    // この1行で全ソースファイルのテストブロックをリンク
+    std.testing.refAllDeclsRecursive(@This());
 }

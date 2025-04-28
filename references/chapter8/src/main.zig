@@ -54,7 +54,7 @@ pub fn main() !void {
 
     // すべての既知のピアに接続
     for (known_peers) |spec| {
-        const peer_addr = try resolveHostPort(spec);
+        const peer_addr = try p2p.resolveHostPort(spec);
         _ = try std.Thread.spawn(.{}, p2p.connectToPeer, .{peer_addr});
     }
 
@@ -63,28 +63,6 @@ pub fn main() !void {
 
     // メインスレッドを生かし続ける
     while (true) std.time.sleep(60 * std.time.ns_per_s);
-}
-
-/// ホスト:ポート文字列をネットワークアドレスに解決
-///
-/// "hostname:port"形式の文字列を受け取り、接続に使用できる
-/// ネットワークアドレスに解決します。
-///
-/// 引数:
-///     spec: "hostname:port"形式の文字列
-///
-/// 戻り値:
-///     std.net.Address - 解決されたネットワークアドレス
-///
-/// エラー:
-///     error.Invalid: 文字列フォーマットが無効な場合
-///     std.net.Address.resolveIpからのその他のエラー
-fn resolveHostPort(spec: []const u8) !std.net.Address {
-    var it = std.mem.tokenizeScalar(u8, spec, ':');
-    const host = it.next() orelse return error.Invalid;
-    const port_s = it.next() orelse return error.Invalid;
-    const port = try std.fmt.parseInt(u16, port_s, 10);
-    return std.net.Address.resolveIp(host, port);
 }
 
 //------------------------------------------------------------------------------
