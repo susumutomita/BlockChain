@@ -7,7 +7,7 @@ services:
       - "3001:3000"
     environment:
       - NODE_ID=1
-    command: /app/zig-out/bin/foo --listen 3000
+    command: sh -c "zig build && ./zig-out/bin/chapter7 --listen 3000"
 
   node2:
     build: .
@@ -17,7 +17,7 @@ services:
       - "3002:3000"
     environment:
       - NODE_ID=2
-    command: /app/zig-out/bin/foo --connect node1:3000
+    command: sh -c "zig build && ./zig-out/bin/chapter7 --listen 3000 --connect node1:3000"
 
   node3:
     build: .
@@ -27,4 +27,4 @@ services:
       - "3003:3000"
     environment:
       - NODE_ID=3
-    command: /app/zig-out/bin/foo --connect node1:3000
+    command: sh -c "zig build && ./zig-out/bin/chapter7 --listen 3000 --connect node1:3000"

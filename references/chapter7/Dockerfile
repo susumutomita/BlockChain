@@ -32,4 +32,4 @@ COPY --chown=appuser:appgroup . .
 USER appuser
 
 # コンテナ起動時に Zig ビルドシステムを使って run を実行
-CMD ["zig", "build", "run"]
+CMD ["zig", "build"]
