@@ -2,6 +2,7 @@ const std = @import("std");
 const blockchain = @import("blockchain.zig");
 const types = @import("types.zig");
 const parser = @import("parser.zig");
+const net = std.net;
 
 //------------------------------------------------------------------------------
 // メイン処理およびテスト実行
@@ -49,8 +50,26 @@ pub fn main() !void {
         }
         const port_num = try std.fmt.parseInt(u16, port_str, 10);
         std.log.info("Connecting to {s}:{d}...", .{ host_str, port_num });
-        const remote_addr = try std.net.Address.resolveIp(host_str, port_num);
-        var socket = try std.net.tcpConnectToAddress(remote_addr);
+
+        // ホスト名を解決する (IPアドレスまたはホスト名の両方に対応)
+        var remote_addr: net.Address = undefined;
+        if (std.mem.indexOf(u8, host_str, ".") != null) {
+            // IPアドレスと思われる場合は直接解決
+            remote_addr = try net.Address.resolveIp(host_str, port_num);
+        } else {
+            // ホスト名の場合はDNS解決を使用
+            var list = try net.getAddressList(gpa, host_str, port_num);
+            defer list.deinit();
+
+            if (list.addrs.len == 0) {
+                std.log.err("Could not resolve hostname: {s}", .{host_str});
+                return error.HostNotFound;
+            }
+
+            remote_addr = list.addrs[0];
+        }
+
+        var socket = try net.tcpConnectToAddress(remote_addr);
         const peer = types.Peer{
             .address = remote_addr,
             .stream = socket,
