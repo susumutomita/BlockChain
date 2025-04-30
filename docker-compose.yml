@@ -1,28 +1,49 @@
+# Docker Compose構成ファイル - ブロックチェーンノードネットワーク
+#
+# 使い方:
+# 1. 起動: docker compose up -d
+# 2. コンテナでコマンド実行: docker exec -it <container_name> <command>
+#    例: docker exec -it node2 sh -c "./zig-out/bin/block_client node1 3000 'Hello'"
+#
+# 注意: 新しいコンテナを起動するには docker compose run ではなく docker exec を使用してください
+
+# 共通設定
+x-common-config: &common-config
+  platform: linux/amd64
+  volumes:
+    - ./:/app
+  build: .
+
 services:
   node1:
-    build: .
-    platform: linux/amd64
+    <<: *common-config
     container_name: node1
     ports:
       - "3001:3000"
     environment:
       - NODE_ID=1
-    command: /app/zig-out/bin/BlockChain 3000
+    command: sh -c "./zig-out/bin/BlockChain --listen 3000"
+
   node2:
-    build: .
-    platform: linux/amd64
+    <<: *common-config
     container_name: node2
     ports:
       - "3002:3000"
     environment:
       - NODE_ID=2
-    command: /app/zig-out/bin/BlockChain 3001 node1:3000
+    tty: true
+    stdin_open: true
+    # 長時間実行するコマンドを追加してコンテナを停止させない
+    command: sh -c "tail -f /dev/null"
+
   node3:
-    build: .
-    platform: linux/amd64
+    <<: *common-config
     container_name: node3
     ports:
       - "3003:3000"
     environment:
       - NODE_ID=3
-    command: /app/zig-out/bin/BlockChain 3002 node1:3000
+    tty: true
+    stdin_open: true
+    # 長時間実行するコマンドを追加してコンテナを停止させない
+    command: sh -c "tail -f /dev/null"
