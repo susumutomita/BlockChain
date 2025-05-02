@@ -247,7 +247,29 @@ pub fn resolveHostPort(spec: []const u8) !std.net.Address {
     const host = it.next() orelse return error.Invalid;
     const port_s = it.next() orelse return error.Invalid;
     const port = try std.fmt.parseInt(u16, port_s, 10);
-    return std.net.Address.resolveIp(host, port);
+
+    // 特別なケース: localhostが指定された場合は直接127.0.0.1を使用
+    if (std.mem.eql(u8, host, "localhost")) {
+        return std.net.Address.parseIp("127.0.0.1", port) catch unreachable;
+    }
+
+    // まずIPアドレスとしてパースを試みる
+    return std.net.Address.parseIp(host, port) catch |err| {
+        if (err == error.InvalidIPAddressFormat) {
+            // IPアドレスとして無効な場合は、ホスト名解決を試みる
+            const list = try std.net.getAddressList(std.heap.page_allocator, host, port);
+            defer list.deinit();
+
+            // アドレスが見つからない場合はエラー
+            if (list.addrs.len == 0) {
+                return error.UnknownHostName;
+            }
+
+            // 最初のアドレスを返す
+            return list.addrs[0];
+        }
+        return err;
+    };
 }
 
 /// ピアとの通信を処理する
