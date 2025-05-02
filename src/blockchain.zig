@@ -159,6 +159,9 @@ pub fn addBlock(new_block: types.Block) void {
     }
     chain_store.append(new_block) catch {};
     std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
+
+    // 新しいブロックを追加した後にチェーン全体を表示
+    printChainState();
 }
 
 /// 前のブロックにリンクされた新しいブロックを作成する
@@ -266,15 +269,51 @@ pub fn getBlock(index: usize) ?types.Block {
 
 /// デバッグ用に現在のブロックチェーン状態を出力する
 ///
-/// チェーンの高さと最新ブロックに関する情報をログに記録します
+/// チェーンの高さと各ブロックの詳細情報を見やすい形式で表示します
 pub fn printChainState() void {
     std.log.info("Current chain state:", .{});
     std.log.info("- Height: {d} blocks", .{chain_store.items.len});
 
-    if (chain_store.items.len > 0) {
-        const latest = chain_store.items[chain_store.items.len - 1];
-        std.log.info("- Latest block: index={d}, hash={x}", .{ latest.index, latest.hash });
-    } else {
+    if (chain_store.items.len == 0) {
         std.log.info("- No blocks in chain", .{});
+        return;
     }
+
+    // 各ブロックを詳細に表示
+    for (chain_store.items) |block| {
+        const hash_str = std.fmt.bytesToHex(block.hash, .lower);
+        // 区切り線を表示
+        std.debug.print("\n{s}\n", .{"---------------------------"});
+        // ブロック情報を見やすく表示
+        std.debug.print("Block index: {d}\n", .{block.index});
+        std.debug.print("Timestamp  : {d}\n", .{block.timestamp});
+        std.debug.print("Nonce      : {d}\n", .{block.nonce});
+        std.debug.print("Data       : {s}\n", .{block.data});
+
+        // トランザクション情報を表示
+        std.debug.print("Transactions:\n", .{});
+        if (block.transactions.items.len == 0) {
+            std.debug.print("  (no transactions)\n", .{});
+        } else {
+            for (block.transactions.items) |tx| {
+                std.debug.print("  {s} -> {s} : {d}\n", .{ tx.sender, tx.receiver, tx.amount });
+            }
+        }
+
+        // ハッシュを表示
+        std.debug.print("Hash       : {s}\n", .{hash_str[0..64]});
+    }
+    std.debug.print("\n{s}\n", .{"---------------------------"});
+}
+
+// ヘルパー関数: 文字列を指定回数繰り返す
+fn times(comptime char: []const u8, n: usize) []const u8 {
+    const static = struct {
+        var buffer: [100]u8 = undefined;
+    };
+    var i: usize = 0;
+    while (i < n and i < static.buffer.len) : (i += 1) {
+        static.buffer[i] = char[0];
+    }
+    return static.buffer[0..i];
 }

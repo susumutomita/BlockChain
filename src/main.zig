@@ -20,11 +20,14 @@ const p2p = @import("p2p.zig");
 ///
 /// コマンドライン形式:
 ///   実行ファイル <ポート> [ピアアドレス...]
+///   実行ファイル --listen <ポート> [--connect <ホスト:ポート>...]
 ///   実行ファイル --conformance <テスト名> [--update]
 ///
 /// 引数:
 ///     <ポート>: このノードが待ち受けるポート番号
 ///     [ピア...]: オプションの既知ピアアドレスのリスト（"ホスト:ポート"形式）
+///     --listen <ポート>: このノードが待ち受けるポート番号
+///     --connect <ホスト:ポート>: オプションの既知ピアアドレス
 ///     --conformance <テスト名>: 指定された適合性テストを実行
 ///     --update: 適合性テスト実行時にゴールデンファイルを更新
 ///
@@ -37,14 +40,46 @@ pub fn main() !void {
     defer std.process.argsFree(gpa, args);
 
     if (args.len < 2) {
-        std.log.err("使用法: {s} <ポート> [ピア...]", .{args[0]});
+        std.log.err("使用法: {s} <ポート> [ピアアドレス...]", .{args[0]});
+        std.log.err("または: {s} --listen <ポート> [--connect <ホスト:ポート>...]", .{args[0]});
         std.log.err("       {s} --conformance <テスト名> [--update]", .{args[0]});
         return;
     }
 
-    // ポートとピアのためのコマンドライン引数の解析
-    const self_port = try std.fmt.parseInt(u16, args[1], 10);
-    const known_peers = args[2..];
+    var self_port: u16 = 0;
+    var known_peers = std.ArrayList([]const u8).init(gpa);
+    defer known_peers.deinit();
+
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--listen")) {
+            i += 1;
+            if (i >= args.len) {
+                std.log.err("--listen フラグの後にポート番号が必要です", .{});
+                return;
+            }
+            self_port = try std.fmt.parseInt(u16, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--connect")) {
+            i += 1;
+            if (i >= args.len) {
+                std.log.err("--connect フラグの後にホスト:ポートが必要です", .{});
+                return;
+            }
+            try known_peers.append(args[i]);
+        } else if (self_port == 0) {
+            // 従来の方式（最初の引数はポート番号）
+            self_port = try std.fmt.parseInt(u16, arg, 10);
+        } else {
+            // 従来の方式（追加の引数はピアアドレス）
+            try known_peers.append(arg);
+        }
+    }
+
+    if (self_port == 0) {
+        std.log.err("ポート番号が指定されていません。--listen フラグまたは最初の引数として指定してください。", .{});
+        return;
+    }
 
     // 初期ブロックチェーン状態の表示
     blockchain.printChainState();
@@ -53,7 +88,7 @@ pub fn main() !void {
     _ = try std.Thread.spawn(.{}, p2p.listenLoop, .{self_port});
 
     // すべての既知のピアに接続
-    for (known_peers) |spec| {
+    for (known_peers.items) |spec| {
         const peer_addr = try p2p.resolveHostPort(spec);
         _ = try std.Thread.spawn(.{}, p2p.connectToPeer, .{peer_addr});
     }
