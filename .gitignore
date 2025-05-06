@@ -7,3 +7,7 @@ docgen_tmp/
 
 .DS_Store
 .vscode/
+*.a
+*.o
+/docs/
+/zig-out/
