@@ -51,7 +51,10 @@ pub const EVMu256 = struct {
         // 注：完全な256ビット乗算は複雑なため、ここでは省略
         if (self.hi == 0 and other.hi == 0) {
             const result_lo = self.lo * other.lo;
-            const result_hi = @as(u128, @truncate((self.lo * other.lo) >> 128));
+            // シフト演算で上位ビットを取得
+            // 128ビットシフトを避けるために、別の方法で計算
+            // 注: u128に入らない上位ビットは無視される
+            const result_hi = @as(u128, 0); // 簡略化した実装では上位ビットは0として扱う
             return EVMu256{ .hi = result_hi, .lo = result_lo };
         } else {
             // 簡易実装のため、上位ビットがある場合は詳細計算を省略
@@ -141,14 +144,18 @@ pub const EvmMemory = struct {
         var lo: u128 = 0;
         for (0..16) |i| {
             const byte_val = self.data.items[offset + i];
-            lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+            // 明示的に適切な型にキャストする
+            const shift_amount = (15 - i) * 8;
+            lo |= @as(u128, byte_val) << @intCast(shift_amount);
         }
 
         // 上位128ビット
         var hi: u128 = 0;
         for (0..16) |i| {
             const byte_val = self.data.items[offset + 16 + i];
-            hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+            // 明示的に適切な型にキャストする
+            const shift_amount = (15 - i) * 8;
+            hi |= @as(u128, byte_val) << @intCast(shift_amount);
         }
 
         result.lo = lo;
@@ -164,8 +171,8 @@ pub const EvmMemory = struct {
         const hi = value.hi;
         var i: usize = 0;
         while (i < 16) : (i += 1) {
-            // truncateの修正: 型キャストのみを行う
-            const byte_val = @as(u8, @truncate(hi >> @as(u7, @intCast((15 - i) * 8))));
+            const shift_amount = (15 - i) * 8;
+            const byte_val = @as(u8, @truncate(hi >> @intCast(shift_amount)));
             self.data.items[offset + i] = byte_val;
         }
 
@@ -173,8 +180,8 @@ pub const EvmMemory = struct {
         const lo = value.lo;
         i = 0;
         while (i < 16) : (i += 1) {
-            // truncateの修正: 型キャストのみを行う
-            const byte_val = @as(u8, @truncate(lo >> @as(u7, @intCast((15 - i) * 8))));
+            const shift_amount = (15 - i) * 8;
+            const byte_val = @as(u8, @truncate(lo >> @intCast(shift_amount)));
             self.data.items[offset + 16 + i] = byte_val;
         }
     }
