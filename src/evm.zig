@@ -111,7 +111,7 @@ pub fn execute(allocator: std.mem.Allocator, code: []const u8, calldata: []const
 
     // 戻り値をコピーして返す
     const result = try allocator.alloc(u8, context.returndata.items.len);
-    std.mem.copy(u8, result, context.returndata.items);
+    @memcpy(result, context.returndata.items);
     return result;
 }
 
@@ -366,4 +366,196 @@ pub fn disassemble(code: []const u8, writer: anytype) !void {
         try writer.print("\n", .{});
         pc += 1;
     }
+}
+
+// シンプルなEVM実行テスト
+test "Simple EVM execution" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // シンプルなバイトコード: PUSH1 0x05, PUSH1 0x03, ADD, PUSH1 0x00, MSTORE, PUSH1 0x20, PUSH1 0x00, RETURN
+    // 意味: 5 + 3 = 8 を計算し、メモリに格納して返す
+    const bytecode = [_]u8{
+        0x60, 0x05, // PUSH1 5
+        0x60, 0x03, // PUSH1 3
+        0x01, // ADD
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    const calldata = [_]u8{};
+
+    // EVMを実行し、戻り値を取得
+    const result = try execute(allocator, &bytecode, &calldata, 100000);
+    defer allocator.free(result);
+
+    // 結果をEVMu256形式で解釈
+    var value = EVMu256{ .hi = 0, .lo = 0 };
+    if (result.len >= 32) {
+        // 上位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i];
+            value.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+
+        // 下位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i + 16];
+            value.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が8（5+3）になっていることを確認
+    try std.testing.expect(value.hi == 0);
+    try std.testing.expect(value.lo == 8);
+}
+
+// 乗算のテスト
+test "EVM multiplication" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード: PUSH1 0x07, PUSH1 0x06, MUL, PUSH1 0x00, MSTORE, PUSH1 0x20, PUSH1 0x00, RETURN
+    // 意味: 7 * 6 = 42 を計算し、メモリに格納して返す
+    const bytecode = [_]u8{
+        0x60, 0x07, // PUSH1 7
+        0x60, 0x06, // PUSH1 6
+        0x02, // MUL
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    const calldata = [_]u8{};
+    const result = try execute(allocator, &bytecode, &calldata, 100000);
+    defer allocator.free(result);
+
+    // 結果をEVMu256形式で解釈
+    var value = EVMu256{ .hi = 0, .lo = 0 };
+    if (result.len >= 32) {
+        // 上位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i];
+            value.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+
+        // 下位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i + 16];
+            value.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が42（7*6）になっていることを確認
+    try std.testing.expect(value.hi == 0);
+    try std.testing.expect(value.lo == 42);
+}
+
+// ストレージ操作のテスト
+test "EVM storage operations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード:
+    // PUSH1 0x2A, PUSH1 0x01, SSTORE, // キー1に42を保存
+    // PUSH1 0x01, SLOAD,               // キー1の値をロード
+    // PUSH1 0x00, MSTORE,              // メモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN   // 戻り値を返す
+    const bytecode = [_]u8{
+        0x60, 0x2A, // PUSH1 42
+        0x60, 0x01, // PUSH1 1
+        0x55, // SSTORE
+        0x60, 0x01, // PUSH1 1
+        0x54, // SLOAD
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    const calldata = [_]u8{};
+    const result = try execute(allocator, &bytecode, &calldata, 100000);
+    defer allocator.free(result);
+
+    // 結果をEVMu256形式で解釈
+    var value = EVMu256{ .hi = 0, .lo = 0 };
+    if (result.len >= 32) {
+        // 上位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i];
+            value.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+
+        // 下位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i + 16];
+            value.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が42になっていることを確認
+    try std.testing.expect(value.hi == 0);
+    try std.testing.expect(value.lo == 42);
+}
+
+// 複数のオペコード実行テスト
+test "EVM multiple operations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード:
+    // PUSH1 0x0A, PUSH1 0x0B, ADD,    // 10 + 11 = 21
+    // PUSH1 0x03, MUL,                // 21 * 3 = 63
+    // PUSH1 0x02, SWAP1, DIV,         // 63 / 2 = 31 (スワップしてスタックを調整)
+    // PUSH1 0x00, MSTORE,             // 結果をメモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
+    const bytecode = [_]u8{
+        0x60, 0x0A, // PUSH1 10
+        0x60, 0x0B, // PUSH1 11
+        0x01, // ADD
+        0x60, 0x03, // PUSH1 3
+        0x02, // MUL
+        0x60, 0x02, // PUSH1 2
+        0x90, // SWAP1
+        0x04, // DIV
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    const calldata = [_]u8{};
+    const result = try execute(allocator, &bytecode, &calldata, 100000);
+    defer allocator.free(result);
+
+    // 結果をEVMu256形式で解釈
+    var value = EVMu256{ .hi = 0, .lo = 0 };
+    if (result.len >= 32) {
+        // 上位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i];
+            value.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+
+        // 下位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i + 16];
+            value.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が31（(10+11)*3/2）になっていることを確認
+    try std.testing.expect(value.hi == 0);
+    try std.testing.expect(value.lo == 31);
 }
