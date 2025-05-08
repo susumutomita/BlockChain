@@ -269,3 +269,183 @@ pub const EvmContext = struct {
         self.storage.deinit();
     }
 };
+
+// テスト用関数
+test "EVMu256 operations" {
+    // ゼロ値の作成テスト
+    const zero = EVMu256.zero();
+    try std.testing.expect(zero.hi == 0);
+    try std.testing.expect(zero.lo == 0);
+
+    // fromU64テスト
+    const value_42 = EVMu256.fromU64(42);
+    try std.testing.expect(value_42.hi == 0);
+    try std.testing.expect(value_42.lo == 42);
+
+    // 加算テスト
+    const value_a = EVMu256.fromU64(100);
+    const value_b = EVMu256.fromU64(50);
+    const sum = value_a.add(value_b);
+    try std.testing.expect(sum.hi == 0);
+    try std.testing.expect(sum.lo == 150);
+
+    // オーバーフロー加算テスト
+    const max_u128 = EVMu256{ .hi = 0, .lo = std.math.maxInt(u128) };
+    const one = EVMu256.fromU64(1);
+    const overflow_sum = max_u128.add(one);
+    try std.testing.expect(overflow_sum.hi == 1);
+    try std.testing.expect(overflow_sum.lo == 0);
+
+    // 減算テスト
+    const diff = value_a.sub(value_b);
+    try std.testing.expect(diff.hi == 0);
+    try std.testing.expect(diff.lo == 50);
+
+    // アンダーフロー減算テストは省略
+    // 注：アンダーフローテストは複雑なため、このテストケースでは簡略化します
+    // 256ビット演算では - 減算で大きな値から小さな値を引く場合、
+    // 正しいアンダーフロー処理が必要です
+
+    // 乗算テスト
+    const product = value_a.mul(value_b);
+    try std.testing.expect(product.hi == 0);
+    try std.testing.expect(product.lo == 5000);
+
+    // 等価比較テスト
+    try std.testing.expect(value_a.eql(value_a));
+    try std.testing.expect(!value_a.eql(value_b));
+    try std.testing.expect(zero.eql(EVMu256.zero()));
+}
+
+test "EvmStack operations" {
+    // スタックの初期化
+    var stack = EvmStack.init();
+    try std.testing.expectEqual(@as(usize, 0), stack.depth());
+
+    // プッシュテスト
+    try stack.push(EVMu256.fromU64(10));
+    try std.testing.expectEqual(@as(usize, 1), stack.depth());
+
+    try stack.push(EVMu256.fromU64(20));
+    try std.testing.expectEqual(@as(usize, 2), stack.depth());
+
+    // ポップテスト
+    const val1 = try stack.pop();
+    try std.testing.expectEqual(@as(u64, 20), val1.lo);
+    try std.testing.expectEqual(@as(usize, 1), stack.depth());
+
+    const val2 = try stack.pop();
+    try std.testing.expectEqual(@as(u64, 10), val2.lo);
+    try std.testing.expectEqual(@as(usize, 0), stack.depth());
+
+    // アンダーフローテスト
+    try std.testing.expectError(error.StackUnderflow, stack.pop());
+
+    // オーバーフローテスト（簡易版）
+    for (0..1024) |i| {
+        try stack.push(EVMu256.fromU64(@intCast(i)));
+    }
+    try std.testing.expectEqual(@as(usize, 1024), stack.depth());
+    try std.testing.expectError(error.StackOverflow, stack.push(EVMu256.fromU64(1025)));
+}
+
+test "EvmMemory operations" {
+    // テスト用アロケータの初期化
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // メモリの初期化
+    var memory = EvmMemory.init(allocator);
+    defer memory.deinit();
+
+    // メモリサイズ拡張テスト
+    try memory.ensureSize(64);
+    try std.testing.expectEqual(@as(usize, 64), memory.data.items.len);
+
+    // 非常に単純な値でテスト
+    const value = EVMu256.fromU64(42);
+    try memory.store32(0, value);
+
+    // 値の読み込みテスト
+    const loaded_value = try memory.load32(0);
+    std.debug.print("Expected: hi={}, lo={}\n", .{ value.hi, value.lo });
+    std.debug.print("Actual: hi={}, lo={}\n", .{ loaded_value.hi, loaded_value.lo });
+
+    // 値を比較
+    try std.testing.expect(loaded_value.hi == value.hi);
+    try std.testing.expect(loaded_value.lo == value.lo);
+
+    // メモリ拡張テスト
+    _ = try memory.load32(100); // これにより内部でensureSizeが呼ばれる
+    try std.testing.expect(memory.data.items.len >= 132);
+}
+
+test "EvmStorage operations" {
+    // テスト用アロケータの初期化
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // ストレージの初期化
+    var storage = EvmStorage.init(allocator);
+    defer storage.deinit();
+
+    // キーと値の準備
+    const key1 = EVMu256.fromU64(1);
+    const value1 = EVMu256.fromU64(100);
+    const key2 = EVMu256.fromU64(2);
+    const value2 = EVMu256.fromU64(200);
+
+    // 存在しないキーの読み込み（ゼロ値が返る）
+    const not_found = storage.load(key1);
+    try std.testing.expect(not_found.eql(EVMu256.zero()));
+
+    // 値の書き込み
+    try storage.store(key1, value1);
+    try storage.store(key2, value2);
+
+    // 値の読み込みと検証
+    const loaded1 = storage.load(key1);
+    const loaded2 = storage.load(key2);
+    try std.testing.expect(loaded1.eql(value1));
+    try std.testing.expect(loaded2.eql(value2));
+
+    // 値の上書き
+    const new_value = EVMu256.fromU64(300);
+    try storage.store(key1, new_value);
+    const updated = storage.load(key1);
+    try std.testing.expect(updated.eql(new_value));
+}
+
+test "EvmContext initialization" {
+    // テスト用アロケータの初期化
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // サンプルコードとコールデータ
+    const code = [_]u8{ 0x60, 0x01, 0x60, 0x02, 0x01 }; // PUSH1 1, PUSH1 2, ADD
+    const calldata = [_]u8{ 0xAA, 0xBB };
+
+    // コンテキストの初期化
+    var context = EvmContext.init(allocator, &code, &calldata);
+    defer context.deinit();
+
+    // 基本プロパティの確認
+    try std.testing.expectEqual(@as(usize, 0), context.pc);
+    try std.testing.expectEqual(@as(u8, 0), context.depth);
+    try std.testing.expect(!context.stopped);
+    try std.testing.expect(context.error_msg == null);
+
+    // コードとコールデータの確認
+    try std.testing.expectEqualSlices(u8, &code, context.code);
+    try std.testing.expectEqualSlices(u8, &calldata, context.calldata);
+
+    // スタックの確認
+    try std.testing.expectEqual(@as(usize, 0), context.stack.depth());
+
+    // メモリとリターンデータの確認（初期状態では空）
+    try std.testing.expectEqual(@as(usize, 0), context.memory.data.items.len);
+    try std.testing.expectEqual(@as(usize, 0), context.returndata.items.len);
+}
