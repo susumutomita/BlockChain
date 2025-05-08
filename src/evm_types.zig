@@ -140,26 +140,24 @@ pub const EvmMemory = struct {
         try self.ensureSize(offset + 32);
         var result = EVMu256.zero();
 
-        // 下位128ビット
-        var lo: u128 = 0;
-        for (0..16) |i| {
-            const byte_val = self.data.items[offset + i];
-            // 明示的に適切な型にキャストする
-            const shift_amount = (15 - i) * 8;
-            lo |= @as(u128, byte_val) << @intCast(shift_amount);
-        }
-
-        // 上位128ビット
+        // 上位128ビット（先頭16バイト）
         var hi: u128 = 0;
         for (0..16) |i| {
-            const byte_val = self.data.items[offset + 16 + i];
-            // 明示的に適切な型にキャストする
+            const byte_val = self.data.items[offset + i];
             const shift_amount = (15 - i) * 8;
             hi |= @as(u128, byte_val) << @intCast(shift_amount);
         }
 
-        result.lo = lo;
+        // 下位128ビット（後半16バイト）
+        var lo: u128 = 0;
+        for (0..16) |i| {
+            const byte_val = self.data.items[offset + 16 + i];
+            const shift_amount = (15 - i) * 8;
+            lo |= @as(u128, byte_val) << @intCast(shift_amount);
+        }
+
         result.hi = hi;
+        result.lo = lo;
         return result;
     }
 
@@ -369,8 +367,6 @@ test "EvmMemory operations" {
 
     // 値の読み込みテスト
     const loaded_value = try memory.load32(0);
-    std.debug.print("Expected: hi={}, lo={}\n", .{ value.hi, value.lo });
-    std.debug.print("Actual: hi={}, lo={}\n", .{ loaded_value.hi, loaded_value.lo });
 
     // 値を比較
     try std.testing.expect(loaded_value.hi == value.hi);
