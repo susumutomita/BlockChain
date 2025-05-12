@@ -66,6 +66,50 @@ pub const EVMu256 = struct {
     pub fn eql(self: EVMu256, other: EVMu256) bool {
         return self.hi == other.hi and self.lo == other.lo;
     }
+
+    /// フォーマット出力用メソッド
+    /// std.fmt.Formatインターフェースに準拠
+    pub fn format(
+        self: EVMu256,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        // options is used in some format cases below
+
+        if (fmt.len == 0 or fmt[0] == 'd') {
+            // 10進数表示
+            if (self.hi == 0) {
+                // 上位ビットが0の場合は単純に下位ビットを表示
+                try std.fmt.formatInt(self.lo, 10, .lower, options, writer);
+            } else {
+                // 本来は256ビット数値を正確に10進変換する必要があるが、簡易表示
+                try writer.writeAll("0x");
+                try std.fmt.formatInt(self.hi, 16, .lower, .{}, writer);
+                try writer.writeByte('_');
+                try std.fmt.formatInt(self.lo, 16, .lower, .{}, writer);
+            }
+        } else if (fmt[0] == 'x' or fmt[0] == 'X') {
+            // 16進数表示
+            const case: std.fmt.Case = if (fmt[0] == 'X') .upper else .lower;
+            try writer.writeAll("0x");
+
+            // 上位ビットが0でなければ表示
+            if (self.hi != 0) {
+                try std.fmt.formatInt(self.hi, 16, case, .{ .fill = '0', .width = 32 }, writer);
+            }
+
+            try std.fmt.formatInt(self.lo, 16, case, .{ .fill = '0', .width = 32 }, writer);
+        } else {
+            // 不明なフォーマット指定子の場合はデフォルトで16進表示
+            try writer.writeAll("0x");
+            if (self.hi != 0) {
+                try std.fmt.formatInt(self.hi, 16, .lower, .{}, writer);
+                try writer.writeByte('_');
+            }
+            try std.fmt.formatInt(self.lo, 16, .lower, .{}, writer);
+        }
+    }
 };
 
 /// EVMアドレスクラス（20バイト/160ビットのEthereumアドレス）
