@@ -138,7 +138,9 @@ pub fn broadcastEvmTransaction(allocator: std.mem.Allocator, tx: types.Transacti
     var json_buffer = std.ArrayList(u8).init(allocator);
     defer json_buffer.deinit();
 
-    try json_buffer.appendSlice("{ \"type\": \"evm_tx\", \"data\": { ");
+    // 完全なJSON構造を作成する
+    try json_buffer.appendSlice("{");
+    try json_buffer.appendSlice("\"type\": \"evm_tx\", \"data\": { ");
     try json_buffer.appendSlice("\"sender\": \"");
     try json_buffer.appendSlice(tx.sender);
     try json_buffer.appendSlice("\", \"receiver\": \"");
@@ -180,12 +182,10 @@ pub fn broadcastEvmTransaction(allocator: std.mem.Allocator, tx: types.Transacti
     // すべてのピアにメッセージを送信
     for (peer_list.items) |peer| {
         std.log.info("ピアにEVMトランザクションを送信: {}", .{peer.address});
-        // try peer.stream.writer().writeAll(json_buffer.items);
         var w = peer.stream.writer();
-        try w.writeAll("EVM_TX:"); // ここを追加
+        try w.writeAll("EVM_TX:");
         try w.writeAll(json_buffer.items);
         try w.writeAll("\n"); // メッセージ境界に改行
-
     }
 }
 

@@ -536,26 +536,40 @@ fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator
 /// エラー:
 ///     様々な形式および解析エラー
 pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
-    std.log.debug("parseTransactionJson start", .{});
+    std.log.debug("parseTransactionJson start with: {s}", .{json_slice});
     const allocator = std.heap.page_allocator;
 
     // JSON文字列を汎用JSON値に解析
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_slice, .{});
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_slice, .{});
     defer parsed.deinit();
     const root_value = parsed.value;
 
     // ルートがオブジェクトであることを確認
     const obj = switch (root_value) {
         .object => |o| o,
-        else => return chainError.InvalidFormat,
+        else => {
+            std.log.err("Root is not an object. Found: {any}", .{root_value});
+            return chainError.InvalidFormat;
+        }
     };
 
-    // データオブジェクトを取得
-    const data_val = obj.get("data") orelse return chainError.InvalidFormat;
-    const data_obj = switch (data_val) {
-        .object => |o| o,
-        else => return chainError.InvalidFormat,
-    };
+    // データオブジェクトの取得方法を改善
+    // 「type」フィールドがある場合は特定の形式を想定（{"type": "evm_tx", "data": {...}}）
+    // それ以外の場合は、データが直接ルートにあると想定
+    const data_obj = if (obj.get("type")) |_| blk: {
+        const data_val = obj.get("data") orelse {
+            std.log.err("Expected 'data' field in transaction with 'type' field", .{});
+            return chainError.InvalidFormat;
+        };
+        
+        break :blk switch (data_val) {
+            .object => |o| o,
+            else => {
+                std.log.err("'data' field is not an object", .{});
+                return chainError.InvalidFormat;
+            }
+        };
+    } else obj; // データが直接ルートにある場合
 
     // 基本フィールドを解析
     const sender = try parseStringField(data_obj, "sender", allocator);
@@ -565,18 +579,31 @@ pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
     const amount = try parseU64Field(data_obj, "amount");
 
     // EVMトランザクション固有のフィールドを解析
-    const tx_type = try parseU8Field(data_obj, "tx_type");
+    var tx_type: u8 = 0;
+    if (data_obj.get("tx_type")) |_| {
+        tx_type = try parseU8Field(data_obj, "tx_type");
+    }
 
     // ガス関連のフィールドを解析
-    const gas_limit = try parseUsizeField(data_obj, "gas_limit");
-    const gas_price = try parseU64Field(data_obj, "gas_price");
+    var gas_limit: usize = 1000000; // デフォルト値
+    if (data_obj.get("gas_limit")) |_| {
+        gas_limit = try parseUsizeField(data_obj, "gas_limit");
+    }
+
+    var gas_price: u64 = 10; // デフォルト値
+    if (data_obj.get("gas_price")) |_| {
+        gas_price = try parseU64Field(data_obj, "gas_price");
+    }
 
     // EVM データを解析 (16進数文字列として格納されている)
     var evm_data: ?[]const u8 = null;
     if (data_obj.get("evm_data")) |evm_data_val| {
         const evm_data_str = switch (evm_data_val) {
             .string => evm_data_val.string,
-            else => return error.InvalidFormat,
+            else => {
+                std.log.err("'evm_data' field is not a string", .{});
+                return error.InvalidFormat;
+            }
         };
 
         // "0x" プレフィックスがあれば削除
@@ -588,6 +615,10 @@ pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
         // 16進数文字列をバイナリデータに変換
         evm_data = try utils.hexToBytes(allocator, hex_str);
     }
+
+    std.log.info("Successfully parsed transaction: sender={s}, receiver={s}, tx_type={d}, gas={d}", .{
+        sender, receiver, tx_type, gas_limit
+    });
 
     // トランザクション構造体を返す
     return types.Transaction{
