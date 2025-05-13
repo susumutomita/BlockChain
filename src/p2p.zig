@@ -132,6 +132,7 @@ pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
 /// エラー:
 ///     送信に失敗した場合のエラー
 pub fn broadcastEvmTransaction(allocator: std.mem.Allocator, tx: types.Transaction) !void {
+    std.log.info(">> broadcastEvmTransaction: tx_type={d}, evm_data.len={d}", .{ tx.tx_type, if (tx.evm_data) |data| data.len else 0 });
     // トランザクションJSONを作成
     var json_buffer = std.ArrayList(u8).init(allocator);
     defer json_buffer.deinit();
@@ -255,6 +256,8 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
         std.log.info("Received GET_CHAIN from {any}", .{from_peer.address});
         try sendFullChain(from_peer);
     } else if (std.mem.startsWith(u8, msg, "EVM_TX:")) {
+        std.log.info("<< handleMessage: got EVM_TX message", .{});
+        std.log.debug("<< raw payload: {s}", .{msg[8..]});
         // EVMトランザクションメッセージを処理
         var evm_tx = parser.parseTransactionJson(msg[8..]) catch |err| {
             std.log.err("Error parsing EVM transaction from {any}: {any}", .{ from_peer.address, err });
