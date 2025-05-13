@@ -23,7 +23,7 @@ const DIFFICULTY: u8 = 2;
 pub var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
 
 /// EVMコントラクトストレージ - アドレスからコントラクトコードへのマッピング
-var contract_storage = std.StringHashMap([]const u8).init(std.heap.page_allocator);
+pub var contract_storage = std.StringHashMap([]const u8).init(std.heap.page_allocator);
 
 //------------------------------------------------------------------------------
 // ハッシュ計算とマイニング関数
@@ -395,7 +395,7 @@ pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
             try contract_storage.put(tx.receiver, result);
             contract_deployed = true;
 
-            std.log.info("コントラクトが正常にデプロイされました: アドレス={s}", .{tx.receiver});
+            std.log.info("コントラクトが正常にデプロイされました: アドレス={s}, コード長={d}バイト", .{ tx.receiver, result.len });
         },
 
         // コントラクト呼び出しの場合

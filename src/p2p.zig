@@ -10,6 +10,7 @@ const types = @import("types.zig");
 const parser = @import("parser.zig");
 const blockchain = @import("blockchain.zig"); // トップレベルでblockchainをインポート
 const utils = @import("utils.zig"); // すでに関数内で使用されているので追加
+const main = @import("main.zig"); // Add this to access global variables
 
 /// 接続済みピアのグローバルリスト
 /// ネットワーク内の他のノードへのアクティブな接続を維持します
@@ -209,6 +210,9 @@ pub fn sendFullChain(peer: types.Peer) !void {
         try writer.writeAll(block_json);
         try writer.writeAll("\n"); // メッセージフレーミングのための改行
     }
+
+    // チェーン送信の最後に同期完了のメッセージを送る
+    try writer.writeAll("CHAIN_SYNC_COMPLETE\n");
 }
 
 /// ピアリストからピアを削除する
@@ -255,6 +259,57 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
         // GET_CHAINメッセージを処理
         std.log.info("Received GET_CHAIN from {any}", .{from_peer.address});
         try sendFullChain(from_peer);
+    } else if (std.mem.startsWith(u8, msg, "CHAIN_SYNC_COMPLETE")) {
+        // チェーン同期の完了メッセージを処理
+        std.log.info("Chain synchronization completed with peer {any}", .{from_peer.address});
+
+        // コントラクトストレージの状態をログに出力（デバッグ用）
+        var contract_count: usize = 0;
+        var it = blockchain.contract_storage.iterator();
+        while (it.next()) |entry| {
+            contract_count += 1;
+            std.log.debug("Contract in storage: address={s}, code_length={d}", .{ entry.key_ptr.*, entry.value_ptr.*.len });
+        }
+        std.log.info("Current contract storage has {d} contracts", .{contract_count});
+
+        // コントラクト呼び出しがペンディングの場合、実行する
+        if (main.global_call_pending) {
+            std.log.info("Executing pending contract call to {s}", .{main.global_contract_address});
+
+            // すでに同期されたチェーン上でコントラクトが存在するか確認
+            if (blockchain.contract_storage.get(main.global_contract_address)) |contract_code| {
+                std.log.info("Contract found at address {s}, executing call... (contract code length: {d} bytes)", .{ main.global_contract_address, contract_code.len });
+
+                // トランザクションを作成
+                var tx = types.Transaction{
+                    .sender = "0x1234567890ABCDEF1234567890ABCDEF12345678", // デモ用送信者アドレス
+                    .receiver = main.global_contract_address,
+                    .amount = 0,
+                    .tx_type = 2, // コントラクト呼び出し
+                    .evm_data = main.global_evm_input,
+                    .gas_limit = main.global_gas_limit,
+                    .gas_price = 10, // デフォルトのガス価格を設定
+                };
+
+                // EVMトランザクションを直接処理
+                const result = blockchain.processEvmTransaction(&tx) catch |err| {
+                    std.log.err("Error executing contract call after chain sync: {any}", .{err});
+                    main.global_call_pending = false; // エラーでもフラグを下ろす
+                    return;
+                };
+
+                // 処理結果をログに出力
+                blockchain.logEvmResult(&tx, result) catch |err| {
+                    std.log.err("Error logging EVM result: {any}", .{err});
+                };
+
+                // フラグを下ろす
+                main.global_call_pending = false;
+                std.log.info("Contract call executed successfully after chain synchronization", .{});
+            } else {
+                std.log.warn("Contract not found at address {s} after chain sync", .{main.global_contract_address});
+            }
+        }
     } else if (std.mem.startsWith(u8, msg, "EVM_TX:")) {
         std.log.info("<< handleMessage: got EVM_TX message", .{});
         std.log.debug("<< raw payload: {s}", .{msg[8..]});
