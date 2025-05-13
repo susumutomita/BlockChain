@@ -282,7 +282,7 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
 
                 // トランザクションを作成
                 var tx = types.Transaction{
-                    .sender = "0x1234567890ABCDEF1234567890ABCDEF12345678", // デモ用送信者アドレス
+                    .sender = main.global_sender_address, // 動的な送信者アドレスを使用
                     .receiver = main.global_contract_address,
                     .amount = 0,
                     .tx_type = 2, // コントラクト呼び出し
