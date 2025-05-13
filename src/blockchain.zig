@@ -23,7 +23,7 @@ const DIFFICULTY: u8 = 2;
 pub var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
 
 /// EVMコントラクトストレージ - アドレスからコントラクトコードへのマッピング
-var contract_storage = std.StringHashMap([]const u8).init(std.heap.page_allocator);
+pub var contract_storage = std.StringHashMap([]const u8).init(std.heap.page_allocator);
 
 //------------------------------------------------------------------------------
 // ハッシュ計算とマイニング関数
@@ -193,6 +193,56 @@ pub fn addBlock(new_block: types.Block) void {
         std.log.err("Received block fails PoW check. Rejecting it.", .{});
         return;
     }
+
+    // ブロックに含まれるコントラクトがあれば、コントラクトストレージに追加
+    if (new_block.contracts) |contracts| {
+        var it = contracts.iterator();
+        var contract_count: usize = 0;
+        while (it.next()) |entry| {
+            const address = entry.key_ptr.*;
+            const code = entry.value_ptr.*;
+            contract_count += 1;
+
+            // 既存のコントラクトを上書きしないように注意
+            if (!contract_storage.contains(address)) {
+                contract_storage.put(address, code) catch |err| {
+                    std.log.err("Failed to store contract at address: {s}, error: {any}", .{address, err});
+                    continue;
+                };
+                std.log.info("Loaded contract at address: {s} from synchronized block, code length: {d} bytes", .{address, code.len});
+            }
+        }
+        std.log.info("Processed {d} contracts from received block", .{contract_count});
+    }
+
+    // トランザクションにコントラクトデプロイが含まれているか確認
+    for (new_block.transactions.items) |tx| {
+        if (tx.tx_type == 1) { // コントラクトデプロイトランザクション
+            std.log.info("Found contract deploy transaction in block for address: {s}", .{tx.receiver});
+
+            // コントラクトがまだ保存されていないかつ、evm_dataがある場合
+            if (!contract_storage.contains(tx.receiver) and tx.evm_data != null) {
+                // ローカルで再実行して結果を保存
+                const allocator = std.heap.page_allocator;
+                const evm_data = tx.evm_data.?;
+                const calldata = "";
+
+                const result = @import("evm.zig").execute(allocator, evm_data, calldata, tx.gas_limit) catch |err| {
+                    std.log.err("Failed to re-execute contract deployment: {any}", .{err});
+                    continue;
+                };
+
+                // 結果をコントラクトストレージに保存
+                contract_storage.put(tx.receiver, result) catch |err| {
+                    std.log.err("Failed to store contract result: {any}", .{err});
+                };
+                std.log.info("Re-executed and stored contract at address: {s}, code length: {d} bytes", .{
+                    tx.receiver, result.len
+                });
+            }
+        }
+    }
+
     chain_store.append(new_block) catch {};
     std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
 
@@ -361,6 +411,7 @@ pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
     const allocator = std.heap.page_allocator;
 
     var result: []const u8 = "";
+    var contract_deployed = false;
 
     switch (tx.tx_type) {
         // コントラクトデプロイの場合
@@ -372,10 +423,12 @@ pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
             result = try @import("evm.zig").execute(allocator, evm_data, calldata, tx.gas_limit);
 
             // 返されたランタイムコードを保存（デプロイ時の実行結果がランタイムコード）
-            // デプロイされたコントラクトのアドレスを生成（単純な実装では受信者アドレスを使用）
             try contract_storage.put(tx.receiver, result);
+            contract_deployed = true;
 
-            std.log.info("コントラクトが正常にデプロイされました: アドレス={s}", .{tx.receiver});
+            std.log.info("コントラクトが正常にデプロイされました: アドレス={s}, コード長={d}バイト", .{ tx.receiver, result.len });
+
+            // メモリはすでに使われているため、明示的に捨てる必要はない
         },
 
         // コントラクト呼び出しの場合
@@ -383,7 +436,10 @@ pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
             std.log.info("スマートコントラクトを呼び出しています: アドレス={s}, 送信者={s}, ガス上限={d}", .{ tx.receiver, tx.sender, tx.gas_limit });
 
             // コントラクトコードを取得
-            const contract_code = contract_storage.get(tx.receiver) orelse return error.ContractNotFound;
+            const contract_code = contract_storage.get(tx.receiver) orelse {
+                std.log.err("コントラクトが見つかりません: アドレス={s}", .{tx.receiver});
+                return error.ContractNotFound;
+            };
 
             // EVMを実行
             result = try @import("evm.zig").execute(allocator, contract_code, evm_data, tx.gas_limit);
@@ -396,6 +452,40 @@ pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
             std.log.info("EVMトランザクションではありません: タイプ={d}", .{tx.tx_type});
             return error.NotEvmTransaction;
         },
+    }
+
+    // コントラクトがデプロイされた場合、P2P同期のために特別なトランザクションを含むブロックを作成
+    if (contract_deployed) {
+        // トランザクションを含む新しいブロックを作成
+        const last_block = if (chain_store.items.len > 0) chain_store.items[chain_store.items.len - 1] else try createTestGenesisBlock(allocator);
+        var new_block = createBlock("Contract Deployment", last_block);
+
+        // トランザクションを追加（元のバイトコードを含む）
+        try new_block.transactions.append(tx.*);
+
+        // コントラクトストレージも追加 - ランタイムコードをブロックに含める
+        var contracts = std.StringHashMap([]const u8).init(allocator);
+        try contracts.put(tx.receiver, result);
+        new_block.contracts = contracts;
+
+        // ブロックをマイニングして追加
+        mineBlock(&new_block, DIFFICULTY);
+
+        std.log.info("コントラクトデプロイブロック作成開始: アドレス={s}, トランザクション数={d}, コントラクト数={d}", .{
+            tx.receiver, new_block.transactions.items.len, contracts.count()
+        });
+
+        // ブロックに追加する前にダンプして確認
+        if (contracts.get(tx.receiver)) |code| {
+            std.log.info("contracts内コード長: {d}bytes", .{code.len});
+        } else {
+            std.log.err("contracts内にコードがない", .{});
+        }
+
+        // ブロックを追加
+        addBlock(new_block);
+
+        std.log.info("コントラクトデプロイブロックを作成しました: address={s}", .{tx.receiver});
     }
 
     return result;

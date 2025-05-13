@@ -15,6 +15,14 @@ const evm = @import("evm.zig");
 const evm_types = @import("evm_types.zig");
 const utils = @import("utils.zig");
 
+// グローバル変数で保存しておく（p2p.zigから使用）
+pub var global_call_pending: bool = false;
+pub var global_contract_address: []const u8 = "";
+pub var global_evm_input: []const u8 = undefined;
+pub var global_gas_limit: usize = 0;
+pub var global_allocator: std.mem.Allocator = undefined;
+pub var global_sender_address: []const u8 = "";
+
 /// アプリケーションエントリーポイント
 ///
 /// コマンドライン引数を解析し、P2Pネットワークをセットアップし、
@@ -27,8 +35,8 @@ const utils = @import("utils.zig");
 ///   実行ファイル --listen <ポート> [--connect <ホスト:ポート>...]
 ///   実行ファイル --conformance <テスト名> [--update]
 ///   実行ファイル --evm <バイトコードHEX> [--input <入力データHEX>] [--gas <ガス上限>]
-///   実行ファイル --deploy <バイトコードHEX> <コントラクトアドレス> [--gas <ガス上限>]
-///   実行ファイル --call <コントラクトアドレス> <入力データHEX> [--gas <ガス上限>]
+///   実行ファイル --deploy <バイトコードHEX> <コントラクトアドレス> [--gas <ガス上限>] [--sender <送信者アドレス>]
+///   実行ファイル --call <コントラクトアドレス> <入力データHEX> [--gas <ガス上限>] [--sender <送信者アドレス>]
 ///
 /// 引数:
 ///     <ポート>: このノードが待ち受けるポート番号
@@ -42,6 +50,7 @@ const utils = @import("utils.zig");
 ///     --deploy <バイトコードHEX>: デプロイするコントラクトのバイトコード
 ///     --call <コントラクトアドレス>: 呼び出すコントラクトのアドレス
 ///     --gas <ガス上限>: EVMバイトコード実行時のガス上限（デフォルト: 1000000）
+///     --sender <送信者アドレス>: トランザクション送信者のアドレス
 ///
 /// 戻り値:
 ///     void - 関数は無期限に実行されるか、エラーが発生するまで実行
@@ -56,8 +65,8 @@ pub fn main() !void {
         std.log.err("または: {s} --listen <ポート> [--connect <ホスト:ポート>...]", .{args[0]});
         std.log.err("       {s} --conformance <テスト名> [--update]", .{args[0]});
         std.log.err("       {s} --evm <バイトコードHEX> [--input <入力データHEX>] [--gas <ガス上限>]", .{args[0]});
-        std.log.err("       {s} --deploy <バイトコードHEX> <コントラクトアドレス> [--gas <ガス上限>]", .{args[0]});
-        std.log.err("       {s} --call <コントラクトアドレス> <入力データHEX> [--gas <ガス上限>]", .{args[0]});
+        std.log.err("       {s} --deploy <バイトコードHEX> <コントラクトアドレス> [--gas <ガス上限>] [--sender <送信者アドレス>]", .{args[0]});
+        std.log.err("       {s} --call <コントラクトアドレス> <入力データHEX> [--gas <ガス上限>] [--sender <送信者アドレス>]", .{args[0]});
         return;
     }
 
@@ -71,6 +80,7 @@ pub fn main() !void {
     var deploy_mode = false;
     var call_mode = false;
     var contract_address: []const u8 = "";
+    var sender_address: []const u8 = "0x0000000000000000000000000000000000000000"; // デフォルト送信者アドレス
 
     var self_port: u16 = 0;
     var known_peers = std.ArrayList([]const u8).init(gpa);
@@ -147,6 +157,13 @@ pub fn main() !void {
                 return;
             }
             evm_gas_limit = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--sender")) {
+            i += 1;
+            if (i >= args.len) {
+                std.log.err("--sender フラグの後に送信者アドレスが必要です", .{});
+                return;
+            }
+            sender_address = args[i];
         } else if (self_port == 0 and !evm_mode and !deploy_mode and !call_mode) {
             // 従来の方式（最初の引数はポート番号）
             self_port = try std.fmt.parseInt(u16, arg, 10);
@@ -156,22 +173,13 @@ pub fn main() !void {
         }
     }
 
+    // 送信者アドレスをグローバル変数に設定
+    global_sender_address = sender_address;
+
     // EVMモードの場合はEVMを実行して終了する
     if (evm_mode) {
         try runEvm(gpa, evm_bytecode, evm_input, evm_gas_limit);
         return;
-    }
-
-    // コントラクトデプロイモード
-    if (deploy_mode) {
-        try deployContract(gpa, evm_bytecode, contract_address, evm_gas_limit);
-        // デプロイは即時終了せず、そのままネットワークノードとして動作する
-    }
-
-    // コントラクト呼び出しモード
-    if (call_mode) {
-        try callContract(gpa, contract_address, evm_input, evm_gas_limit);
-        // 呼び出しも即時終了せず、そのままネットワークノードとして動作する
     }
 
     if (self_port == 0 and !deploy_mode and !call_mode) {
@@ -193,6 +201,18 @@ pub fn main() !void {
 
     // インタラクティブなテキスト入力スレッドを開始
     _ = try std.Thread.spawn(.{}, p2p.textInputLoop, .{});
+
+    // コントラクトデプロイモード
+    if (deploy_mode) {
+        try deployContract(gpa, evm_bytecode, contract_address, evm_gas_limit, sender_address);
+        // デプロイは即時終了せず、そのままネットワークノードとして動作する
+    }
+
+    // コントラクト呼び出しモード
+    if (call_mode) {
+        try callContract(gpa, contract_address, evm_input, evm_gas_limit, sender_address);
+        // 呼び出しも即時終了せず、そのままネットワークノードとして動作する
+    }
 
     // メインスレッドを生かし続ける
     while (true) std.time.sleep(60 * std.time.ns_per_s);
@@ -250,7 +270,7 @@ fn runEvm(allocator: std.mem.Allocator, bytecode_hex: []const u8, input_hex: []c
 }
 
 /// コントラクトをブロックチェーン上にデプロイする
-fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contract_address: []const u8, gas_limit: usize) !void {
+fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contract_address: []const u8, gas_limit: usize, sender_address: []const u8) !void {
     std.log.info("コントラクトをブロックチェーンにデプロイしています...", .{});
 
     // 16進数文字列をバイト配列に変換
@@ -259,11 +279,12 @@ fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contra
 
     std.log.info("バイトコード: 0x{s}", .{try utils.bytesToHex(allocator, bytecode)});
     std.log.info("デプロイ先アドレス: {s}", .{contract_address});
+    std.log.info("送信者アドレス: {s}", .{sender_address});
     std.log.info("ガス上限: {d}", .{gas_limit});
 
     // トランザクションを作成
     const tx = types.Transaction{
-        .sender = "0x1234567890ABCDEF1234567890ABCDEF12345678", // デモ用送信者アドレス
+        .sender = sender_address,
         .receiver = contract_address,
         .amount = 0,
         .tx_type = 1, // コントラクトデプロイ
@@ -279,20 +300,28 @@ fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contra
 }
 
 /// コントラクトを呼び出す
-fn callContract(allocator: std.mem.Allocator, contract_address: []const u8, input_hex: []const u8, gas_limit: usize) !void {
+fn callContract(allocator: std.mem.Allocator, contract_address: []const u8, input_hex: []const u8, gas_limit: usize, sender_address: []const u8) !void {
     std.log.info("ブロックチェーン上のコントラクトを呼び出しています...", .{});
 
     // 16進数文字列をバイト配列に変換
     const input_data = try utils.hexToBytes(allocator, input_hex);
-    defer allocator.free(input_data);
+
+    // グローバル変数に設定して保存しておく
+    global_contract_address = contract_address;
+    global_evm_input = input_data; // Don't free this memory as we'll use it later
+    global_gas_limit = gas_limit;
+    global_allocator = allocator;
+    global_sender_address = sender_address;
+    global_call_pending = true;
 
     std.log.info("コントラクトアドレス: {s}", .{contract_address});
+    std.log.info("送信者アドレス: {s}", .{sender_address});
     std.log.info("入力データ: 0x{s}", .{try utils.bytesToHex(allocator, input_data)});
     std.log.info("ガス上限: {d}", .{gas_limit});
 
     // トランザクションを作成
     const tx = types.Transaction{
-        .sender = "0x1234567890ABCDEF1234567890ABCDEF12345678", // デモ用送信者アドレス
+        .sender = sender_address,
         .receiver = contract_address,
         .amount = 0,
         .tx_type = 2, // コントラクト呼び出し
@@ -305,6 +334,29 @@ fn callContract(allocator: std.mem.Allocator, contract_address: []const u8, inpu
     try p2p.broadcastEvmTransaction(allocator, tx);
 
     std.log.info("呼び出しトランザクションをブロードキャストしました", .{});
+
+    // ブロードキャストと同時に、ローカルにもコントラクトがあるか確認
+    if (blockchain.contract_storage.get(contract_address)) |_| {
+        std.log.info("コントラクトがローカルに見つかりました: アドレス={s}", .{contract_address});
+
+        // ローカルでトランザクションを実行
+        var tx_copy = tx; // Create a mutable copy of the transaction
+        const result = blockchain.processEvmTransaction(&tx_copy) catch |err| {
+            std.log.err("ローカルでのコントラクト呼び出しエラー: {any}", .{err});
+            return;
+        };
+
+        // 実行結果を表示
+        blockchain.logEvmResult(&tx_copy, result) catch |err| {
+            std.log.err("結果ログ出力エラー: {any}", .{err});
+        };
+
+        // コールのフラグを下ろす（ローカル実行成功）
+        global_call_pending = false;
+    } else {
+        std.log.info("コントラクトがローカルに見つかりません。チェーン同期後に実行します: アドレス={s}", .{contract_address});
+        // global_call_pending はtrueのまま、チェーン同期後に実行される
+    }
 }
 
 //------------------------------------------------------------------------------
