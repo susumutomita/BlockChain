@@ -131,171 +131,206 @@ fn serializeTransactions(transactions: std.ArrayList(types.Transaction), allocat
     return list.toOwnedSlice();
 }
 
-/// ブロック構造体をJSON文字列にシリアル化する
+/// ブロック構造体をJSON文字列にシリアライズする
 ///
-/// ブロック構造体をネットワーク送信や保存用のJSON文字列表現に変換します。
-/// バイナリハッシュデータを16進文字列としてエンコードします。
+/// 与えられたブロック構造体からブロックチェーンのP2P通信に
+/// 使用できるJSON文字列を生成します。
 ///
 /// 引数:
-///     block: シリアル化するブロック構造体
+///     block: シリアライズするブロック
 ///
 /// 戻り値:
 ///     []const u8: 割り当てられたJSON文字列（呼び出し元がメモリを所有）
 ///
 /// エラー:
-///     割り当てまたはエンコードエラー
+///     割り当てまたはフォーマットエラー
 pub fn serializeBlock(block: types.Block) ![]const u8 {
+    // 文字列の構築に使用されるアロケータ
     const allocator = std.heap.page_allocator;
 
-    // バイナリハッシュを16進文字列に変換
-    const hash_str = hexEncode(block.hash[0..], allocator) catch unreachable;
-    const prev_hash_str = hexEncode(block.prev_hash[0..], allocator) catch unreachable;
+    // トランザクションを文字列に変換
+    const tx_json = try serializeTransactions(block.transactions, allocator);
+    defer allocator.free(tx_json);
 
-    // トランザクション配列をシリアル化
-    const tx_str = try serializeTransactions(block.transactions, allocator);
+    // コントラクト情報をシリアライズ
+    var contracts_json: []const u8 = "null";
+    defer {
+        if (!std.mem.eql(u8, contracts_json, "null")) {
+            allocator.free(contracts_json);
+        }
+    }
 
-    // すべてのフィールドをJSONオブジェクト文字列に結合
-    const json = try std.fmt.allocPrintZ(allocator, "{{\"index\":{d},\"timestamp\":{d},\"nonce\":{d},\"data\":\"{s}\",\"prev_hash\":\"{s}\",\"hash\":\"{s}\",\"transactions\":{s}}}", .{ block.index, block.timestamp, block.nonce, block.data, prev_hash_str, hash_str, tx_str });
+    if (block.contracts) |contracts| {
+        if (contracts.count() > 0) {
+            var contracts_list = std.ArrayList(u8).init(allocator);
+            errdefer contracts_list.deinit();
 
-    // 一時的な割り当てを解放
-    allocator.free(hash_str);
-    allocator.free(prev_hash_str);
-    allocator.free(tx_str);
+            try contracts_list.appendSlice("{");
 
-    return json;
+            var it = contracts.iterator();
+            var first = true;
+            while (it.next()) |entry| {
+                if (!first) {
+                    try contracts_list.appendSlice(",");
+                }
+                first = false;
+
+                const addr = entry.key_ptr.*;
+                const code = entry.value_ptr.*;
+
+                // コントラクトアドレスと16進エンコードされたコードをJSON形式で出力
+                const code_hex = try utils.bytesToHex(allocator, code);
+                defer allocator.free(code_hex);
+
+                try contracts_list.appendSlice("\"");
+                try contracts_list.appendSlice(addr);
+                try contracts_list.appendSlice("\":\"");
+                try contracts_list.appendSlice(code_hex);
+                try contracts_list.appendSlice("\"");
+            }
+
+            try contracts_list.appendSlice("}");
+            contracts_json = try contracts_list.toOwnedSlice();
+        }
+    }
+
+    const hash_str = std.fmt.bytesToHex(block.hash, .lower);
+    const prev_hash_str = std.fmt.bytesToHex(block.prev_hash, .lower);
+    return std.fmt.allocPrint(allocator, "{{" ++
+        "\"index\":{d}," ++
+        "\"timestamp\":{d}," ++
+        "\"prev_hash\":\"{s}\"," ++
+        "\"transactions\":{s}," ++
+        "\"nonce\":{d}," ++
+        "\"data\":\"{s}\"," ++
+        "\"hash\":\"{s}\"," ++
+        "\"contracts\":{s}" ++
+        "}}", .{
+        block.index,
+        block.timestamp,
+        prev_hash_str,
+        tx_json,
+        block.nonce,
+        std.mem.trim(u8, block.data, "\n"),
+        hash_str,
+        contracts_json,
+    });
 }
 
-/// JSON文字列をブロック構造体に解析する
+/// JSONからブロック構造体を解析する
 ///
-/// ブロックのJSON文字列表現をブロック構造体に戻します。
-/// 16進エンコードされたハッシュデータのデコードを処理し、
-/// 入力の構造を検証します。
+/// JSON文字列からブロック構造体を作成して返します。
 ///
 /// 引数:
-///     json_slice: 解析するJSON文字列
+///     json_str: 解析するJSON文字列
 ///
 /// 戻り値:
 ///     types.Block: 解析されたブロック構造体
 ///
 /// エラー:
-///     様々な形式および解析エラー
+///     入力が有効なJSON形式でない場合はエラー
+pub fn parseBlockJson(json_str: []const u8) !types.Block {
+    const allocator = std.heap.page_allocator;
+
+    // JSONをパース
+    var json_obj = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
+    defer json_obj.deinit();
+
+    // JSONオブジェクトからBlock構造体を作成
+    const b = parseBlockFromJsonObj(json_obj.value, allocator) catch |err| {
+        std.log.err("Failed to parse block: {}", .{err});
+        return err;
+    };
+
+    return b;
+}
+
+/// JSONオブジェクトからブロック構造体を解析する
 ///
-/// 注意:
-///     この関数はブロック内の文字列フィールド用にメモリを割り当てます。
-///     ブロックが不要になった時点で、呼び出し元が解放する必要があります。
-pub fn parseBlockJson(json_slice: []const u8) !types.Block {
-    std.log.debug("parseBlockJson start", .{});
-    const block_allocator = std.heap.page_allocator;
-
-    // JSON文字列を汎用JSON値に解析
-    std.log.debug("parseBlockJson start parsed", .{});
-    const parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, json_slice, .{});
-    std.log.debug("parseBlockJson end parsed", .{});
-    defer parsed.deinit();
-    const root_value = parsed.value;
-
-    // ルートがオブジェクトであることを確認
-    const obj = switch (root_value) {
+/// 引数:
+///     obj: 解析するJSONオブジェクト
+///     block_allocator: ブロックデータ用のアロケータ
+///
+/// 戻り値:
+///     types.Block: 解析されたブロック構造体
+///
+/// エラー:
+///     JSONオブジェクトがブロック形式に準拠していない場合はエラー
+fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator) !types.Block {
+    std.log.debug("parseBlockFromJsonObj start", .{});
+    const array_obj = switch (obj) {
         .object => |o| o,
-        else => return chainError.InvalidFormat,
+        else => return error.InvalidFormat,
     };
 
-    // デフォルト値でブロックを初期化
+    // 必須フィールドの検証
+    if (!array_obj.contains("index") or
+        !array_obj.contains("timestamp") or
+        !array_obj.contains("prev_hash") or
+        !array_obj.contains("transactions") or
+        !array_obj.contains("nonce") or
+        !array_obj.contains("data") or
+        !array_obj.contains("hash"))
+    {
+        return error.MissingFields;
+    }
+
+    // インデックスを取得
+    const index = switch (array_obj.get("index").?) {
+        .integer => |i| if (i < 0) return error.InvalidFormat else @as(u32, @intCast(i)),
+        else => return error.InvalidFormat,
+    };
+
+    // タイムスタンプを取得
+    const timestamp = switch (array_obj.get("timestamp").?) {
+        .integer => |i| if (i < 0) return error.InvalidFormat else @as(u64, @intCast(i)),
+        else => return error.InvalidFormat,
+    };
+
+    // 前のハッシュを取得
+    const prev_hash_str = switch (array_obj.get("prev_hash").?) {
+        .string => |s| s,
+        else => return error.InvalidFormat,
+    };
+    var prev_hash: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&prev_hash, prev_hash_str);
+
+    // ノンスを取得
+    const nonce = switch (array_obj.get("nonce").?) {
+        .integer => |i| if (i < 0) return error.InvalidFormat else @as(u64, @intCast(i)),
+        else => return error.InvalidFormat,
+    };
+
+    // データを取得
+    const data = switch (array_obj.get("data").?) {
+        .string => |s| try block_allocator.dupe(u8, s),
+        else => return error.InvalidFormat,
+    };
+
+    // ハッシュを取得
+    const hash_str = switch (array_obj.get("hash").?) {
+        .string => |s| s,
+        else => return error.InvalidFormat,
+    };
+    var hash: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&hash, hash_str);
+
+    // ブロック構造体の初期化
     var b = types.Block{
-        .index = 0,
-        .timestamp = 0,
-        .prev_hash = [_]u8{0} ** 32,
+        .index = index,
+        .timestamp = timestamp,
+        .prev_hash = prev_hash,
         .transactions = std.ArrayList(types.Transaction).init(block_allocator),
-        .nonce = 0,
-        .data = "P2P Received Block",
-        .hash = [_]u8{0} ** 32,
+        .nonce = nonce,
+        .data = data,
+        .hash = hash,
+        .contracts = null,
     };
+    std.log.debug("Block info: index={d}, timestamp={d}, prev_hash={any}, transactions=..., nonce={d}, data={s}, hash={any}", .{ b.index, b.timestamp, b.prev_hash, b.nonce, b.data, b.hash });
 
-    std.log.debug("parseBlockJson start parser", .{});
-
-    // indexフィールドを解析
-    if (obj.get("index")) |idx_val| {
-        const idx_num: i64 = switch (idx_val) {
-            .integer => idx_val.integer,
-            .float => @as(i64, @intFromFloat(idx_val.float)),
-            else => return error.InvalidFormat,
-        };
-        if (idx_num < 0 or idx_num > @as(i64, std.math.maxInt(u32))) {
-            return error.InvalidFormat;
-        }
-        b.index = @intCast(idx_num);
-    }
-
-    // timestampフィールドを解析
-    if (obj.get("timestamp")) |ts_val| {
-        const ts_num: i64 = switch (ts_val) {
-            .integer => if (ts_val.integer < 0) return error.InvalidFormat else ts_val.integer,
-            .float => @intFromFloat(ts_val.float),
-            else => return error.InvalidFormat,
-        };
-        b.timestamp = @intCast(ts_num);
-    }
-
-    // nonceフィールドを解析
-    if (obj.get("nonce")) |nonce_val| {
-        const nonce_num: i64 = switch (nonce_val) {
-            .integer => nonce_val.integer,
-            .float => @intFromFloat(nonce_val.float),
-            else => return error.InvalidFormat,
-        };
-        if (nonce_num < 0 or nonce_num > @as(f64, std.math.maxInt(u64))) {
-            return error.InvalidFormat;
-        }
-        b.nonce = @intCast(nonce_num);
-    }
-
-    // prev_hashフィールドを解析（16進エンコード）
-    if (obj.get("prev_hash")) |ph_val| {
-        const ph_str = switch (ph_val) {
-            .string => ph_val.string,
-            else => return error.InvalidFormat,
-        };
-        var ph_buf: [256]u8 = undefined;
-        const ph_len = try hexDecode(ph_str, &ph_buf);
-        if (ph_len != 32) return error.InvalidFormat;
-        var tmp_ph: [32]u8 = undefined;
-        var i: usize = 0;
-        while (i < 32) : (i += 1) {
-            tmp_ph[i] = ph_buf[i];
-        }
-        b.prev_hash = tmp_ph;
-    }
-
-    // hashフィールドを解析（16進エンコード）
-    if (obj.get("hash")) |hash_val| {
-        const hash_str = switch (hash_val) {
-            .string => hash_val.string,
-            else => return error.InvalidFormat,
-        };
-        var long_buf: [256]u8 = undefined;
-        const actual_len = try hexDecode(hash_str, &long_buf);
-        if (actual_len != 32) return error.InvalidFormat;
-        var tmp_hash: [32]u8 = undefined;
-        var i: usize = 0;
-        while (i < 32) : (i += 1) {
-            tmp_hash[i] = long_buf[i];
-        }
-        b.hash = tmp_hash;
-    }
-
-    // dataフィールドを解析
-    if (obj.get("data")) |data_val| {
-        const data_str = switch (data_val) {
-            .string => data_val.string,
-            else => return error.InvalidFormat,
-        };
-        b.data = try block_allocator.dupe(u8, data_str);
-    }
-
-    // transactions配列を解析
-    if (obj.get("transactions")) |tx_val| {
+    // トランザクションの解析
+    if (array_obj.get("transactions")) |tx_val| {
         switch (tx_val) {
-            // トランザクションが直接JSON配列の場合の処理
             .array => {
                 std.log.debug("Transactions field is directly an array. ", .{});
                 const tx_items = tx_val.array.items;
@@ -351,11 +386,72 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
                         };
                         std.log.info("Transaction element {d}: Parsed amount = {d}", .{ idx, amount });
 
+                        // EVMデータの抽出（存在する場合）
+                        var evm_data: ?[]const u8 = null;
+                        var tx_type: u8 = 0;
+                        var gas_limit: usize = 1000000;
+                        var gas_price: u64 = 20000000000;
+
+                        // tx_typeフィールドを解析（存在する場合）
+                        if (tx_obj.get("tx_type")) |tx_type_val| {
+                            tx_type = switch (tx_type_val) {
+                                .integer => |val| if (val < 0 or val > 255) return error.InvalidFormat else @intCast(val),
+                                else => {
+                                    std.log.err("Transaction element {d}: 'tx_type' field is not an integer.", .{idx});
+                                    return error.InvalidFormat;
+                                },
+                            };
+                        }
+
+                        // evm_dataフィールドを解析（存在する場合）
+                        if (tx_obj.get("evm_data")) |evm_data_val| {
+                            const evm_data_str = switch (evm_data_val) {
+                                .string => |s| s,
+                                else => {
+                                    std.log.err("Transaction element {d}: 'evm_data' field is not a string.", .{idx});
+                                    return error.InvalidFormat;
+                                },
+                            };
+
+                            // "0x" プレフィックスを削除して16進数をバイトに変換
+                            if (evm_data_str.len > 2 and std.mem.startsWith(u8, evm_data_str, "0x")) {
+                                evm_data = try utils.hexToBytes(block_allocator, evm_data_str[2..]);
+                            } else {
+                                evm_data = try utils.hexToBytes(block_allocator, evm_data_str);
+                            }
+                        }
+
+                        // gas_limitフィールドを解析（存在する場合）
+                        if (tx_obj.get("gas_limit")) |gas_limit_val| {
+                            gas_limit = switch (gas_limit_val) {
+                                .integer => |val| if (val < 0) return error.InvalidFormat else @intCast(val),
+                                else => {
+                                    std.log.err("Transaction element {d}: 'gas_limit' field is not an integer.", .{idx});
+                                    return error.InvalidFormat;
+                                },
+                            };
+                        }
+
+                        // gas_priceフィールドを解析（存在する場合）
+                        if (tx_obj.get("gas_price")) |gas_price_val| {
+                            gas_price = switch (gas_price_val) {
+                                .integer => |val| if (val < 0) return error.InvalidFormat else @intCast(val),
+                                else => {
+                                    std.log.err("Transaction element {d}: 'gas_price' field is not an integer.", .{idx});
+                                    return error.InvalidFormat;
+                                },
+                            };
+                        }
+
                         // トランザクションをブロックに追加
                         try b.transactions.append(types.Transaction{
                             .sender = sender_copy,
                             .receiver = receiver_copy,
                             .amount = amount,
+                            .tx_type = tx_type,
+                            .evm_data = evm_data,
+                            .gas_limit = gas_limit,
+                            .gas_price = gas_price,
                         });
                     }
                     std.log.debug("Transactions field is directly an array. end", .{});
@@ -371,7 +467,7 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
                     .array => {
                         const tx_items = tx_parsed.value.array.items;
                         if (tx_items.len > 0) {
-                            // 未実装: 文字列から配列を解析
+                            // 未実装：文字列からパースした配列の処理
                             return error.InvalidFormat;
                         }
                     },
@@ -379,6 +475,45 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
                 }
             },
             else => return error.InvalidFormat,
+        }
+    }
+
+    // コントラクト情報の解析（存在する場合）
+    if (array_obj.get("contracts")) |contracts_val| {
+        switch (contracts_val) {
+            .null => {
+                // コントラクト情報なし
+            },
+            .object => |contracts_obj| {
+                std.log.info("Processing contracts field", .{});
+
+                // 新しいコントラクトストレージを作成
+                var contracts = std.StringHashMap([]const u8).init(block_allocator);
+
+                // 各コントラクトを処理
+                var it = contracts_obj.iterator();
+                while (it.next()) |entry| {
+                    const address = entry.key_ptr.*;
+                    const code_hex = switch (entry.value_ptr.*) {
+                        .string => |s| s,
+                        else => {
+                            std.log.err("Contract code for address {s} is not a string", .{address});
+                            continue;
+                        },
+                    };
+
+                    // 16進数文字列をバイトに変換
+                    const code = try utils.hexToBytes(block_allocator, code_hex);
+                    try contracts.put(address, code);
+                    std.log.info("Parsed contract at address: {s}, code length: {d} bytes", .{ address, code.len });
+                }
+
+                b.contracts = contracts;
+            },
+            else => {
+                std.log.err("Contracts field is neither null nor an object", .{});
+                // エラーは返さず、コントラクト情報なしとして扱う
+            },
         }
     }
 

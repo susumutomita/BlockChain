@@ -178,7 +178,12 @@ pub fn broadcastEvmTransaction(allocator: std.mem.Allocator, tx: types.Transacti
     // すべてのピアにメッセージを送信
     for (peer_list.items) |peer| {
         std.log.info("ピアにEVMトランザクションを送信: {}", .{peer.address});
-        try peer.stream.writer().writeAll(json_buffer.items);
+        // try peer.stream.writer().writeAll(json_buffer.items);
+        var w = peer.stream.writer();
+        try w.writeAll("EVM_TX:"); // ここを追加
+        try w.writeAll(json_buffer.items);
+        try w.writeAll("\n"); // メッセージ境界に改行
+
     }
 }
 
@@ -267,9 +272,8 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
             std.log.err("Error logging EVM result: {any}", .{err});
         };
 
-        // 他のピアにEVMトランザクションをブロードキャスト
-        // broadcastEvmTransaction(std.heap.page_allocator, evm_tx);
-        try broadcastEvmTransaction(std.heap.page_allocator, evm_tx);
+        // 受信したトランザクションは再ブロードキャストしない
+        // 無限ループを防止するため
     } else {
         // 不明なメッセージを処理
         std.log.info("Unknown message from {any}: {s}", .{ from_peer.address, msg });
