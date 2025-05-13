@@ -6,9 +6,10 @@
 //! ブロードキャストし、同期することを可能にします。
 
 const std = @import("std");
-const blockchain = @import("blockchain.zig");
 const types = @import("types.zig");
 const parser = @import("parser.zig");
+const blockchain = @import("blockchain.zig"); // トップレベルでblockchainをインポート
+const utils = @import("utils.zig"); // すでに関数内で使用されているので追加
 
 /// 接続済みピアのグローバルリスト
 /// ネットワーク内の他のノードへのアクティブな接続を維持します
@@ -122,6 +123,65 @@ pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
     }
 }
 
+/// EVMトランザクションを他のノードに送信
+///
+/// 引数:
+///     allocator: メモリアロケータ
+///     tx: 送信するEVMトランザクション
+///
+/// エラー:
+///     送信に失敗した場合のエラー
+pub fn broadcastEvmTransaction(allocator: std.mem.Allocator, tx: types.Transaction) !void {
+    // トランザクションJSONを作成
+    var json_buffer = std.ArrayList(u8).init(allocator);
+    defer json_buffer.deinit();
+
+    try json_buffer.appendSlice("{ \"type\": \"evm_tx\", \"data\": { ");
+    try json_buffer.appendSlice("\"sender\": \"");
+    try json_buffer.appendSlice(tx.sender);
+    try json_buffer.appendSlice("\", \"receiver\": \"");
+    try json_buffer.appendSlice(tx.receiver);
+    try json_buffer.appendSlice("\", \"amount\": ");
+
+    var amount_buf: [20]u8 = undefined;
+    const amount_str = try std.fmt.bufPrint(&amount_buf, "{d}", .{tx.amount});
+    try json_buffer.appendSlice(amount_str);
+
+    // EVMトランザクション固有のフィールドを追加
+    try json_buffer.appendSlice(", \"tx_type\": ");
+    var type_buf: [2]u8 = undefined;
+    const type_str = try std.fmt.bufPrint(&type_buf, "{d}", .{tx.tx_type});
+    try json_buffer.appendSlice(type_str);
+
+    // EVMデータを16進数で追加
+    try json_buffer.appendSlice(", \"evm_data\": \"0x");
+    if (tx.evm_data) |evm_data| {
+        const hex_data = try utils.bytesToHex(allocator, evm_data);
+        defer allocator.free(hex_data);
+        try json_buffer.appendSlice(hex_data);
+    }
+    try json_buffer.appendSlice("\"");
+
+    // ガス関連の情報を追加
+    try json_buffer.appendSlice(", \"gas_limit\": ");
+    var gas_buf: [20]u8 = undefined;
+    const gas_str = try std.fmt.bufPrint(&gas_buf, "{d}", .{tx.gas_limit});
+    try json_buffer.appendSlice(gas_str);
+
+    try json_buffer.appendSlice(", \"gas_price\": ");
+    var price_buf: [20]u8 = undefined;
+    const price_str = try std.fmt.bufPrint(&price_buf, "{d}", .{tx.gas_price});
+    try json_buffer.appendSlice(price_str);
+
+    try json_buffer.appendSlice(" } }");
+
+    // すべてのピアにメッセージを送信
+    for (peer_list.items) |peer| {
+        std.log.info("ピアにEVMトランザクションを送信: {}", .{peer.address});
+        try peer.stream.writer().writeAll(json_buffer.items);
+    }
+}
+
 /// 完全なブロックチェーンをピアに送信する
 ///
 /// ローカルチェーン内のすべてのブロックをシリアル化し、
@@ -189,6 +249,27 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
         // GET_CHAINメッセージを処理
         std.log.info("Received GET_CHAIN from {any}", .{from_peer.address});
         try sendFullChain(from_peer);
+    } else if (std.mem.startsWith(u8, msg, "EVM_TX:")) {
+        // EVMトランザクションメッセージを処理
+        var evm_tx = parser.parseTransactionJson(msg[8..]) catch |err| {
+            std.log.err("Error parsing EVM transaction from {any}: {any}", .{ from_peer.address, err });
+            return;
+        };
+
+        // EVMトランザクションを処理
+        const result = blockchain.processEvmTransaction(&evm_tx) catch |err| {
+            std.log.err("Error processing EVM transaction from {any}: {any}", .{ from_peer.address, err });
+            return;
+        };
+
+        // 処理結果をログに出力
+        blockchain.logEvmResult(&evm_tx, result) catch |err| {
+            std.log.err("Error logging EVM result: {any}", .{err});
+        };
+
+        // 他のピアにEVMトランザクションをブロードキャスト
+        // broadcastEvmTransaction(std.heap.page_allocator, evm_tx);
+        try broadcastEvmTransaction(std.heap.page_allocator, evm_tx);
     } else {
         // 不明なメッセージを処理
         std.log.info("Unknown message from {any}: {s}", .{ from_peer.address, msg });
