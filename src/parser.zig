@@ -539,8 +539,17 @@ pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
     std.log.debug("parseTransactionJson start with: {s}", .{json_slice});
     const allocator = std.heap.page_allocator;
 
+    // 入力文字列を前処理して有効なJSONにする
+    const valid_json = try preprocessJsonInput(allocator, json_slice);
+    defer allocator.free(valid_json);
+
+    std.log.debug("After preprocessing: {s}", .{valid_json});
+
     // JSON文字列を汎用JSON値に解析
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_slice, .{});
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, valid_json, .{}) catch |err| {
+        std.log.err("JSON parse error: {any}", .{err});
+        return err;
+    };
     defer parsed.deinit();
     const root_value = parsed.value;
 
@@ -550,7 +559,7 @@ pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
         else => {
             std.log.err("Root is not an object. Found: {any}", .{root_value});
             return chainError.InvalidFormat;
-        }
+        },
     };
 
     // データオブジェクトの取得方法を改善
@@ -561,13 +570,13 @@ pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
             std.log.err("Expected 'data' field in transaction with 'type' field", .{});
             return chainError.InvalidFormat;
         };
-        
+
         break :blk switch (data_val) {
             .object => |o| o,
             else => {
                 std.log.err("'data' field is not an object", .{});
                 return chainError.InvalidFormat;
-            }
+            },
         };
     } else obj; // データが直接ルートにある場合
 
@@ -603,7 +612,7 @@ pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
             else => {
                 std.log.err("'evm_data' field is not a string", .{});
                 return error.InvalidFormat;
-            }
+            },
         };
 
         // "0x" プレフィックスがあれば削除
@@ -616,9 +625,7 @@ pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
         evm_data = try utils.hexToBytes(allocator, hex_str);
     }
 
-    std.log.info("Successfully parsed transaction: sender={s}, receiver={s}, tx_type={d}, gas={d}", .{
-        sender, receiver, tx_type, gas_limit
-    });
+    std.log.info("Successfully parsed transaction: sender={s}, receiver={s}, tx_type={d}, gas={d}", .{ sender, receiver, tx_type, gas_limit });
 
     // トランザクション構造体を返す
     return types.Transaction{
@@ -630,6 +637,32 @@ pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
         .gas_limit = gas_limit,
         .gas_price = gas_price,
     };
+}
+
+/// JSONの文字列を前処理して有効なJSON形式に変換する
+/// 不完全なJSONの場合、必要な構文要素を追加する
+fn preprocessJsonInput(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    // 先頭と末尾のホワイトスペースを削除
+    const trimmed = std.mem.trim(u8, input, &std.ascii.whitespace);
+
+    // 入力が完全なJSONオブジェクトかどうか確認
+    const starts_with_brace = trimmed.len > 0 and trimmed[0] == '{';
+    const ends_with_brace = trimmed.len > 0 and trimmed[trimmed.len - 1] == '}';
+
+    if (starts_with_brace and ends_with_brace) {
+        // すでに有効なJSONオブジェクトの形式なら、そのまま返す
+        return allocator.dupe(u8, trimmed);
+    }
+
+    // コロンから始まるパターンは問題ないが、クォートから始まるパターンは括弧で囲む必要がある
+    if (trimmed.len > 0 and trimmed[0] == '"') {
+        const buffer = try std.fmt.allocPrint(allocator, "{{{s}}}", .{trimmed});
+        return buffer;
+    }
+
+    // フォールバック：単純に括弧を追加
+    const buffer = try std.fmt.allocPrint(allocator, "{{{s}}}", .{trimmed});
+    return buffer;
 }
 
 /// JSONオブジェクトから文字列フィールドを解析

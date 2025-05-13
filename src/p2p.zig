@@ -138,7 +138,7 @@ pub fn broadcastEvmTransaction(allocator: std.mem.Allocator, tx: types.Transacti
     var json_buffer = std.ArrayList(u8).init(allocator);
     defer json_buffer.deinit();
 
-    // 完全なJSON構造を作成する
+    // 完全なJSON構造を作成する - 確実に有効なJSONになるよう括弧で囲む
     try json_buffer.appendSlice("{");
     try json_buffer.appendSlice("\"type\": \"evm_tx\", \"data\": { ");
     try json_buffer.appendSlice("\"sender\": \"");
@@ -184,7 +184,7 @@ pub fn broadcastEvmTransaction(allocator: std.mem.Allocator, tx: types.Transacti
         std.log.info("ピアにEVMトランザクションを送信: {}", .{peer.address});
         var w = peer.stream.writer();
         try w.writeAll("EVM_TX:");
-        try w.writeAll(json_buffer.items);
+        try w.writeAll(json_buffer.items); // 完全なJSON文字列として送信
         try w.writeAll("\n"); // メッセージ境界に改行
     }
 }
