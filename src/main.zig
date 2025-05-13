@@ -27,6 +27,8 @@ const utils = @import("utils.zig");
 ///   実行ファイル --listen <ポート> [--connect <ホスト:ポート>...]
 ///   実行ファイル --conformance <テスト名> [--update]
 ///   実行ファイル --evm <バイトコードHEX> [--input <入力データHEX>] [--gas <ガス上限>]
+///   実行ファイル --deploy <バイトコードHEX> <コントラクトアドレス> [--gas <ガス上限>]
+///   実行ファイル --call <コントラクトアドレス> <入力データHEX> [--gas <ガス上限>]
 ///
 /// 引数:
 ///     <ポート>: このノードが待ち受けるポート番号
@@ -37,6 +39,8 @@ const utils = @import("utils.zig");
 ///     --update: 適合性テスト実行時にゴールデンファイルを更新
 ///     --evm <バイトコードHEX>: 実行するEVMバイトコード（16進数形式）
 ///     --input <入力データHEX>: EVMコントラクトへの入力データ（16進数形式）
+///     --deploy <バイトコードHEX>: デプロイするコントラクトのバイトコード
+///     --call <コントラクトアドレス>: 呼び出すコントラクトのアドレス
 ///     --gas <ガス上限>: EVMバイトコード実行時のガス上限（デフォルト: 1000000）
 ///
 /// 戻り値:
@@ -52,6 +56,8 @@ pub fn main() !void {
         std.log.err("または: {s} --listen <ポート> [--connect <ホスト:ポート>...]", .{args[0]});
         std.log.err("       {s} --conformance <テスト名> [--update]", .{args[0]});
         std.log.err("       {s} --evm <バイトコードHEX> [--input <入力データHEX>] [--gas <ガス上限>]", .{args[0]});
+        std.log.err("       {s} --deploy <バイトコードHEX> <コントラクトアドレス> [--gas <ガス上限>]", .{args[0]});
+        std.log.err("       {s} --call <コントラクトアドレス> <入力データHEX> [--gas <ガス上限>]", .{args[0]});
         return;
     }
 
@@ -60,6 +66,11 @@ pub fn main() !void {
     var evm_bytecode: []const u8 = "";
     var evm_input: []const u8 = "";
     var evm_gas_limit: usize = 1000000; // デフォルトガス上限
+
+    // ネットワークEVMトランザクションモード
+    var deploy_mode = false;
+    var call_mode = false;
+    var contract_address: []const u8 = "";
 
     var self_port: u16 = 0;
     var known_peers = std.ArrayList([]const u8).init(gpa);
@@ -97,6 +108,38 @@ pub fn main() !void {
                 return;
             }
             evm_input = args[i];
+        } else if (std.mem.eql(u8, arg, "--deploy")) {
+            deploy_mode = true;
+            i += 1;
+            if (i >= args.len) {
+                std.log.err("--deploy フラグの後にバイトコードが必要です", .{});
+                return;
+            }
+            evm_bytecode = args[i];
+
+            // コントラクトアドレスも必要
+            i += 1;
+            if (i >= args.len) {
+                std.log.err("--deploy フラグの後にコントラクトアドレスも指定する必要があります", .{});
+                return;
+            }
+            contract_address = args[i];
+        } else if (std.mem.eql(u8, arg, "--call")) {
+            call_mode = true;
+            i += 1;
+            if (i >= args.len) {
+                std.log.err("--call フラグの後にコントラクトアドレスが必要です", .{});
+                return;
+            }
+            contract_address = args[i];
+
+            // 入力データも必要
+            i += 1;
+            if (i >= args.len) {
+                std.log.err("--call フラグの後に入力データも指定する必要があります", .{});
+                return;
+            }
+            evm_input = args[i];
         } else if (std.mem.eql(u8, arg, "--gas")) {
             i += 1;
             if (i >= args.len) {
@@ -104,10 +147,10 @@ pub fn main() !void {
                 return;
             }
             evm_gas_limit = try std.fmt.parseInt(usize, args[i], 10);
-        } else if (self_port == 0 and !evm_mode) {
+        } else if (self_port == 0 and !evm_mode and !deploy_mode and !call_mode) {
             // 従来の方式（最初の引数はポート番号）
             self_port = try std.fmt.parseInt(u16, arg, 10);
-        } else if (!evm_mode) {
+        } else if (!evm_mode and !deploy_mode and !call_mode) {
             // 従来の方式（追加の引数はピアアドレス）
             try known_peers.append(arg);
         }
@@ -119,7 +162,19 @@ pub fn main() !void {
         return;
     }
 
-    if (self_port == 0) {
+    // コントラクトデプロイモード
+    if (deploy_mode) {
+        try deployContract(gpa, evm_bytecode, contract_address, evm_gas_limit);
+        // デプロイは即時終了せず、そのままネットワークノードとして動作する
+    }
+
+    // コントラクト呼び出しモード
+    if (call_mode) {
+        try callContract(gpa, contract_address, evm_input, evm_gas_limit);
+        // 呼び出しも即時終了せず、そのままネットワークノードとして動作する
+    }
+
+    if (self_port == 0 and !deploy_mode and !call_mode) {
         std.log.err("ポート番号が指定されていません。--listen フラグまたは最初の引数として指定してください。", .{});
         return;
     }
@@ -192,6 +247,64 @@ fn runEvm(allocator: std.mem.Allocator, bytecode_hex: []const u8, input_hex: []c
         // カスタム型のフォーマット関数を使用するため、{} または {x}を使う
         std.log.info("結果(u256): {} (0x{x})", .{ value, value });
     }
+}
+
+/// コントラクトをブロックチェーン上にデプロイする
+fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contract_address: []const u8, gas_limit: usize) !void {
+    std.log.info("コントラクトをブロックチェーンにデプロイしています...", .{});
+
+    // 16進数文字列をバイト配列に変換
+    const bytecode = try utils.hexToBytes(allocator, bytecode_hex);
+    defer allocator.free(bytecode);
+
+    std.log.info("バイトコード: 0x{s}", .{try utils.bytesToHex(allocator, bytecode)});
+    std.log.info("デプロイ先アドレス: {s}", .{contract_address});
+    std.log.info("ガス上限: {d}", .{gas_limit});
+
+    // トランザクションを作成
+    const tx = types.Transaction{
+        .sender = "0x1234567890ABCDEF1234567890ABCDEF12345678", // デモ用送信者アドレス
+        .receiver = contract_address,
+        .amount = 0,
+        .tx_type = 1, // コントラクトデプロイ
+        .evm_data = bytecode,
+        .gas_limit = gas_limit,
+        .gas_price = 10, // デフォルトのガス価格を設定
+    };
+
+    // P2Pネットワーク上でトランザクションをブロードキャスト
+    try p2p.broadcastEvmTransaction(allocator, tx);
+
+    std.log.info("デプロイトランザクションをブロードキャストしました", .{});
+}
+
+/// コントラクトを呼び出す
+fn callContract(allocator: std.mem.Allocator, contract_address: []const u8, input_hex: []const u8, gas_limit: usize) !void {
+    std.log.info("ブロックチェーン上のコントラクトを呼び出しています...", .{});
+
+    // 16進数文字列をバイト配列に変換
+    const input_data = try utils.hexToBytes(allocator, input_hex);
+    defer allocator.free(input_data);
+
+    std.log.info("コントラクトアドレス: {s}", .{contract_address});
+    std.log.info("入力データ: 0x{s}", .{try utils.bytesToHex(allocator, input_data)});
+    std.log.info("ガス上限: {d}", .{gas_limit});
+
+    // トランザクションを作成
+    const tx = types.Transaction{
+        .sender = "0x1234567890ABCDEF1234567890ABCDEF12345678", // デモ用送信者アドレス
+        .receiver = contract_address,
+        .amount = 0,
+        .tx_type = 2, // コントラクト呼び出し
+        .evm_data = input_data,
+        .gas_limit = gas_limit,
+        .gas_price = 10, // デフォルトのガス価格を設定
+    };
+
+    // P2Pネットワーク上でトランザクションをブロードキャスト
+    try p2p.broadcastEvmTransaction(allocator, tx);
+
+    std.log.info("呼び出しトランザクションをブロードキャストしました", .{});
 }
 
 //------------------------------------------------------------------------------

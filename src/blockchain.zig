@@ -22,6 +22,9 @@ const DIFFICULTY: u8 = 2;
 /// 完全なブロックチェーンをBlock構造体の動的配列として格納します
 pub var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
 
+/// EVMコントラクトストレージ - アドレスからコントラクトコードへのマッピング
+var contract_storage = std.StringHashMap([]const u8).init(std.heap.page_allocator);
+
 //------------------------------------------------------------------------------
 // ハッシュ計算とマイニング関数
 //------------------------------------------------------------------------------
@@ -71,6 +74,39 @@ pub fn calculateHash(block: *const types.Block) [32]u8 {
     const hash = hasher.finalResult();
     logger.debugLog("nonce: {d}, hash: {x}\n", .{ block.nonce, hash });
     return hash;
+}
+
+/// トランザクションのハッシュを計算する
+///
+/// トランザクションの送信者、受信者、金額、タイプ、EVMデータなどを含めて
+/// SHA-256ハッシュを計算します。
+///
+/// 引数:
+///     tx: ハッシュを計算するトランザクション
+///
+/// 戻り値:
+///     [32]u8: トランザクションの32バイトのSHA-256ハッシュ
+pub fn calculateTransactionHash(tx: *const types.Transaction) [32]u8 {
+    var hasher = Sha256.init(.{});
+
+    hasher.update(tx.sender);
+    hasher.update(tx.receiver);
+
+    const amount_bytes = utils.toBytesU64(tx.amount);
+    hasher.update(&amount_bytes);
+
+    hasher.update(&[_]u8{tx.tx_type});
+
+    const gas_limit_bytes = utils.toBytes(usize, tx.gas_limit);
+    const gas_price_bytes = utils.toBytesU64(tx.gas_price);
+    hasher.update(gas_limit_bytes[0..]);
+    hasher.update(gas_price_bytes[0..]);
+
+    if (tx.evm_data) |data| {
+        hasher.update(data);
+    }
+
+    return hasher.finalResult();
 }
 
 /// ハッシュが必要なプルーフオブワークの難易度を満たしているかチェックする
@@ -304,6 +340,89 @@ pub fn printChainState() void {
         std.debug.print("Hash       : {s}\n", .{hash_str[0..64]});
     }
     std.debug.print("\n{s}\n", .{"---------------------------"});
+}
+
+/// EVMトランザクションを処理し、その結果をブロックチェーンに追加する
+///
+/// 引数:
+///     tx: 処理するトランザクション
+///
+/// 戻り値:
+///     実行結果のバイト配列またはエラー
+pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
+    // トランザクション識別子を生成（まだ設定されていない場合）
+    if (std.mem.eql(u8, &tx.id, &[_]u8{0} ** 32)) {
+        tx.id = calculateTransactionHash(tx);
+    }
+
+    // EVMデータが存在することを確認
+    const evm_data = tx.evm_data orelse return error.NoEvmData;
+
+    const allocator = std.heap.page_allocator;
+
+    var result: []const u8 = "";
+
+    switch (tx.tx_type) {
+        // コントラクトデプロイの場合
+        1 => {
+            std.log.info("スマートコントラクトをデプロイしています: 送信者={s}, ガス上限={d}", .{ tx.sender, tx.gas_limit });
+
+            // EVMバイトコードを実行
+            const calldata = "";
+            result = try @import("evm.zig").execute(allocator, evm_data, calldata, tx.gas_limit);
+
+            // 返されたランタイムコードを保存（デプロイ時の実行結果がランタイムコード）
+            // デプロイされたコントラクトのアドレスを生成（単純な実装では受信者アドレスを使用）
+            try contract_storage.put(tx.receiver, result);
+
+            std.log.info("コントラクトが正常にデプロイされました: アドレス={s}", .{tx.receiver});
+        },
+
+        // コントラクト呼び出しの場合
+        2 => {
+            std.log.info("スマートコントラクトを呼び出しています: アドレス={s}, 送信者={s}, ガス上限={d}", .{ tx.receiver, tx.sender, tx.gas_limit });
+
+            // コントラクトコードを取得
+            const contract_code = contract_storage.get(tx.receiver) orelse return error.ContractNotFound;
+
+            // EVMを実行
+            result = try @import("evm.zig").execute(allocator, contract_code, evm_data, tx.gas_limit);
+
+            std.log.info("コントラクト呼び出しが完了しました: 結果長={d}バイト", .{result.len});
+        },
+
+        // その他のトランザクションタイプ（通常の送金など）
+        else => {
+            std.log.info("EVMトランザクションではありません: タイプ={d}", .{tx.tx_type});
+            return error.NotEvmTransaction;
+        },
+    }
+
+    return result;
+}
+
+/// EVMトランザクションの実行結果をログに記録
+pub fn logEvmResult(tx: *const types.Transaction, result: []const u8) !void {
+    const allocator = std.heap.page_allocator;
+    const hex_result = try std.fmt.allocPrint(allocator, "0x{s}", .{try @import("utils.zig").bytesToHex(allocator, result)});
+    defer allocator.free(hex_result);
+
+    std.log.info("EVM実行結果: TxID={s}, 結果={s}", .{ try std.fmt.allocPrint(allocator, "{x}", .{tx.id}), hex_result });
+
+    if (result.len >= 32) {
+        var value = @import("evm_types.zig").EVMu256{ .hi = 0, .lo = 0 };
+
+        for (0..16) |j| {
+            const byte_val = result[j];
+            value.hi |= @as(u128, byte_val) << @intCast((15 - j) * 8);
+        }
+        for (0..16) |j| {
+            const byte_val = result[j + 16];
+            value.lo |= @as(u128, byte_val) << @intCast((15 - j) * 8);
+        }
+
+        std.log.info("EVM実行結果(u256): {}", .{value});
+    }
 }
 
 // ヘルパー関数: 文字列を指定回数繰り返す

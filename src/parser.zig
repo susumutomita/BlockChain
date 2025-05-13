@@ -386,3 +386,140 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
     std.log.debug("parseBlockJson end", .{});
     return b;
 }
+
+/// JSON文字列からトランザクション構造体を解析する
+///
+/// JSON形式のトランザクション文字列を解析して、トランザクション構造体に変換します。
+/// EVM関連のフィールドにも対応しています。
+///
+/// 引数:
+///     json_slice: 解析するJSON文字列
+///
+/// 戻り値:
+///     types.Transaction: 解析されたトランザクション構造体
+///
+/// エラー:
+///     様々な形式および解析エラー
+pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
+    std.log.debug("parseTransactionJson start", .{});
+    const allocator = std.heap.page_allocator;
+
+    // JSON文字列を汎用JSON値に解析
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_slice, .{});
+    defer parsed.deinit();
+    const root_value = parsed.value;
+
+    // ルートがオブジェクトであることを確認
+    const obj = switch (root_value) {
+        .object => |o| o,
+        else => return chainError.InvalidFormat,
+    };
+
+    // データオブジェクトを取得
+    const data_val = obj.get("data") orelse return chainError.InvalidFormat;
+    const data_obj = switch (data_val) {
+        .object => |o| o,
+        else => return chainError.InvalidFormat,
+    };
+
+    // 基本フィールドを解析
+    const sender = try parseStringField(data_obj, "sender", allocator);
+    const receiver = try parseStringField(data_obj, "receiver", allocator);
+
+    // 金額フィールドを解析
+    const amount = try parseU64Field(data_obj, "amount");
+
+    // EVMトランザクション固有のフィールドを解析
+    const tx_type = try parseU8Field(data_obj, "tx_type");
+
+    // ガス関連のフィールドを解析
+    const gas_limit = try parseUsizeField(data_obj, "gas_limit");
+    const gas_price = try parseU64Field(data_obj, "gas_price");
+
+    // EVM データを解析 (16進数文字列として格納されている)
+    var evm_data: ?[]const u8 = null;
+    if (data_obj.get("evm_data")) |evm_data_val| {
+        const evm_data_str = switch (evm_data_val) {
+            .string => evm_data_val.string,
+            else => return error.InvalidFormat,
+        };
+
+        // "0x" プレフィックスがあれば削除
+        const hex_str = if (std.mem.startsWith(u8, evm_data_str, "0x"))
+            evm_data_str[2..]
+        else
+            evm_data_str;
+
+        // 16進数文字列をバイナリデータに変換
+        evm_data = try utils.hexToBytes(allocator, hex_str);
+    }
+
+    // トランザクション構造体を返す
+    return types.Transaction{
+        .sender = sender,
+        .receiver = receiver,
+        .amount = amount,
+        .tx_type = tx_type,
+        .evm_data = evm_data,
+        .gas_limit = gas_limit,
+        .gas_price = gas_price,
+    };
+}
+
+/// JSONオブジェクトから文字列フィールドを解析
+fn parseStringField(obj: std.json.ObjectMap, field_name: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    const val = obj.get(field_name) orelse return error.MissingField;
+    const str = switch (val) {
+        .string => val.string,
+        else => return error.InvalidFormat,
+    };
+    return try allocator.dupe(u8, str);
+}
+
+/// JSONオブジェクトから符号なし64ビット整数フィールドを解析
+fn parseU64Field(obj: std.json.ObjectMap, field_name: []const u8) !u64 {
+    const val = obj.get(field_name) orelse return error.MissingField;
+    switch (val) {
+        .integer => |i| {
+            if (i < 0) return error.InvalidFormat;
+            return @intCast(i);
+        },
+        .float => |f| {
+            if (f < 0) return error.InvalidFormat;
+            return @intFromFloat(f);
+        },
+        else => return error.InvalidFormat,
+    }
+}
+
+/// JSONオブジェクトから符号なし8ビット整数フィールドを解析
+fn parseU8Field(obj: std.json.ObjectMap, field_name: []const u8) !u8 {
+    const val = obj.get(field_name) orelse return error.MissingField;
+    switch (val) {
+        .integer => |i| {
+            if (i < 0 or i > 255) return error.InvalidFormat;
+            return @intCast(i);
+        },
+        .float => |f| {
+            if (f < 0 or f > 255) return error.InvalidFormat;
+            return @intFromFloat(f);
+        },
+        else => return error.InvalidFormat,
+    }
+}
+
+/// JSONオブジェクトからusize整数フィールドを解析
+fn parseUsizeField(obj: std.json.ObjectMap, field_name: []const u8) !usize {
+    const val = obj.get(field_name) orelse return error.MissingField;
+    switch (val) {
+        .integer => |i| {
+            if (i < 0) return error.InvalidFormat;
+            return @intCast(i);
+        },
+        .float => |f| {
+            if (f < 0) return error.InvalidFormat;
+            return @intFromFloat(f);
+        },
+        else => return error.InvalidFormat,
+    }
+}
