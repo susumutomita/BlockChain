@@ -39,6 +39,7 @@ pub const Opcode = struct {
     pub const OR = 0x17;
     pub const XOR = 0x18;
     pub const NOT = 0x19;
+    pub const SHR = 0x1C;
     pub const POP = 0x50;
 
     // メモリ操作
@@ -72,6 +73,13 @@ pub const Opcode = struct {
     pub const CALLDATALOAD = 0x35;
     pub const CALLDATASIZE = 0x36;
     pub const CALLDATACOPY = 0x37;
+
+    // コード関連
+    pub const CODECOPY = 0x39;
+
+    // 戻りデータ関連
+    pub const RETURNDATASIZE = 0x3D;
+    pub const RETURNDATACOPY = 0x3E;
 };
 
 /// エラー型定義
@@ -82,6 +90,7 @@ pub const EVMError = error{
     InvalidJump,
     InvalidOpcode,
     MemoryOutOfBounds,
+    Revert,
 };
 
 /// EVMバイトコードを実行する
@@ -292,10 +301,211 @@ fn executeStep(context: *EvmContext) !void {
             context.stopped = true;
         },
 
+        Opcode.RETURNDATASIZE => {
+            // スタックに直前の呼び出し戻りデータのサイズを積む
+            // 簡易実装では常に0を返す
+            try context.stack.push(EVMu256.zero());
+            context.pc += 1;
+        },
+
+        Opcode.EQ => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+
+            // 等価比較: 両方の値が完全に一致する場合は1、それ以外は0
+            if (a.hi == b.hi and a.lo == b.lo) {
+                try context.stack.push(EVMu256.fromU64(1));
+            } else {
+                try context.stack.push(EVMu256.zero());
+            }
+            context.pc += 1;
+        },
+
+        Opcode.LT => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+
+            // 未満比較: b < a の場合は1、それ以外は0
+            var result: u64 = 0;
+            if (b.hi < a.hi) {
+                result = 1;
+            } else if (b.hi == a.hi and b.lo < a.lo) {
+                result = 1;
+            }
+
+            try context.stack.push(EVMu256.fromU64(result));
+            context.pc += 1;
+        },
+
+        Opcode.ISZERO => {
+            if (context.stack.depth() < 1) return EVMError.StackUnderflow;
+            const x = try context.stack.pop();
+
+            // ゼロ判定: 値が0なら1、それ以外は0
+            if (x.hi == 0 and x.lo == 0) {
+                try context.stack.push(EVMu256.fromU64(1));
+            } else {
+                try context.stack.push(EVMu256.zero());
+            }
+            context.pc += 1;
+        },
+
+        Opcode.JUMPDEST => {
+            // ジャンプ先マーカー: 何もせず次の命令へ
+            context.pc += 1;
+        },
+
+        Opcode.SHR => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const shift = try context.stack.pop();
+            const value = try context.stack.pop();
+
+            // シフト量が256以上の場合は結果は0
+            if (shift.hi > 0 or shift.lo >= 256) {
+                try context.stack.push(EVMu256.zero());
+            } else {
+                const shift_amount = @as(u8, @intCast(shift.lo));
+                var result = EVMu256{ .hi = value.hi, .lo = value.lo };
+
+                // 論理右シフト実装
+                if (shift_amount == 0) {
+                    // シフト量が0の場合は値をそのまま返す
+                } else if (shift_amount < 64) {
+                    // 64ビット未満のシフト - シフト量を適切な型に変換
+                    const shift_u7 = @as(u7, @intCast(shift_amount)); // u7 can represent 0-127
+                    const complement_u6 = @as(u6, @intCast(64 - shift_amount)); // u6 can represent 0-63
+                    result.lo = (value.lo >> shift_u7) | (value.hi << complement_u6);
+                    result.hi = value.hi >> shift_u7;
+                } else if (shift_amount < 128) {
+                    // 64-127ビットのシフト
+                    const adjusted_shift = @as(u7, @intCast(shift_amount - 64));
+                    result.lo = value.hi >> adjusted_shift;
+                    result.hi = 0;
+                } else {
+                    // 128ビット以上のシフト
+                    result.lo = 0;
+                    result.hi = 0;
+                }
+
+                try context.stack.push(result);
+            }
+            context.pc += 1;
+        },
+
+        Opcode.JUMPI => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const dest = try context.stack.pop();
+            const condition = try context.stack.pop();
+
+            // 条件付きジャンプ: 条件が0でない場合にジャンプ
+            if (condition.hi != 0 or condition.lo != 0) {
+                // ジャンプ先は現在u64範囲のみサポート
+                if (dest.hi != 0) return EVMError.InvalidJump;
+
+                const jump_dest = @as(usize, @intCast(dest.lo));
+
+                // ジャンプ先が有効なJUMPDESTかチェック
+                if (jump_dest >= context.code.len) return EVMError.InvalidJump;
+                if (context.code[jump_dest] != Opcode.JUMPDEST) return EVMError.InvalidJump;
+
+                context.pc = jump_dest;
+            } else {
+                // 条件が0の場合は次の命令へ
+                context.pc += 1;
+            }
+        },
+
+        Opcode.CODECOPY => {
+            if (context.stack.depth() < 3) return EVMError.StackUnderflow;
+            const mem_offset = try context.stack.pop();
+            const code_offset = try context.stack.pop();
+            const length = try context.stack.pop();
+
+            // 現在はu64範囲のみサポート
+            if (mem_offset.hi != 0 or code_offset.hi != 0 or length.hi != 0) return EVMError.MemoryOutOfBounds;
+
+            const mem_off = @as(usize, @intCast(mem_offset.lo));
+            const code_off = @as(usize, @intCast(code_offset.lo));
+            const len = @as(usize, @intCast(length.lo));
+
+            // メモリサイズ確保
+            try context.memory.ensureSize(mem_off + len);
+
+            // コードをメモリにコピー
+            for (0..len) |i| {
+                if (code_off + i < context.code.len) {
+                    context.memory.data.items[mem_off + i] = context.code[code_off + i];
+                } else {
+                    // コード範囲外は0埋め
+                    context.memory.data.items[mem_off + i] = 0;
+                }
+            }
+
+            context.pc += 1;
+        },
+
+        Opcode.REVERT => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const offset = try context.stack.pop();
+            const length = try context.stack.pop();
+
+            // 現在はu64範囲のみサポート
+            if (offset.hi != 0 or length.hi != 0) return EVMError.MemoryOutOfBounds;
+
+            const off = @as(usize, @intCast(offset.lo));
+            const len = @as(usize, @intCast(length.lo));
+
+            // メモリからリバートデータを取得
+            try context.memory.ensureSize(off + len);
+            if (len > 0) {
+                try context.returndata.resize(len);
+                for (0..len) |i| {
+                    if (off + i < context.memory.data.items.len) {
+                        context.returndata.items[i] = context.memory.data.items[off + i];
+                    } else {
+                        context.returndata.items[i] = 0;
+                    }
+                }
+            }
+
+            context.stopped = true;
+            return EVMError.Revert;
+        },
+
         else => {
-            logger.debugLog("未実装のオペコード: 0x{x:0>2}", .{opcode});
-            context.error_msg = "未実装または無効なオペコード";
-            return EVMError.InvalidOpcode;
+            // PUSH2-PUSH32 (0x61-0x7F)の実装
+            if (opcode >= 0x61 and opcode <= 0x7F) {
+                const n = opcode - 0x60; // PUSHnのnを計算 (PUSH1は0x60)
+
+                // コード範囲チェック
+                if (context.pc + n >= context.code.len) {
+                    context.error_msg = "コード範囲外のPUSH操作";
+                    return EVMError.InvalidOpcode;
+                }
+
+                // n バイトを読み取り、256ビット値に変換
+                var value = EVMu256.zero();
+                for (0..n) |i| {
+                    const byte = context.code[context.pc + 1 + i];
+                    if (i < 8) {
+                        // 最初の8バイトはloに格納
+                        value.lo |= @as(u64, byte) << @as(u6, @intCast(8 * (7 - i)));
+                    } else if (i < 16) {
+                        // 次の8バイトはhiに格納
+                        value.hi |= @as(u64, byte) << @as(u6, @intCast(8 * (15 - i)));
+                    }
+                    // 32バイト以上は無視（EVMu256は128ビットまでしかサポートしていない）
+                }
+
+                try context.stack.push(value);
+                context.pc += n + 1; // オペコード + nバイトをスキップ
+            } else {
+                logger.debugLog("未実装のオペコード: 0x{x:0>2}", .{opcode});
+                context.error_msg = "未実装または無効なオペコード";
+                return EVMError.InvalidOpcode;
+            }
         },
     }
 }
@@ -558,4 +768,448 @@ test "EVM multiple operations" {
     // 結果が31（(10+11)*3/2）になっていることを確認
     try std.testing.expect(value.hi == 0);
     try std.testing.expect(value.lo == 31);
+}
+
+// SHR（論理右シフト）のテスト
+test "EVM SHR operation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード:
+    // PUSH1 0x02, PUSH1 0x10, SHR,    // 0x10 >> 2 = 0x04
+    // PUSH1 0x00, MSTORE,             // 結果をメモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
+    const bytecode = [_]u8{
+        0x60, 0x02, // PUSH1 2
+        0x60, 0x10, // PUSH1 16 (0x10)
+        0x1C, // SHR
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    const calldata = [_]u8{};
+    const result = try execute(allocator, &bytecode, &calldata, 100000);
+    defer allocator.free(result);
+
+    // 結果をEVMu256形式で解釈
+    var value = EVMu256{ .hi = 0, .lo = 0 };
+    if (result.len >= 32) {
+        // 上位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i];
+            value.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+
+        // 下位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i + 16];
+            value.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が4（16 >> 2）になっていることを確認
+    try std.testing.expect(value.hi == 0);
+    try std.testing.expect(value.lo == 4);
+}
+
+// 比較演算（LT, EQ, ISZERO）のテスト
+test "EVM comparison operations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード:
+    // PUSH1 0x0A, PUSH1 0x14, LT,     // 10 < 20 = 1
+    // PUSH1 0x00, MSTORE,             // 結果をメモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
+    const bytecode_lt = [_]u8{
+        0x60, 0x0A, // PUSH1 10
+        0x60, 0x14, // PUSH1 20
+        0x10, // LT
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    // LTテスト
+    const result_lt = try execute(allocator, &bytecode_lt, &[_]u8{}, 100000);
+    defer allocator.free(result_lt);
+
+    var value_lt = EVMu256{ .hi = 0, .lo = 0 };
+    if (result_lt.len >= 32) {
+        for (0..16) |i| {
+            const byte_val = result_lt[i];
+            value_lt.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+        for (0..16) |i| {
+            const byte_val = result_lt[i + 16];
+            value_lt.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が1（10 < 20は真）になっていることを確認
+    try std.testing.expect(value_lt.hi == 0);
+    try std.testing.expect(value_lt.lo == 1);
+
+    // バイトコード:
+    // PUSH1 0x0A, PUSH1 0x0A, EQ,     // 10 == 10 = 1
+    // PUSH1 0x00, MSTORE,             // 結果をメモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
+    const bytecode_eq = [_]u8{
+        0x60, 0x0A, // PUSH1 10
+        0x60, 0x0A, // PUSH1 10
+        0x14, // EQ
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    // EQテスト
+    const result_eq = try execute(allocator, &bytecode_eq, &[_]u8{}, 100000);
+    defer allocator.free(result_eq);
+
+    var value_eq = EVMu256{ .hi = 0, .lo = 0 };
+    if (result_eq.len >= 32) {
+        for (0..16) |i| {
+            const byte_val = result_eq[i];
+            value_eq.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+        for (0..16) |i| {
+            const byte_val = result_eq[i + 16];
+            value_eq.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が1（10 == 10は真）になっていることを確認
+    try std.testing.expect(value_eq.hi == 0);
+    try std.testing.expect(value_eq.lo == 1);
+
+    // バイトコード:
+    // PUSH1 0x00, ISZERO,             // 0 == 0 ? 1 : 0 = 1
+    // PUSH1 0x00, MSTORE,             // 結果をメモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
+    const bytecode_iszero = [_]u8{
+        0x60, 0x00, // PUSH1 0
+        0x15, // ISZERO
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    // ISZEROテスト
+    const result_iszero = try execute(allocator, &bytecode_iszero, &[_]u8{}, 100000);
+    defer allocator.free(result_iszero);
+
+    var value_iszero = EVMu256{ .hi = 0, .lo = 0 };
+    if (result_iszero.len >= 32) {
+        for (0..16) |i| {
+            const byte_val = result_iszero[i];
+            value_iszero.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+        for (0..16) |i| {
+            const byte_val = result_iszero[i + 16];
+            value_iszero.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が1（0はゼロ）になっていることを確認
+    try std.testing.expect(value_iszero.hi == 0);
+    try std.testing.expect(value_iszero.lo == 1);
+}
+
+// ジャンプ命令（JUMPI, JUMPDEST）のテスト
+test "EVM jump operations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード:
+    // PUSH1 0x01, PUSH1 0x0A, JUMPI,  // 条件が真なので0x0Aにジャンプ
+    // PUSH1 0x2A,                     // 42をプッシュ（スキップされる）
+    // PUSH1 0x00, MSTORE,             // メモリに保存（スキップされる）
+    // PUSH1 0x20, PUSH1 0x00, RETURN, // 戻り値を返す（スキップされる）
+    // JUMPDEST,                       // ジャンプ先（0x0A）
+    // PUSH1 0x37,                     // 55をプッシュ
+    // PUSH1 0x00, MSTORE,             // メモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
+    const bytecode_jumpi_true = [_]u8{
+        0x60, 0x01, // PUSH1 1（条件）
+        0x60, 0x0A, // PUSH1 10（ジャンプ先）
+        0x57, // JUMPI
+        0x60, 0x2A, // PUSH1 42（スキップされる）
+        0x60, 0x00, // PUSH1 0（スキップされる）
+        0x52, // MSTORE（スキップされる）
+        0x60, 0x20, // PUSH1 32（スキップされる）
+        0x60, 0x00, // PUSH1 0（スキップされる）
+        0xf3, // RETURN（スキップされる）
+        0x5B, // JUMPDEST（ジャンプ先）
+        0x60, 0x37, // PUSH1 55
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    // 条件が真の場合のJUMPIテスト
+    const result_jumpi_true = try execute(allocator, &bytecode_jumpi_true, &[_]u8{}, 100000);
+    defer allocator.free(result_jumpi_true);
+
+    var value_jumpi_true = EVMu256{ .hi = 0, .lo = 0 };
+    if (result_jumpi_true.len >= 32) {
+        for (0..16) |i| {
+            const byte_val = result_jumpi_true[i];
+            value_jumpi_true.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+        for (0..16) |i| {
+            const byte_val = result_jumpi_true[i + 16];
+            value_jumpi_true.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が55（ジャンプ先の値）になっていることを確認
+    try std.testing.expect(value_jumpi_true.hi == 0);
+    try std.testing.expect(value_jumpi_true.lo == 55);
+
+    // バイトコード:
+    // PUSH1 0x00, PUSH1 0x0A, JUMPI,  // 条件が偽なのでジャンプしない
+    // PUSH1 0x2A,                     // 42をプッシュ
+    // PUSH1 0x00, MSTORE,             // メモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN, // 戻り値を返す
+    // JUMPDEST,                       // ジャンプ先（実行されない）
+    // PUSH1 0x37,                     // 55をプッシュ（実行されない）
+    // PUSH1 0x00, MSTORE,             // メモリに保存（実行されない）
+    // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す（実行されない）
+    const bytecode_jumpi_false = [_]u8{
+        0x60, 0x00, // PUSH1 0（条件）
+        0x60, 0x0A, // PUSH1 10（ジャンプ先）
+        0x57, // JUMPI
+        0x60, 0x2A, // PUSH1 42
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+        0x5B, // JUMPDEST（ジャンプ先、実行されない）
+        0x60, 0x37, // PUSH1 55（実行されない）
+        0x60, 0x00, // PUSH1 0（実行されない）
+        0x52, // MSTORE（実行されない）
+        0x60, 0x20, // PUSH1 32（実行されない）
+        0x60, 0x00, // PUSH1 0（実行されない）
+        0xf3, // RETURN（実行されない）
+    };
+
+    // 条件が偽の場合のJUMPIテスト
+    const result_jumpi_false = try execute(allocator, &bytecode_jumpi_false, &[_]u8{}, 100000);
+    defer allocator.free(result_jumpi_false);
+
+    var value_jumpi_false = EVMu256{ .hi = 0, .lo = 0 };
+    if (result_jumpi_false.len >= 32) {
+        for (0..16) |i| {
+            const byte_val = result_jumpi_false[i];
+            value_jumpi_false.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+        for (0..16) |i| {
+            const byte_val = result_jumpi_false[i + 16];
+            value_jumpi_false.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が42（ジャンプしなかった場合の値）になっていることを確認
+    try std.testing.expect(value_jumpi_false.hi == 0);
+    try std.testing.expect(value_jumpi_false.lo == 42);
+}
+
+// PUSH2-PUSH32のテスト
+test "EVM PUSH2-PUSH32 operations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード:
+    // PUSH2 0x1234,                   // 0x1234をプッシュ
+    // PUSH1 0x00, MSTORE,             // メモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
+    const bytecode_push2 = [_]u8{
+        0x61, 0x12, 0x34, // PUSH2 0x1234
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    // PUSH2テスト
+    const result_push2 = try execute(allocator, &bytecode_push2, &[_]u8{}, 100000);
+    defer allocator.free(result_push2);
+
+    var value_push2 = EVMu256{ .hi = 0, .lo = 0 };
+    if (result_push2.len >= 32) {
+        for (0..16) |i| {
+            const byte_val = result_push2[i];
+            value_push2.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+        for (0..16) |i| {
+            const byte_val = result_push2[i + 16];
+            value_push2.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が0x1234になっていることを確認
+    try std.testing.expect(value_push2.hi == 0);
+    try std.testing.expect(value_push2.lo == 0x1234);
+
+    // バイトコード:
+    // PUSH4 0x12345678,               // 0x12345678をプッシュ
+    // PUSH1 0x00, MSTORE,             // メモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
+    const bytecode_push4 = [_]u8{
+        0x63, 0x12, 0x34, 0x56, 0x78, // PUSH4 0x12345678
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    // PUSH4テスト
+    const result_push4 = try execute(allocator, &bytecode_push4, &[_]u8{}, 100000);
+    defer allocator.free(result_push4);
+
+    var value_push4 = EVMu256{ .hi = 0, .lo = 0 };
+    if (result_push4.len >= 32) {
+        for (0..16) |i| {
+            const byte_val = result_push4[i];
+            value_push4.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+        for (0..16) |i| {
+            const byte_val = result_push4[i + 16];
+            value_push4.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が0x12345678になっていることを確認
+    try std.testing.expect(value_push4.hi == 0);
+    try std.testing.expect(value_push4.lo == 0x12345678);
+}
+
+// CODECOPY操作のテスト
+test "EVM CODECOPY operation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード:
+    // PUSH1 0x04, PUSH1 0x00, PUSH1 0x00, CODECOPY, // 先頭4バイトをメモリにコピー
+    // PUSH1 0x20, PUSH1 0x00, RETURN                // 戻り値を返す
+    const bytecode = [_]u8{
+        0x60, 0x04, // PUSH1 4（長さ）
+        0x60, 0x00, // PUSH1 0（コード内オフセット）
+        0x60, 0x00, // PUSH1 0（メモリオフセット）
+        0x39, // CODECOPY
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    const calldata = [_]u8{};
+    const result = try execute(allocator, &bytecode, &calldata, 100000);
+    defer allocator.free(result);
+
+    // 結果をEVMu256形式で解釈
+    var value = EVMu256{ .hi = 0, .lo = 0 };
+    if (result.len >= 32) {
+        // 上位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i];
+            value.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+
+        // 下位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i + 16];
+            value.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果の下位4バイトが0x60046000になっていることを確認（バイトコードの先頭4バイト）
+    try std.testing.expect(value.hi == 0);
+    try std.testing.expect((value.lo & 0xFFFFFFFF) == 0x60046000);
+}
+
+// REVERT操作のテスト
+test "EVM REVERT operation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード:
+    // PUSH1 0x20, PUSH1 0x00, REVERT  // リバート（32バイトのデータ）
+    const bytecode = [_]u8{
+        0x60, 0x20, // PUSH1 32（長さ）
+        0x60, 0x00, // PUSH1 0（オフセット）
+        0xFD, // REVERT
+    };
+
+    const calldata = [_]u8{};
+
+    // REVERTはエラーを返すので、エラーを期待する
+    const result = execute(allocator, &bytecode, &calldata, 100000);
+
+    // REVERTエラーが返されることを確認
+    try std.testing.expectError(EVMError.Revert, result);
+}
+
+// RETURNDATASIZEのテスト
+test "EVM RETURNDATASIZE operation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード:
+    // RETURNDATASIZE,                 // 戻りデータサイズを取得（簡易実装では常に0）
+    // PUSH1 0x00, MSTORE,             // メモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
+    const bytecode = [_]u8{
+        0x3D, // RETURNDATASIZE
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    const calldata = [_]u8{};
+    const result = try execute(allocator, &bytecode, &calldata, 100000);
+    defer allocator.free(result);
+
+    // 結果をEVMu256形式で解釈
+    var value = EVMu256{ .hi = 0, .lo = 0 };
+    if (result.len >= 32) {
+        // 上位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i];
+            value.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+
+        // 下位16バイトを解析
+        for (0..16) |i| {
+            const byte_val = result[i + 16];
+            value.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が0になっていることを確認（簡易実装では常に0）
+    try std.testing.expect(value.hi == 0);
+    try std.testing.expect(value.lo == 0);
 }
