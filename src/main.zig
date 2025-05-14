@@ -283,7 +283,7 @@ fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contra
     std.log.info("ガス上限: {d}", .{gas_limit});
 
     // トランザクションを作成
-    var tx = types.Transaction{
+    const tx = types.Transaction{
         .sender = sender_address,
         .receiver = contract_address,
         .amount = 0,
