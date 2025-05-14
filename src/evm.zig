@@ -72,6 +72,7 @@ pub const Opcode = struct {
     pub const CALLDATALOAD = 0x35;
     pub const CALLDATASIZE = 0x36;
     pub const CALLDATACOPY = 0x37;
+    pub const RETURNDATASIZE = 0x3D;
 };
 
 /// エラー型定義
