@@ -283,7 +283,7 @@ fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contra
     std.log.info("ガス上限: {d}", .{gas_limit});
 
     // トランザクションを作成
-    const tx = types.Transaction{
+    var tx = types.Transaction{
         .sender = sender_address,
         .receiver = contract_address,
         .amount = 0,
@@ -295,8 +295,22 @@ fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contra
 
     // P2Pネットワーク上でトランザクションをブロードキャスト
     try p2p.broadcastEvmTransaction(allocator, tx);
-
     std.log.info("デプロイトランザクションをブロードキャストしました", .{});
+
+    // ローカルでもトランザクションを処理して即時デプロイする
+    std.log.info("ローカルノードでコントラクトデプロイを実行しています...", .{});
+    var tx_copy = tx; // トランザクションの可変コピーを作成
+    const result = blockchain.processEvmTransaction(&tx_copy) catch |err| {
+        std.log.err("ローカルでのデプロイ処理エラー: {any}", .{err});
+        return;
+    };
+
+    // 実行結果を表示
+    blockchain.logEvmResult(&tx_copy, result) catch |err| {
+        std.log.err("結果ログ出力エラー: {any}", .{err});
+    };
+
+    std.log.info("ローカルノードでコントラクトデプロイ処理が完了しました", .{});
 }
 
 /// コントラクトを呼び出す
