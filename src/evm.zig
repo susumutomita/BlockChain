@@ -39,6 +39,7 @@ pub const Opcode = struct {
     pub const OR = 0x17;
     pub const XOR = 0x18;
     pub const NOT = 0x19;
+    pub const SHR = 0x1C;
     pub const POP = 0x50;
 
     // メモリ操作
@@ -72,6 +73,13 @@ pub const Opcode = struct {
     pub const CALLDATALOAD = 0x35;
     pub const CALLDATASIZE = 0x36;
     pub const CALLDATACOPY = 0x37;
+
+    // コード関連
+    pub const CODECOPY = 0x39;
+
+    // 戻りデータ関連
+    pub const RETURNDATASIZE = 0x3D;
+    pub const RETURNDATACOPY = 0x3E;
 };
 
 /// エラー型定義
@@ -304,7 +312,7 @@ fn executeStep(context: *EvmContext) !void {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const a = try context.stack.pop();
             const b = try context.stack.pop();
-            
+
             // 等価比較: 両方の値が完全に一致する場合は1、それ以外は0
             if (a.hi == b.hi and a.lo == b.lo) {
                 try context.stack.push(EVMu256.fromU64(1));
@@ -318,7 +326,7 @@ fn executeStep(context: *EvmContext) !void {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const a = try context.stack.pop();
             const b = try context.stack.pop();
-            
+
             // 未満比較: b < a の場合は1、それ以外は0
             var result: u64 = 0;
             if (b.hi < a.hi) {
@@ -326,7 +334,7 @@ fn executeStep(context: *EvmContext) !void {
             } else if (b.hi == a.hi and b.lo < a.lo) {
                 result = 1;
             }
-            
+
             try context.stack.push(EVMu256.fromU64(result));
             context.pc += 1;
         },
@@ -334,7 +342,7 @@ fn executeStep(context: *EvmContext) !void {
         Opcode.ISZERO => {
             if (context.stack.depth() < 1) return EVMError.StackUnderflow;
             const x = try context.stack.pop();
-            
+
             // ゼロ判定: 値が0なら1、それ以外は0
             if (x.hi == 0 and x.lo == 0) {
                 try context.stack.push(EVMu256.fromU64(1));
@@ -353,31 +361,34 @@ fn executeStep(context: *EvmContext) !void {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const shift = try context.stack.pop();
             const value = try context.stack.pop();
-            
+
             // シフト量が256以上の場合は結果は0
             if (shift.hi > 0 or shift.lo >= 256) {
                 try context.stack.push(EVMu256.zero());
             } else {
                 const shift_amount = @as(u8, @intCast(shift.lo));
                 var result = EVMu256{ .hi = value.hi, .lo = value.lo };
-                
+
                 // 論理右シフト実装
                 if (shift_amount == 0) {
                     // シフト量が0の場合は値をそのまま返す
                 } else if (shift_amount < 64) {
-                    // 64ビット未満のシフト
-                    result.lo = (value.lo >> shift_amount) | (value.hi << (64 - shift_amount));
-                    result.hi = value.hi >> shift_amount;
+                    // 64ビット未満のシフト - シフト量を適切な型に変換
+                    const shift_u7 = @as(u7, @intCast(shift_amount)); // u7 can represent 0-127
+                    const complement_u6 = @as(u6, @intCast(64 - shift_amount)); // u6 can represent 0-63
+                    result.lo = (value.lo >> shift_u7) | (value.hi << complement_u6);
+                    result.hi = value.hi >> shift_u7;
                 } else if (shift_amount < 128) {
                     // 64-127ビットのシフト
-                    result.lo = value.hi >> (shift_amount - 64);
+                    const adjusted_shift = @as(u7, @intCast(shift_amount - 64));
+                    result.lo = value.hi >> adjusted_shift;
                     result.hi = 0;
                 } else {
                     // 128ビット以上のシフト
                     result.lo = 0;
                     result.hi = 0;
                 }
-                
+
                 try context.stack.push(result);
             }
             context.pc += 1;
@@ -387,18 +398,18 @@ fn executeStep(context: *EvmContext) !void {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const dest = try context.stack.pop();
             const condition = try context.stack.pop();
-            
+
             // 条件付きジャンプ: 条件が0でない場合にジャンプ
             if (condition.hi != 0 or condition.lo != 0) {
                 // ジャンプ先は現在u64範囲のみサポート
                 if (dest.hi != 0) return EVMError.InvalidJump;
-                
+
                 const jump_dest = @as(usize, @intCast(dest.lo));
-                
+
                 // ジャンプ先が有効なJUMPDESTかチェック
                 if (jump_dest >= context.code.len) return EVMError.InvalidJump;
-                if (context.code[jump_dest] != @intFromEnum(Opcode.JUMPDEST)) return EVMError.InvalidJump;
-                
+                if (context.code[jump_dest] != Opcode.JUMPDEST) return EVMError.InvalidJump;
+
                 context.pc = jump_dest;
             } else {
                 // 条件が0の場合は次の命令へ
@@ -411,17 +422,17 @@ fn executeStep(context: *EvmContext) !void {
             const mem_offset = try context.stack.pop();
             const code_offset = try context.stack.pop();
             const length = try context.stack.pop();
-            
+
             // 現在はu64範囲のみサポート
             if (mem_offset.hi != 0 or code_offset.hi != 0 or length.hi != 0) return EVMError.MemoryOutOfBounds;
-            
+
             const mem_off = @as(usize, @intCast(mem_offset.lo));
             const code_off = @as(usize, @intCast(code_offset.lo));
             const len = @as(usize, @intCast(length.lo));
-            
+
             // メモリサイズ確保
             try context.memory.ensureSize(mem_off + len);
-            
+
             // コードをメモリにコピー
             for (0..len) |i| {
                 if (code_off + i < context.code.len) {
@@ -431,7 +442,7 @@ fn executeStep(context: *EvmContext) !void {
                     context.memory.data.items[mem_off + i] = 0;
                 }
             }
-            
+
             context.pc += 1;
         },
 
@@ -439,13 +450,13 @@ fn executeStep(context: *EvmContext) !void {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const offset = try context.stack.pop();
             const length = try context.stack.pop();
-            
+
             // 現在はu64範囲のみサポート
             if (offset.hi != 0 or length.hi != 0) return EVMError.MemoryOutOfBounds;
-            
+
             const off = @as(usize, @intCast(offset.lo));
             const len = @as(usize, @intCast(length.lo));
-            
+
             // メモリからリバートデータを取得
             try context.memory.ensureSize(off + len);
             if (len > 0) {
@@ -458,7 +469,7 @@ fn executeStep(context: *EvmContext) !void {
                     }
                 }
             }
-            
+
             context.stopped = true;
             return EVMError.Revert;
         },
@@ -467,13 +478,13 @@ fn executeStep(context: *EvmContext) !void {
             // PUSH2-PUSH32 (0x61-0x7F)の実装
             if (opcode >= 0x61 and opcode <= 0x7F) {
                 const n = opcode - 0x60; // PUSHnのnを計算 (PUSH1は0x60)
-                
+
                 // コード範囲チェック
                 if (context.pc + n >= context.code.len) {
                     context.error_msg = "コード範囲外のPUSH操作";
                     return EVMError.InvalidOpcode;
                 }
-                
+
                 // n バイトを読み取り、256ビット値に変換
                 var value = EVMu256.zero();
                 for (0..n) |i| {
@@ -487,7 +498,7 @@ fn executeStep(context: *EvmContext) !void {
                     }
                     // 32バイト以上は無視（EVMu256は128ビットまでしかサポートしていない）
                 }
-                
+
                 try context.stack.push(value);
                 context.pc += n + 1; // オペコード + nバイトをスキップ
             } else {
@@ -1151,10 +1162,10 @@ test "EVM REVERT operation" {
     };
 
     const calldata = [_]u8{};
-    
+
     // REVERTはエラーを返すので、エラーを期待する
     const result = execute(allocator, &bytecode, &calldata, 100000);
-    
+
     // REVERTエラーが返されることを確認
     try std.testing.expectError(EVMError.Revert, result);
 }
