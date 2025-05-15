@@ -7,6 +7,7 @@
 const std = @import("std");
 const logger = @import("logger.zig");
 const evm_types = @import("evm_types.zig");
+const evm_debug = @import("evm_debug.zig");
 // u256型を別名で使用して衝突を回避
 const EVMu256 = evm_types.EVMu256;
 const EvmContext = evm_types.EvmContext;
@@ -87,7 +88,7 @@ pub const Opcode = struct {
     // 戻りデータ関連
     pub const RETURNDATASIZE = 0x3D;
     pub const RETURNDATACOPY = 0x3E;
-    
+
     // コントラクト関連
     pub const CALLVALUE = 0x34; // 呼び出し時の送金額
 };
@@ -125,12 +126,126 @@ pub fn execute(allocator: std.mem.Allocator, code: []const u8, calldata: []const
 
     // メインの実行ループ
     while (context.pc < context.code.len and !context.stopped) {
-        try executeStep(&context);
+        executeStep(&context) catch |err| {
+            // エラー発生時に詳細な診断情報を表示
+            if (err == EVMError.InvalidOpcode) {
+                const opcode = context.code[context.pc];
+                std.log.err("無効なオペコードエラー: 0x{x:0>2} (10進: {d}) at PC={d}", .{ opcode, opcode, context.pc });
+
+                // 現在のオペコードとその周囲を逆アセンブルして表示
+                var asmDump = std.ArrayList(u8).init(allocator);
+                defer asmDump.deinit();
+
+                // 逆アセンブル結果を取得
+                evm_debug.disassembleContext(&context, asmDump.writer()) catch |disasmErr| {
+                    std.log.err("逆アセンブル失敗: {any}", .{disasmErr});
+                };
+
+                std.log.err("コード逆アセンブル:\n{s}", .{asmDump.items});
+
+                // コード周辺のバイトコードを16進数で表示
+                const startIdx = if (context.pc > 10) context.pc - 10 else 0;
+                const endIdx = if (context.pc + 10 < context.code.len) context.pc + 10 else context.code.len;
+                var hexDump = std.ArrayList(u8).init(allocator);
+                defer hexDump.deinit();
+
+                for (startIdx..endIdx) |i| {
+                    if (i == context.pc) {
+                        // 問題のオペコードを強調表示
+                        _ = hexDump.writer().print("[0x{x:0>2}] ", .{context.code[i]}) catch {};
+                    } else {
+                        _ = hexDump.writer().print("0x{x:0>2} ", .{context.code[i]}) catch {};
+                    }
+                }
+
+                std.log.err("コードコンテキスト(Hex): {s}", .{hexDump.items});
+
+                // エラーの詳細情報も表示
+                if (context.error_msg != null) {
+                    std.log.err("エラー詳細: {s}", .{context.error_msg.?});
+                }
+            } else {
+                std.log.err("EVM実行エラー: {any} at PC={d}", .{ err, context.pc });
+            }
+            return err;
+        };
     }
 
     // 戻り値をコピーして返す
     const result = try allocator.alloc(u8, context.returndata.items.len);
     @memcpy(result, context.returndata.items);
+    return result;
+}
+
+/// EVMバイトコードを実行し、エラーが発生した場合に詳細情報を返す
+///
+/// 引数:
+///     allocator: メモリアロケータ
+///     code: EVMバイトコード
+///     calldata: コントラクト呼び出し時の引数データ
+///     gas_limit: 実行時のガス上限
+///
+/// 戻り値:
+///     EvmExecutionResult構造体: 実行結果とエラー情報を含む
+///
+pub const EvmExecutionResult = struct {
+    /// 実行が成功したかどうか
+    success: bool,
+    /// 実行結果のデータ（成功時のみ有効）
+    data: []const u8,
+    /// エラーメッセージ（失敗時のみ有効）
+    error_message: ?[]const u8,
+    /// エラーの種類
+    error_type: ?EVMError,
+    /// プログラムカウンタ（失敗した位置）
+    error_pc: ?usize,
+};
+
+pub fn executeWithErrorInfo(allocator: std.mem.Allocator, code: []const u8, calldata: []const u8, gas_limit: usize) EvmExecutionResult {
+    // EVMコンテキストの初期化
+    var context = EvmContext.init(allocator, code, calldata);
+    context.gas = gas_limit;
+    defer context.deinit();
+
+    var result = EvmExecutionResult{
+        .success = false,
+        .data = &[_]u8{},
+        .error_message = null,
+        .error_type = null,
+        .error_pc = null,
+    };
+
+    // メインの実行ループ
+    while (context.pc < context.code.len and !context.stopped) {
+        executeStep(&context) catch |err| {
+            // エラーの詳細情報を格納
+            result.error_type = switch (err) {
+                EVMError.OutOfGas => EVMError.OutOfGas,
+                EVMError.StackOverflow => EVMError.StackOverflow,
+                EVMError.StackUnderflow => EVMError.StackUnderflow,
+                EVMError.InvalidJump => EVMError.InvalidJump,
+                EVMError.InvalidOpcode => EVMError.InvalidOpcode,
+                EVMError.MemoryOutOfBounds => EVMError.MemoryOutOfBounds,
+                EVMError.Revert => EVMError.Revert,
+                else => EVMError.InvalidOpcode, // エラーの種類が不明な場合はInvalidOpcodeを返す
+            };
+            result.error_pc = context.pc;
+
+            if (context.error_msg != null) {
+                result.error_message = allocator.dupe(u8, context.error_msg.?) catch null;
+            } else {
+                const errMsg = std.fmt.allocPrint(allocator, "EVM実行エラー: {any} at PC={d}", .{ err, context.pc }) catch "Unknown error";
+                result.error_message = errMsg;
+            }
+
+            return result;
+        };
+    }
+
+    // 成功時は結果をコピーして返す
+    result.success = true;
+    result.data = allocator.dupe(u8, context.returndata.items) catch &[_]u8{};
+
     return result;
 }
 
@@ -159,7 +274,7 @@ fn executeStep(context: *EvmContext) !void {
             try context.stack.push(a.add(b));
             context.pc += 1;
         },
-        
+
         Opcode.PUSH0 => {
             // PUSH0: スタックに即値0をプッシュ
             try context.stack.push(EVMu256.zero());
@@ -519,16 +634,16 @@ fn executeStep(context: *EvmContext) !void {
         Opcode.JUMP => {
             if (context.stack.depth() < 1) return EVMError.StackUnderflow;
             const dest = try context.stack.pop();
-            
+
             // ジャンプ先は現在u64範囲のみサポート
             if (dest.hi != 0) return EVMError.InvalidJump;
-            
+
             const jump_dest = @as(usize, @intCast(dest.lo));
-            
+
             // ジャンプ先が有効なJUMPDESTかチェック
             if (jump_dest >= context.code.len) return EVMError.InvalidJump;
             if (context.code[jump_dest] != Opcode.JUMPDEST) return EVMError.InvalidJump;
-            
+
             context.pc = jump_dest;
         },
 
@@ -617,78 +732,78 @@ fn executeStep(context: *EvmContext) !void {
             context.stopped = true;
             return EVMError.Revert;
         },
-        
+
         Opcode.CALLDATASIZE => {
             // 呼び出しデータのサイズをスタックにプッシュ
             try context.stack.push(EVMu256.fromU64(context.calldata.len));
             context.pc += 1;
         },
-        
+
         Opcode.CALLVALUE => {
             // 簡易実装: 常に0を返す
             try context.stack.push(EVMu256.zero());
             context.pc += 1;
         },
-        
+
         Opcode.AND => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const a = try context.stack.pop();
             const b = try context.stack.pop();
-            
+
             // ビット単位のAND演算
             const result = EVMu256{
                 .hi = a.hi & b.hi,
                 .lo = a.lo & b.lo,
             };
-            
+
             try context.stack.push(result);
             context.pc += 1;
         },
-        
+
         Opcode.OR => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const a = try context.stack.pop();
             const b = try context.stack.pop();
-            
+
             // ビット単位のOR演算
             const result = EVMu256{
                 .hi = a.hi | b.hi,
                 .lo = a.lo | b.lo,
             };
-            
+
             try context.stack.push(result);
             context.pc += 1;
         },
-        
+
         Opcode.XOR => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const a = try context.stack.pop();
             const b = try context.stack.pop();
-            
+
             // ビット単位のXOR演算
             const result = EVMu256{
                 .hi = a.hi ^ b.hi,
                 .lo = a.lo ^ b.lo,
             };
-            
+
             try context.stack.push(result);
             context.pc += 1;
         },
-        
+
         Opcode.NOT => {
             if (context.stack.depth() < 1) return EVMError.StackUnderflow;
             const a = try context.stack.pop();
-            
+
             // ビット単位のNOT演算
             const result = EVMu256{
                 .hi = ~a.hi,
                 .lo = ~a.lo,
             };
-            
+
             try context.stack.push(result);
             context.pc += 1;
         },
-        
+
         else => {
             // PUSH2-PUSH32 (0x61-0x7F)の実装
             if (opcode >= 0x61 and opcode <= 0x7F) {
@@ -717,8 +832,47 @@ fn executeStep(context: *EvmContext) !void {
                 try context.stack.push(value);
                 context.pc += n + 1; // オペコード + nバイトをスキップ
             } else {
-                logger.debugLog("未実装のオペコード: 0x{x:0>2}", .{opcode});
-                context.error_msg = "未実装または無効なオペコード";
+                // 詳細なエラーログ出力
+                const opcodeHex = std.fmt.allocPrint(std.heap.page_allocator, "0x{x:0>2}", .{opcode}) catch "Unknown";
+
+                // オペコードの説明を取得
+                const opcodeDescription = switch (opcode) {
+                    0x0F => "古いオペコード(removed)",
+                    0x1E, 0x1F => "未使用のオペコード(unused)",
+                    0x21 => "おそらくLOG0~LOG4(0xA0~0xA4)",
+                    0x5C...0x5E => "PUSHX,DUP,SWAP周辺のオペコード",
+                    0xA5...0xEF => "未使用の範囲(0xA5-0xEF)",
+                    0xF6...0xF9 => "システムオペコード周辺の未割り当て",
+                    0xFB...0xFC => "STATICCALL/REVERT周辺の未割り当て",
+                    0xFE => "INVALID/ABORT専用オペコード",
+                    else => "未知のオペコード",
+                };
+
+                const errorMsg = std.fmt.allocPrint(std.heap.page_allocator, "未実装または無効なオペコード: {s} (PC: {d}, 説明: {s})", .{ opcodeHex, context.pc, opcodeDescription }) catch "Unknown opcode error";
+
+                std.log.err("EVMエラー: {s}", .{errorMsg});
+
+                // コード周辺のコンテキストを表示（デバッグに役立つ）
+                const startIdx = if (context.pc > 10) context.pc - 10 else 0;
+                const endIdx = if (context.pc + 10 < context.code.len) context.pc + 10 else context.code.len;
+
+                var hexDump = std.ArrayList(u8).init(std.heap.page_allocator);
+                defer hexDump.deinit();
+
+                for (startIdx..endIdx) |i| {
+                    if (i == context.pc) {
+                        // 問題のオペコードをマークする
+                        _ = hexDump.writer().print("[0x{x:0>2}] ", .{context.code[i]}) catch {};
+                    } else {
+                        _ = hexDump.writer().print("0x{x:0>2} ", .{context.code[i]}) catch {};
+                    }
+                }
+
+                std.log.err("コードコンテキスト: {s}", .{hexDump.items});
+
+                // エラーメッセージに実行中のコントラクトのサイズも追加する
+                const sizeInfo = std.fmt.allocPrint(std.heap.page_allocator, "{s} (コード長: {d}バイト)", .{ errorMsg, context.code.len }) catch errorMsg;
+                context.error_msg = sizeInfo;
                 return EVMError.InvalidOpcode;
             }
         },
@@ -1406,6 +1560,7 @@ test "EVM RETURNDATASIZE operation" {
     // バイトコード:
     // RETURNDATASIZE,                 // 戻りデータサイズを取得（簡易実装では常に0）
     // PUSH1 0x00, MSTORE,             // メモリに保存
+
     // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
     const bytecode = [_]u8{
         0x3D, // RETURNDATASIZE
@@ -1439,4 +1594,40 @@ test "EVM RETURNDATASIZE operation" {
     // 結果が0になっていることを確認（簡易実装では常に0）
     try std.testing.expect(value.hi == 0);
     try std.testing.expect(value.lo == 0);
+}
+
+// エラー情報付き実行テスト
+test "EVM execution with error info" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード: PUSH1 0x01, JUMP (未定義のジャンプ先)
+    const bytecode = [_]u8{
+        0x60, 0x01, // PUSH1 1
+        0x56, // JUMP
+    };
+
+    const calldata = [_]u8{};
+
+    // スライスに変換
+    const bytecode_slice = bytecode[0..];
+    const calldata_slice = calldata[0..];
+
+    // エラー情報付きでEVMを実行
+    const result = executeWithErrorInfo(allocator, bytecode_slice, calldata_slice, 100000);
+
+    // 実行が失敗し、エラー情報が設定されていることを確認
+    try std.testing.expect(!result.success);
+    try std.testing.expect(result.error_type == EVMError.InvalidJump);
+    try std.testing.expect(result.error_pc != null);
+    try std.testing.expect(result.error_message != null);
+
+    // エラーメッセージの内容を確認
+    const errorMsg = try allocator.alloc(u8, result.error_message.?.len);
+    @memcpy(errorMsg, result.error_message.?);
+    try std.testing.expectEqualStrings("EVM実行エラー: InvalidJump at PC=1", errorMsg);
+
+    // 後始末
+    allocator.free(errorMsg);
 }

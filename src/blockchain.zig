@@ -13,6 +13,7 @@ const logger = @import("logger.zig");
 const utils = @import("utils.zig");
 const chainError = @import("errors.zig").ChainError;
 const parser = @import("parser.zig");
+const evm_debug = @import("evm_debug.zig");
 
 /// プルーフオブワークマイニングの難易度設定
 /// 有効なブロックハッシュに必要な先頭のゼロバイト数を表します
@@ -206,10 +207,10 @@ pub fn addBlock(new_block: types.Block) void {
             // 既存のコントラクトを上書きしないように注意
             if (!contract_storage.contains(address)) {
                 contract_storage.put(address, code) catch |err| {
-                    std.log.err("Failed to store contract at address: {s}, error: {any}", .{address, err});
+                    std.log.err("Failed to store contract at address: {s}, error: {any}", .{ address, err });
                     continue;
                 };
-                std.log.info("Loaded contract at address: {s} from synchronized block, code length: {d} bytes", .{address, code.len});
+                std.log.info("Loaded contract at address: {s} from synchronized block, code length: {d} bytes", .{ address, code.len });
             }
         }
         std.log.info("Processed {d} contracts from received block", .{contract_count});
@@ -236,9 +237,7 @@ pub fn addBlock(new_block: types.Block) void {
                 contract_storage.put(tx.receiver, result) catch |err| {
                     std.log.err("Failed to store contract result: {any}", .{err});
                 };
-                std.log.info("Re-executed and stored contract at address: {s}, code length: {d} bytes", .{
-                    tx.receiver, result.len
-                });
+                std.log.info("Re-executed and stored contract at address: {s}, code length: {d} bytes", .{ tx.receiver, result.len });
             }
         }
     }
@@ -471,9 +470,7 @@ pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
         // ブロックをマイニングして追加
         mineBlock(&new_block, DIFFICULTY);
 
-        std.log.info("コントラクトデプロイブロック作成開始: アドレス={s}, トランザクション数={d}, コントラクト数={d}", .{
-            tx.receiver, new_block.transactions.items.len, contracts.count()
-        });
+        std.log.info("コントラクトデプロイブロック作成開始: アドレス={s}, トランザクション数={d}, コントラクト数={d}", .{ tx.receiver, new_block.transactions.items.len, contracts.count() });
 
         // ブロックに追加する前にダンプして確認
         if (contracts.get(tx.receiver)) |code| {
@@ -513,6 +510,123 @@ pub fn logEvmResult(tx: *const types.Transaction, result: []const u8) !void {
 
         std.log.info("EVM実行結果(u256): {}", .{value});
     }
+}
+
+/// EVMトランザクションを実行し、詳細なエラー情報を含めて処理する
+///
+/// 引数:
+///     tx: 処理するトランザクション
+///
+/// 戻り値:
+///     実行結果またはエラー
+pub fn processEvmTransactionWithErrorDetails(tx: *types.Transaction) ![]const u8 {
+    // トランザクション識別子を生成（まだ設定されていない場合）
+    if (std.mem.eql(u8, &tx.id, &[_]u8{0} ** 32)) {
+        tx.id = calculateTransactionHash(tx);
+    }
+
+    // EVMデータが存在することを確認
+    const evm_data = tx.evm_data orelse return error.NoEvmData;
+
+    const allocator = std.heap.page_allocator;
+    var result: []const u8 = "";
+
+    switch (tx.tx_type) {
+        // コントラクトデプロイの場合
+        1 => {
+            std.log.info("スマートコントラクトをデプロイしています: 送信者={s}, ガス上限={d}", .{ tx.sender, tx.gas_limit });
+
+            // EVMバイトコードを詳細エラー情報付きで実行
+            const calldata = "";
+            const evm_result = @import("evm.zig").executeWithErrorInfo(allocator, evm_data, calldata, tx.gas_limit);
+
+            if (!evm_result.success) {
+                // 詳細なエラー情報を表示
+                if (evm_result.error_message) |msg| {
+                    std.log.err("コントラクトデプロイエラー: {s}", .{msg});
+                }
+                if (evm_result.error_type) |err_type| {
+                    std.log.err("エラータイプ: {any}, PC: {any}", .{ err_type, evm_result.error_pc orelse 0 });
+                }
+
+                // オペコードの16進数表示と詳細情報
+                if (evm_result.error_pc) |pc| {
+                    if (pc < evm_data.len) {
+                        const invalid_opcode = evm_data[pc];
+                        std.log.err("無効なオペコード (16進): 0x{x:0>2}, (10進): {d}", .{ invalid_opcode, invalid_opcode });
+
+                        // デバッグモジュールの関数を使用して詳細情報を表示
+                        const opcode_desc = evm_debug.getInvalidOpcodeDetail(invalid_opcode);
+                        const error_analysis = evm_debug.analyzeErrorCause(evm_data, pc);
+
+                        std.log.err("オペコード詳細: {s}", .{opcode_desc});
+                        std.log.err("エラー分析: {s}", .{error_analysis});
+                    }
+                }
+
+                return error.EvmExecutionFailed;
+            }
+
+            result = evm_result.data;
+
+            // 返されたランタイムコードを保存（デプロイ時の実行結果がランタイムコード）
+            try contract_storage.put(tx.receiver, result);
+
+            std.log.info("コントラクトが正常にデプロイされました: アドレス={s}, コード長={d}バイト", .{ tx.receiver, result.len });
+        },
+
+        // コントラクト呼び出しの場合
+        2 => {
+            std.log.info("スマートコントラクトを呼び出しています: アドレス={s}, 送信者={s}, ガス上限={d}", .{ tx.receiver, tx.sender, tx.gas_limit });
+
+            // コントラクトコードを取得
+            const contract_code = contract_storage.get(tx.receiver) orelse {
+                std.log.err("コントラクトが見つかりません: アドレス={s}", .{tx.receiver});
+                return error.ContractNotFound;
+            };
+
+            // EVMを詳細エラー情報付きで実行
+            const evm_result = @import("evm.zig").executeWithErrorInfo(allocator, contract_code, evm_data, tx.gas_limit);
+
+            if (!evm_result.success) {
+                // 詳細なエラー情報を表示
+                if (evm_result.error_message) |msg| {
+                    std.log.err("コントラクト呼び出しエラー: {s}", .{msg});
+                }
+                if (evm_result.error_type) |err_type| {
+                    std.log.err("エラータイプ: {any}, PC: {any}", .{ err_type, evm_result.error_pc orelse 0 });
+                }
+
+                // オペコードの16進数表示と詳細情報
+                if (evm_result.error_pc) |pc| {
+                    if (pc < contract_code.len) {
+                        const invalid_opcode = contract_code[pc];
+                        std.log.err("無効なオペコード (16進): 0x{x:0>2}, (10進): {d}", .{ invalid_opcode, invalid_opcode });
+
+                        // デバッグモジュールの関数を使用して詳細情報を表示
+                        const opcode_desc = evm_debug.getInvalidOpcodeDetail(invalid_opcode);
+                        const error_analysis = evm_debug.analyzeErrorCause(contract_code, pc);
+
+                        std.log.err("オペコード詳細: {s}", .{opcode_desc});
+                        std.log.err("エラー分析: {s}", .{error_analysis});
+                    }
+                }
+
+                return error.EvmExecutionFailed;
+            }
+
+            result = evm_result.data;
+            std.log.info("コントラクト呼び出しが完了しました: 結果長={d}バイト", .{result.len});
+        },
+
+        // その他のトランザクションタイプ（通常の送金など）
+        else => {
+            std.log.info("EVMトランザクションではありません: タイプ={d}", .{tx.tx_type});
+            return error.NotEvmTransaction;
+        },
+    }
+
+    return result;
 }
 
 // ヘルパー関数: 文字列を指定回数繰り返す
