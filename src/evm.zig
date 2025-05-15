@@ -39,7 +39,12 @@ pub const Opcode = struct {
     pub const OR = 0x17;
     pub const XOR = 0x18;
     pub const NOT = 0x19;
-    pub const SHR = 0x1C;
+
+    // ビットシフト操作
+    pub const SHL = 0x1B; // 論理左シフト
+    pub const SHR = 0x1C; // 論理右シフト
+    pub const SAR = 0x1D; // 算術右シフト
+
     pub const POP = 0x50;
 
     // メモリ操作
@@ -75,6 +80,7 @@ pub const Opcode = struct {
     pub const CALLDATACOPY = 0x37;
 
     // コード関連
+    pub const CODESIZE = 0x38;
     pub const CODECOPY = 0x39;
 
     // 戻りデータ関連
@@ -357,6 +363,46 @@ fn executeStep(context: *EvmContext) !void {
             context.pc += 1;
         },
 
+        Opcode.SHL => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const shift = try context.stack.pop();
+            const value = try context.stack.pop();
+
+            // シフト量が256以上の場合は結果は0
+            if (shift.hi > 0 or shift.lo >= 256) {
+                try context.stack.push(EVMu256.zero());
+            } else {
+                const shift_amount = @as(u8, @intCast(shift.lo));
+
+                // 単純化した論理左シフトの実装
+                if (shift_amount == 0) {
+                    // シフトなし - 元の値を返す
+                    try context.stack.push(value);
+                } else if (shift_amount < 64) {
+                    // 64ビット未満のシフト
+                    const result = EVMu256{
+                        .hi = (value.hi << @intCast(shift_amount)) | (value.lo >> @intCast(64 - shift_amount)),
+                        .lo = value.lo << @intCast(shift_amount),
+                    };
+                    try context.stack.push(result);
+                } else if (shift_amount < 128) {
+                    // 64-127ビットのシフト - loの値がhiに移動
+                    const result = EVMu256{
+                        .hi = value.lo << @intCast(shift_amount - 64),
+                        .lo = 0,
+                    };
+                    try context.stack.push(result);
+                } else if (shift_amount < 256) {
+                    // 128-255ビットのシフト - すべて0
+                    try context.stack.push(EVMu256.zero());
+                } else {
+                    // 256ビット以上のシフト - すべて0
+                    try context.stack.push(EVMu256.zero());
+                }
+            }
+            context.pc += 1;
+        },
+
         Opcode.SHR => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const shift = try context.stack.pop();
@@ -394,6 +440,72 @@ fn executeStep(context: *EvmContext) !void {
             context.pc += 1;
         },
 
+        Opcode.SAR => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const shift = try context.stack.pop();
+            const value = try context.stack.pop();
+
+            // シフト量が256以上の場合の処理
+            if (shift.hi > 0 or shift.lo >= 256) {
+                // 最上位ビットが1（負数）の場合、すべてのビットが1になる（算術シフトの特性）
+                if (value.hi & (1 << 127) != 0) {
+                    try context.stack.push(EVMu256{ .hi = std.math.maxInt(u128), .lo = std.math.maxInt(u128) });
+                } else {
+                    try context.stack.push(EVMu256.zero());
+                }
+            } else {
+                const shift_amount = @as(u8, @intCast(shift.lo));
+                var result = EVMu256{ .hi = value.hi, .lo = value.lo };
+
+                // 最上位ビットを記録（符号ビット）
+                const sign_bit = (value.hi & (1 << 127)) != 0;
+
+                // 算術右シフト実装
+                if (shift_amount == 0) {
+                    // シフト量が0の場合は値をそのまま返す
+                } else if (shift_amount < 64) {
+                    // 64ビット未満のシフト
+                    const shift_u7 = @as(u7, @intCast(shift_amount));
+                    const complement_u6 = @as(u6, @intCast(64 - shift_amount));
+                    result.lo = (value.lo >> shift_u7) | (value.hi << complement_u6);
+
+                    // 符号拡張：符号が負の場合、上位ビットを1で埋める
+                    if (sign_bit) {
+                        // 最上位部分を右シフトし、最上位ビットを1で埋める
+                        const mask = ~@as(u128, 0) << @as(u7, @intCast(127 - shift_amount));
+                        result.hi = (value.hi >> shift_u7) | mask;
+                    } else {
+                        // 通常の論理右シフト
+                        result.hi = value.hi >> shift_u7;
+                    }
+                } else if (shift_amount < 128) {
+                    // 64-127ビットのシフト
+                    const adjusted_shift = @as(u7, @intCast(shift_amount - 64));
+                    result.lo = value.hi >> adjusted_shift;
+
+                    // 符号拡張：負数の場合はすべてのビットを1に
+                    if (sign_bit) {
+                        result.hi = std.math.maxInt(u128);
+                    } else {
+                        result.hi = 0;
+                    }
+                } else {
+                    // 128ビット以上のシフト
+                    // 符号拡張：負数の場合はすべてのビットを1に
+                    if (sign_bit) {
+                        result.lo = std.math.maxInt(u128);
+                        result.hi = std.math.maxInt(u128);
+                    } else {
+                        result.lo = 0;
+                        result.hi = 0;
+                    }
+                }
+
+                try context.stack.push(result);
+            }
+            context.pc += 1;
+        },
+
         Opcode.JUMPI => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const dest = try context.stack.pop();
@@ -415,6 +527,12 @@ fn executeStep(context: *EvmContext) !void {
                 // 条件が0の場合は次の命令へ
                 context.pc += 1;
             }
+        },
+
+        Opcode.CODESIZE => {
+            // 現在の実行バイトコードのサイズをスタックにプッシュ
+            try context.stack.push(EVMu256.fromU64(context.code.len));
+            context.pc += 1;
         },
 
         Opcode.CODECOPY => {
@@ -523,7 +641,12 @@ pub fn disassemble(code: []const u8, writer: anytype) !void {
             Opcode.MUL => try writer.print("MUL", .{}),
             Opcode.SUB => try writer.print("SUB", .{}),
             Opcode.DIV => try writer.print("DIV", .{}),
+            Opcode.SHL => try writer.print("SHL", .{}),
+            Opcode.SHR => try writer.print("SHR", .{}),
+            Opcode.SAR => try writer.print("SAR", .{}),
             Opcode.MLOAD => try writer.print("MLOAD", .{}),
+            Opcode.CODESIZE => try writer.print("CODESIZE", .{}),
+            Opcode.CODECOPY => try writer.print("CODECOPY", .{}),
             Opcode.MSTORE => try writer.print("MSTORE", .{}),
             Opcode.SLOAD => try writer.print("SLOAD", .{}),
             Opcode.SSTORE => try writer.print("SSTORE", .{}),
