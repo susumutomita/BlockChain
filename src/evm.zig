@@ -595,7 +595,7 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.PUSH0 => {
             // Push constant 0 onto the stack
-            var zero = EVMu256{ .hi = 0, .lo = 0 };
+            const zero = EVMu256{ .hi = 0, .lo = 0 };
             try context.stack.push(zero);
             context.pc += 1;
         },
@@ -620,7 +620,7 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.CALLDATASIZE => {
             // Push the size of the calldata onto the stack
-            var size = EVMu256{ .hi = 0, .lo = context.calldata.len };
+            const size = EVMu256{ .hi = 0, .lo = context.calldata.len };
             try context.stack.push(size);
             context.pc += 1;
         },
@@ -631,7 +631,7 @@ fn executeStep(context: *EvmContext) !void {
             const b = try context.stack.pop();
             
             // Bitwise AND operation
-            var result = EVMu256{
+            const result = EVMu256{
                 .hi = a.hi & b.hi,
                 .lo = a.lo & b.lo,
             };
@@ -646,7 +646,7 @@ fn executeStep(context: *EvmContext) !void {
             const b = try context.stack.pop();
             
             // Bitwise OR operation
-            var result = EVMu256{
+            const result = EVMu256{
                 .hi = a.hi | b.hi,
                 .lo = a.lo | b.lo,
             };
@@ -661,7 +661,7 @@ fn executeStep(context: *EvmContext) !void {
             const b = try context.stack.pop();
             
             // Bitwise XOR operation
-            var result = EVMu256{
+            const result = EVMu256{
                 .hi = a.hi ^ b.hi,
                 .lo = a.lo ^ b.lo,
             };
@@ -675,7 +675,7 @@ fn executeStep(context: *EvmContext) !void {
             const a = try context.stack.pop();
             
             // Bitwise NOT operation
-            var result = EVMu256{
+            const result = EVMu256{
                 .hi = ~a.hi,
                 .lo = ~a.lo,
             };
