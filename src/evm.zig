@@ -62,7 +62,8 @@ pub const Opcode = struct {
     pub const PC = 0x58;
     pub const JUMPDEST = 0x5B;
 
-    // PUSHシリーズ (PUSH1-PUSH32)
+    // PUSHシリーズ (PUSH0-PUSH32)
+    pub const PUSH0 = 0x5F;
     pub const PUSH1 = 0x60;
     // 他のPUSH命令も順次増えていく (0x61-0x7F)
 
@@ -590,6 +591,97 @@ fn executeStep(context: *EvmContext) !void {
 
             context.stopped = true;
             return EVMError.Revert;
+        },
+
+        Opcode.PUSH0 => {
+            // Push constant 0 onto the stack
+            var zero = EVMu256{ .hi = 0, .lo = 0 };
+            try context.stack.push(zero);
+            context.pc += 1;
+        },
+
+        Opcode.JUMP => {
+            // Pop the jump destination from the stack
+            if (context.stack.depth() < 1) return EVMError.StackUnderflow;
+            const dest = try context.stack.pop();
+            
+            // ジャンプ先は現在u64範囲のみサポート
+            if (dest.hi != 0) return EVMError.InvalidJump;
+            
+            const jump_dest = @as(usize, @intCast(dest.lo));
+            
+            // ジャンプ先が有効なJUMPDESTかチェック
+            if (jump_dest >= context.code.len) return EVMError.InvalidJump;
+            if (context.code[jump_dest] != Opcode.JUMPDEST) return EVMError.InvalidJump;
+            
+            // ジャンプ先にプログラムカウンタを設定
+            context.pc = jump_dest;
+        },
+
+        Opcode.CALLDATASIZE => {
+            // Push the size of the calldata onto the stack
+            var size = EVMu256{ .hi = 0, .lo = context.calldata.len };
+            try context.stack.push(size);
+            context.pc += 1;
+        },
+
+        Opcode.AND => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+            
+            // Bitwise AND operation
+            var result = EVMu256{
+                .hi = a.hi & b.hi,
+                .lo = a.lo & b.lo,
+            };
+            
+            try context.stack.push(result);
+            context.pc += 1;
+        },
+
+        Opcode.OR => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+            
+            // Bitwise OR operation
+            var result = EVMu256{
+                .hi = a.hi | b.hi,
+                .lo = a.lo | b.lo,
+            };
+            
+            try context.stack.push(result);
+            context.pc += 1;
+        },
+
+        Opcode.XOR => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+            
+            // Bitwise XOR operation
+            var result = EVMu256{
+                .hi = a.hi ^ b.hi,
+                .lo = a.lo ^ b.lo,
+            };
+            
+            try context.stack.push(result);
+            context.pc += 1;
+        },
+
+        Opcode.NOT => {
+            if (context.stack.depth() < 1) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            
+            // Bitwise NOT operation
+            var result = EVMu256{
+                .hi = ~a.hi,
+                .lo = ~a.lo,
+            };
+            
+            try context.stack.push(result);
+            context.pc += 1;
         },
 
         else => {
