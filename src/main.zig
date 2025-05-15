@@ -300,7 +300,9 @@ fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contra
     // ローカルでもトランザクションを処理して即時デプロイする
     std.log.info("ローカルノードでコントラクトデプロイを実行しています...", .{});
     var tx_copy = tx; // トランザクションの可変コピーを作成
-    const result = blockchain.processEvmTransaction(&tx_copy) catch |err| {
+    const result = blockchain.processEvmTransactionWithErrorDetails(&tx_copy) catch |err| {
+        // 詳細なエラー情報はprocessEvmTransactionWithErrorDetails内で出力されるため、
+        // ここでは簡潔なエラーのみ表示
         std.log.err("ローカルでのデプロイ処理エラー: {any}", .{err});
         return;
     };
@@ -353,9 +355,11 @@ fn callContract(allocator: std.mem.Allocator, contract_address: []const u8, inpu
     if (blockchain.contract_storage.get(contract_address)) |_| {
         std.log.info("コントラクトがローカルに見つかりました: アドレス={s}", .{contract_address});
 
-        // ローカルでトランザクションを実行
+        // ローカルでトランザクションを実行（詳細なエラー情報付き）
         var tx_copy = tx; // Create a mutable copy of the transaction
-        const result = blockchain.processEvmTransaction(&tx_copy) catch |err| {
+        const result = blockchain.processEvmTransactionWithErrorDetails(&tx_copy) catch |err| {
+            // 詳細なエラー情報はprocessEvmTransactionWithErrorDetails内で出力されるため、
+            // ここでは簡潔なエラーのみ表示
             std.log.err("ローカルでのコントラクト呼び出しエラー: {any}", .{err});
             return;
         };
