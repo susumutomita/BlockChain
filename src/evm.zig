@@ -62,7 +62,8 @@ pub const Opcode = struct {
     pub const PC = 0x58;
     pub const JUMPDEST = 0x5B;
 
-    // PUSHシリーズ (PUSH1-PUSH32)
+    // PUSHシリーズ (PUSH0-PUSH32)
+    pub const PUSH0 = 0x5F; // 定数0をスタックに積む (Solidity 0.8.24で追加)
     pub const PUSH1 = 0x60;
     // 他のPUSH命令も順次増えていく (0x61-0x7F)
 
@@ -86,6 +87,9 @@ pub const Opcode = struct {
     // 戻りデータ関連
     pub const RETURNDATASIZE = 0x3D;
     pub const RETURNDATACOPY = 0x3E;
+    
+    // コントラクト関連
+    pub const CALLVALUE = 0x34; // 呼び出し時の送金額
 };
 
 /// エラー型定義
@@ -153,6 +157,12 @@ fn executeStep(context: *EvmContext) !void {
             const a = try context.stack.pop();
             const b = try context.stack.pop();
             try context.stack.push(a.add(b));
+            context.pc += 1;
+        },
+        
+        Opcode.PUSH0 => {
+            // PUSH0: スタックに即値0をプッシュ
+            try context.stack.push(EVMu256.zero());
             context.pc += 1;
         },
 
@@ -506,6 +516,22 @@ fn executeStep(context: *EvmContext) !void {
             context.pc += 1;
         },
 
+        Opcode.JUMP => {
+            if (context.stack.depth() < 1) return EVMError.StackUnderflow;
+            const dest = try context.stack.pop();
+            
+            // ジャンプ先は現在u64範囲のみサポート
+            if (dest.hi != 0) return EVMError.InvalidJump;
+            
+            const jump_dest = @as(usize, @intCast(dest.lo));
+            
+            // ジャンプ先が有効なJUMPDESTかチェック
+            if (jump_dest >= context.code.len) return EVMError.InvalidJump;
+            if (context.code[jump_dest] != Opcode.JUMPDEST) return EVMError.InvalidJump;
+            
+            context.pc = jump_dest;
+        },
+
         Opcode.JUMPI => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const dest = try context.stack.pop();
@@ -591,7 +617,78 @@ fn executeStep(context: *EvmContext) !void {
             context.stopped = true;
             return EVMError.Revert;
         },
-
+        
+        Opcode.CALLDATASIZE => {
+            // 呼び出しデータのサイズをスタックにプッシュ
+            try context.stack.push(EVMu256.fromU64(context.calldata.len));
+            context.pc += 1;
+        },
+        
+        Opcode.CALLVALUE => {
+            // 簡易実装: 常に0を返す
+            try context.stack.push(EVMu256.zero());
+            context.pc += 1;
+        },
+        
+        Opcode.AND => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+            
+            // ビット単位のAND演算
+            const result = EVMu256{
+                .hi = a.hi & b.hi,
+                .lo = a.lo & b.lo,
+            };
+            
+            try context.stack.push(result);
+            context.pc += 1;
+        },
+        
+        Opcode.OR => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+            
+            // ビット単位のOR演算
+            const result = EVMu256{
+                .hi = a.hi | b.hi,
+                .lo = a.lo | b.lo,
+            };
+            
+            try context.stack.push(result);
+            context.pc += 1;
+        },
+        
+        Opcode.XOR => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+            
+            // ビット単位のXOR演算
+            const result = EVMu256{
+                .hi = a.hi ^ b.hi,
+                .lo = a.lo ^ b.lo,
+            };
+            
+            try context.stack.push(result);
+            context.pc += 1;
+        },
+        
+        Opcode.NOT => {
+            if (context.stack.depth() < 1) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            
+            // ビット単位のNOT演算
+            const result = EVMu256{
+                .hi = ~a.hi,
+                .lo = ~a.lo,
+            };
+            
+            try context.stack.push(result);
+            context.pc += 1;
+        },
+        
         else => {
             // PUSH2-PUSH32 (0x61-0x7F)の実装
             if (opcode >= 0x61 and opcode <= 0x7F) {
@@ -655,6 +752,7 @@ pub fn disassemble(code: []const u8, writer: anytype) !void {
             Opcode.JUMPDEST => try writer.print("JUMPDEST", .{}),
             Opcode.RETURN => try writer.print("RETURN", .{}),
 
+            Opcode.PUSH0 => try writer.print("PUSH0", .{}),
             Opcode.PUSH1 => {
                 if (pc + 1 < code.len) {
                     const value = code[pc + 1];
@@ -668,6 +766,12 @@ pub fn disassemble(code: []const u8, writer: anytype) !void {
             Opcode.DUP1 => try writer.print("DUP1", .{}),
             Opcode.SWAP1 => try writer.print("SWAP1", .{}),
             Opcode.CALLDATALOAD => try writer.print("CALLDATALOAD", .{}),
+            Opcode.CALLDATASIZE => try writer.print("CALLDATASIZE", .{}),
+            Opcode.CALLVALUE => try writer.print("CALLVALUE", .{}),
+            Opcode.AND => try writer.print("AND", .{}),
+            Opcode.OR => try writer.print("OR", .{}),
+            Opcode.XOR => try writer.print("XOR", .{}),
+            Opcode.NOT => try writer.print("NOT", .{}),
 
             else => {
                 if (opcode >= 0x60 and opcode <= 0x7F) {
