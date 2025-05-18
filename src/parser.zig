@@ -124,7 +124,7 @@ fn serializeTransactions(transactions: std.ArrayList(types.Transaction), allocat
         }
         
         // 基本的なトランザクション情報を含むJSONを作成
-        var tx_json_base = try std.fmt.allocPrintZ(allocator, "{{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d},\"tx_type\":{d},\"gas_limit\":{d},\"gas_price\":{d}", .{ 
+        const tx_json_base = try std.fmt.allocPrintZ(allocator, "{{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d},\"tx_type\":{d},\"gas_limit\":{d},\"gas_price\":{d}", .{ 
             tx.sender, 
             tx.receiver, 
             tx.amount,
