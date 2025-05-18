@@ -807,7 +807,7 @@ fn executeStep(context: *EvmContext) !void {
         else => {
             // PUSH2-PUSH32 (0x61-0x7F)の実装
             if (opcode >= 0x61 and opcode <= 0x7F) {
-                const n = opcode - 0x60; // PUSHnのnを計算 (PUSH1は0x60)
+                const n = opcode - 0x60 + 1; // PUSHnのnを計算 (PUSH1は0x60) - 正しくバイト数に変換
 
                 // コード範囲チェック
                 if (context.pc + n >= context.code.len) {
@@ -825,6 +825,8 @@ fn executeStep(context: *EvmContext) !void {
                     } else if (i < 16) {
                         // 次の8バイトはhiに格納
                         value.hi |= @as(u64, byte) << @as(u6, @intCast(8 * (15 - i)));
+                    } else if (i == 16) {
+                        std.log.warn("PUSH命令: 128ビットを超える即値は切り捨てられます (命令: PUSH{d})", .{n});
                     }
                     // 32バイト以上は無視（EVMu256は128ビットまでしかサポートしていない）
                 }
@@ -1630,4 +1632,40 @@ test "EVM execution with error info" {
 
     // 後始末
     allocator.free(errorMsg);
+}
+
+// PUSH2 0x000fのエラーケースのテスト（issue #116の修正確認）
+test "EVM PUSH2 with 0x000f value" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード: PUSH2 0x000f を使用したテスト（以前のバグケース）
+    // PUSH2 0x000f, PUSH1 0x00, MSTORE, PUSH1 0x20, PUSH1 0x00, RETURN
+    const bytecode = [_]u8{
+        0x61, 0x00, 0x0f, // PUSH2 0x000f - 問題となっていたケース
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    const calldata = [_]u8{};
+    const result = try execute(allocator, &bytecode, &calldata, 100000);
+    defer allocator.free(result);
+
+    // 結果をEVMu256形式で解釈
+    var value = EVMu256{ .hi = 0, .lo = 0 };
+    if (result.len >= 32) {
+        // 上位16バイトと下位16バイトを解析
+        for (0..16) |i| {
+            value.hi |= @as(u128, result[i]) << @as(u7, @intCast((15 - i) * 8));
+            value.lo |= @as(u128, result[i + 16]) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が0x000fになっていることを確認
+    try std.testing.expect(value.hi == 0);
+    try std.testing.expect(value.lo == 0x000f);
 }
