@@ -561,6 +561,27 @@ pub fn processEvmTransactionWithErrorDetails(tx: *types.Transaction) ![]const u8
 
                         std.log.err("オペコード詳細: {s}", .{opcode_desc});
                         std.log.err("エラー分析: {s}", .{error_analysis});
+
+                        // 詳細なバイトコード表示（Hexdump形式）
+                        var hexdump_buffer = std.ArrayList(u8).init(allocator);
+                        defer hexdump_buffer.deinit();
+
+                        evm_debug.hexdumpCodeContext(evm_data, pc, 16, hexdump_buffer.writer()) catch {};
+                        std.log.err("バイトコード詳細表示:\n{s}", .{hexdump_buffer.items});
+
+                        // Solidityバージョン推測
+                        const version_info = evm_debug.guessSolidityVersion(evm_data);
+                        std.log.err("推定コンパイラ: {s}", .{version_info});
+
+                        // Solidityバージョン固有のエラー解決策を提示
+                        if (invalid_opcode == 0x0F) {
+                            std.log.err("解決策: このコントラクトはSolidity 0.8.x系でコンパイルされた可能性が高いです。", .{});
+                            std.log.err("        1. Solidity 0.7.x以下を使用してコントラクトを再コンパイルする", .{});
+                            std.log.err("        2. または、EVMの実装を拡張して0x0F, 0x5F等の新しいオペコードをサポートする", .{});
+                            std.log.err("        3. または、--evm-version=berlin などのコンパイラオプションを使用する", .{});
+                        } else if (invalid_opcode == 0xFE) {
+                            std.log.err("解決策: このコードはassert()が失敗したか、故意にrevertされています。コントラクトのロジックを確認してください。", .{});
+                        }
                     }
                 }
 
@@ -609,6 +630,34 @@ pub fn processEvmTransactionWithErrorDetails(tx: *types.Transaction) ![]const u8
 
                         std.log.err("オペコード詳細: {s}", .{opcode_desc});
                         std.log.err("エラー分析: {s}", .{error_analysis});
+
+                        // 詳細なバイトコード表示（Hexdump形式）
+                        var hexdump_buffer = std.ArrayList(u8).init(allocator);
+                        defer hexdump_buffer.deinit();
+
+                        evm_debug.hexdumpCodeContext(contract_code, pc, 16, hexdump_buffer.writer()) catch {};
+                        std.log.err("バイトコード詳細表示:\n{s}", .{hexdump_buffer.items});
+
+                        // Solidityバージョン推測
+                        const version_info = evm_debug.guessSolidityVersion(contract_code);
+                        std.log.err("推定コンパイラ: {s}", .{version_info});
+
+                        // 関数セレクタの解析（呼び出しデータの先頭4バイトに基づく関数識別）
+                        if (evm_data.len >= 4) {
+                            hexdump_buffer.clearRetainingCapacity();
+                            evm_debug.analyzeFunctionSelector(evm_data, hexdump_buffer.writer()) catch {};
+                            std.log.err("関数呼び出し解析:\n{s}", .{hexdump_buffer.items});
+                        }
+
+                        // 関数呼び出し時の特定エラーパターンに対する特別な対応
+                        if (invalid_opcode == 0x0F) {
+                            std.log.err("解決策: このコントラクトはSolidity 0.8.x系でコンパイルされた可能性が高いです。", .{});
+                            std.log.err("        1. Solidity 0.7.x以下を使用してコントラクトを再コンパイルする", .{});
+                            std.log.err("        2. または、EVMの実装を拡張して0x0F, 0x5F等の新しいオペコードをサポートする", .{});
+                            std.log.err("        3. または、--evm-version=berlin などのコンパイラオプションを使用する", .{});
+                        } else if (invalid_opcode == 0xFE) {
+                            std.log.err("解決策: このコードはassert()が失敗したか、故意にrevertされています。コントラクトのロジックを確認してください。", .{});
+                        }
                     }
                 }
 
