@@ -122,9 +122,37 @@ fn serializeTransactions(transactions: std.ArrayList(types.Transaction), allocat
         if (i > 0) {
             try list.appendSlice(",");
         }
-        const tx_json = try std.fmt.allocPrintZ(allocator, "{{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d}}}", .{ tx.sender, tx.receiver, tx.amount });
-        defer allocator.free(tx_json);
-        try list.appendSlice(tx_json);
+        
+        // 基本的なトランザクション情報を含むJSONを作成
+        var tx_json_base = try std.fmt.allocPrintZ(allocator, "{{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d},\"tx_type\":{d},\"gas_limit\":{d},\"gas_price\":{d}", .{ 
+            tx.sender, 
+            tx.receiver, 
+            tx.amount,
+            tx.tx_type,
+            tx.gas_limit,
+            tx.gas_price
+        });
+        defer allocator.free(tx_json_base);
+        
+        // EVMデータがある場合は追加
+        if (tx.evm_data) |evm_data| {
+            // EVMデータを16進数に変換
+            const evm_data_hex = try utils.bytesToHex(allocator, evm_data);
+            defer allocator.free(evm_data_hex);
+            
+            // EVMデータを含む完全なJSONを作成
+            const tx_json_full = try std.fmt.allocPrintZ(allocator, "{s},\"evm_data\":\"{s}\"}}", .{
+                tx_json_base,
+                evm_data_hex
+            });
+            defer allocator.free(tx_json_full);
+            try list.appendSlice(tx_json_full);
+        } else {
+            // EVMデータがない場合は基本情報のみ
+            const tx_json_no_evm = try std.fmt.allocPrintZ(allocator, "{s}}}", .{tx_json_base});
+            defer allocator.free(tx_json_no_evm);
+            try list.appendSlice(tx_json_no_evm);
+        }
     }
 
     try list.appendSlice("]");
