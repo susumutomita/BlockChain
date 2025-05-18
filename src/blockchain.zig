@@ -381,7 +381,41 @@ pub fn printChainState() void {
             std.debug.print("  (no transactions)\n", .{});
         } else {
             for (block.transactions.items) |tx| {
-                std.debug.print("  {s} -> {s} : {d}\n", .{ tx.sender, tx.receiver, tx.amount });
+                // トランザクションタイプに基づいて異なる情報を表示
+                const tx_type_str = switch (tx.tx_type) {
+                    0 => "普通送金",
+                    1 => "コントラクトデプロイ",
+                    2 => "コントラクト呼び出し",
+                    else => "不明",
+                };
+                
+                // 基本的なトランザクション情報を表示
+                std.debug.print("  #{s}# {s} -> {s} : {d}\n", .{ tx_type_str, tx.sender, tx.receiver, tx.amount });
+                
+                // トランザクションタイプに応じた追加情報を表示
+                if (tx.tx_type > 0) {
+                    if (tx.evm_data) |data| {
+                        const data_len = data.len;
+                        std.debug.print("    EVMデータ長: {d} バイト\n", .{data_len});
+                        if (data_len > 0) {
+                            // 先頭4バイトのみ表示（関数セレクタに相当する場合が多い）
+                            const display_len = @min(4, data_len);
+                            std.debug.print("    セレクタ: 0x", .{});
+                            for (data[0..display_len]) |byte| {
+                                std.debug.print("{x:0>2}", .{byte});
+                            }
+                            std.debug.print("\n", .{});
+                        }
+                    }
+                    std.debug.print("    ガス上限: {d}, ガス価格: {d} wei\n", .{ tx.gas_limit, tx.gas_price });
+                }
+                
+                // トランザクションIDの表示（最初の8バイトのみ）
+                std.debug.print("    TX ID: 0x", .{});
+                for (tx.id[0..8]) |byte| {
+                    std.debug.print("{x:0>2}", .{byte});
+                }
+                std.debug.print("\n", .{});
             }
         }
 
