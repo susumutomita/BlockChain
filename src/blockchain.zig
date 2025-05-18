@@ -481,6 +481,9 @@ pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
 
         // ブロックを追加
         addBlock(new_block);
+        
+        // 新しいブロックをピアにブロードキャスト
+        @import("p2p.zig").broadcastBlock(new_block, null);
 
         std.log.info("コントラクトデプロイブロックを作成しました: address={s}", .{tx.receiver});
     }
