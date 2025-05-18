@@ -281,6 +281,13 @@ fn executeStep(context: *EvmContext) !void {
             context.pc += 1;
         },
 
+        Opcode.POP => {
+            // POP: スタックトップの値を削除
+            if (context.stack.depth() < 1) return EVMError.StackUnderflow;
+            _ = try context.stack.pop(); // 値を捨てる
+            context.pc += 1;
+        },
+
         Opcode.MUL => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const a = try context.stack.pop();
@@ -807,32 +814,32 @@ fn executeStep(context: *EvmContext) !void {
         else => {
             // PUSH2-PUSH32 (0x61-0x7F)の実装
             if (opcode >= 0x61 and opcode <= 0x7F) {
-                const n = opcode - 0x60 + 1; // PUSHnのnを計算 (PUSH1は0x60) - 正しくバイト数に変換
+                const push_bytes = opcode - 0x5F; // PUSHnのnを計算 - 正しくバイト数に変換
 
                 // コード範囲チェック
-                if (context.pc + n >= context.code.len) {
+                if (context.pc + push_bytes >= context.code.len) {
                     context.error_msg = "コード範囲外のPUSH操作";
                     return EVMError.InvalidOpcode;
                 }
 
-                // n バイトを読み取り、256ビット値に変換
+                // push_bytes バイトを読み取り、256ビット値に変換
                 var value = EVMu256.zero();
-                for (0..n) |i| {
+                for (0..push_bytes) |i| {
                     const byte = context.code[context.pc + 1 + i];
                     if (i < 8) {
                         // 最初の8バイトはloに格納（ビッグエンディアン順を正しく処理）
-                        value.lo |= @as(u128, byte) << @as(u7, @intCast(8 * (n - 1 - i)));
+                        value.lo |= @as(u128, byte) << @as(u7, @intCast(8 * (push_bytes - 1 - i)));
                     } else if (i < 16) {
                         // 次の8バイトはhiに格納（ビッグエンディアン順を正しく処理）
-                        value.hi |= @as(u128, byte) << @as(u7, @intCast(8 * (n - 1 - i + 8)));
+                        value.hi |= @as(u128, byte) << @as(u7, @intCast(8 * (push_bytes - 1 - i + 8)));
                     } else if (i == 16) {
-                        std.log.warn("PUSH命令: 128ビットを超える即値は切り捨てられます (命令: PUSH{d})", .{n});
+                        std.log.warn("PUSH命令: 128ビットを超える即値は切り捨てられます (命令: PUSH{d})", .{push_bytes});
                     }
                     // 32バイト以上は無視（EVMu256は128ビットまでしかサポートしていない）
                 }
 
                 try context.stack.push(value);
-                context.pc += n + 1; // オペコード + nバイトをスキップ
+                context.pc += push_bytes + 1; // オペコード + push_bytesバイトをスキップ
             } else {
                 // 詳細なエラーログ出力
                 const opcodeHex = std.fmt.allocPrint(std.heap.page_allocator, "0x{x:0>2}", .{opcode}) catch "Unknown";
@@ -897,6 +904,7 @@ pub fn disassemble(code: []const u8, writer: anytype) !void {
             Opcode.SHL => try writer.print("SHL", .{}),
             Opcode.SHR => try writer.print("SHR", .{}),
             Opcode.SAR => try writer.print("SAR", .{}),
+            Opcode.POP => try writer.print("POP", .{}),
             Opcode.MLOAD => try writer.print("MLOAD", .{}),
             Opcode.CODESIZE => try writer.print("CODESIZE", .{}),
             Opcode.CODECOPY => try writer.print("CODECOPY", .{}),
