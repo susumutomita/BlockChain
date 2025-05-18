@@ -820,11 +820,11 @@ fn executeStep(context: *EvmContext) !void {
                 for (0..n) |i| {
                     const byte = context.code[context.pc + 1 + i];
                     if (i < 8) {
-                        // 最初の8バイトはloに格納
-                        value.lo |= @as(u64, byte) << @as(u6, @intCast(8 * (7 - i)));
+                        // 最初の8バイトはloに格納（ビッグエンディアン順を正しく処理）
+                        value.lo |= @as(u128, byte) << @as(u7, @intCast(8 * (n - 1 - i)));
                     } else if (i < 16) {
-                        // 次の8バイトはhiに格納
-                        value.hi |= @as(u64, byte) << @as(u6, @intCast(8 * (15 - i)));
+                        // 次の8バイトはhiに格納（ビッグエンディアン順を正しく処理）
+                        value.hi |= @as(u128, byte) << @as(u7, @intCast(8 * (n - 1 - i + 8)));
                     } else if (i == 16) {
                         std.log.warn("PUSH命令: 128ビットを超える即値は切り捨てられます (命令: PUSH{d})", .{n});
                     }
@@ -1668,4 +1668,44 @@ test "EVM PUSH2 with 0x000f value" {
     // 結果が0x000fになっていることを確認
     try std.testing.expect(value.hi == 0);
     try std.testing.expect(value.lo == 0x000f);
+}
+
+// JUMPI命令のテスト（issue #116関連の修正確認）
+test "EVM JUMPI with PUSH2 destination" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // バイトコード: PUSH1 0x01, PUSH2 0x000f, JUMPI, PUSH1 0xff, JUMPDEST, PUSH1 0x42
+    const bytecode = [_]u8{
+        0x60, 0x01, // PUSH1 0x01 (条件)
+        0x61, 0x00, 0x0f, // PUSH2 0x000f (ジャンプ先)
+        0x57, // JUMPI (条件付きジャンプ)
+        0x60, 0xff, // PUSH1 0xff (スキップされるはず)
+        0x5b, // JUMPDEST (ジャンプ先)
+        0x60, 0x42, // PUSH1 0x42 (最終結果)
+        0x60, 0x00, // PUSH1 0x00
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 0x20
+        0x60, 0x00, // PUSH1 0x00
+        0xf3, // RETURN
+    };
+
+    const calldata = [_]u8{};
+    const result = try execute(allocator, &bytecode, &calldata, 100000);
+    defer allocator.free(result);
+
+    // 結果をEVMu256形式で解釈
+    var value = EVMu256{ .hi = 0, .lo = 0 };
+    if (result.len >= 32) {
+        // 上位16バイトと下位16バイトを解析
+        for (0..16) |i| {
+            value.hi |= @as(u128, result[i]) << @as(u7, @intCast((15 - i) * 8));
+            value.lo |= @as(u128, result[i + 16]) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    // 結果が0x42になっていることを確認（JUMPIが正しく動作した場合）
+    try std.testing.expect(value.hi == 0);
+    try std.testing.expect(value.lo == 0x42);
 }
