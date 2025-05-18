@@ -37,6 +37,7 @@ pub var global_sender_address: []const u8 = "";
 ///   実行ファイル --evm <バイトコードHEX> [--input <入力データHEX>] [--gas <ガス上限>]
 ///   実行ファイル --deploy <バイトコードHEX> <コントラクトアドレス> [--gas <ガス上限>] [--sender <送信者アドレス>]
 ///   実行ファイル --call <コントラクトアドレス> <入力データHEX> [--gas <ガス上限>] [--sender <送信者アドレス>]
+///   実行ファイル --analyze <バイトコードHEX>
 ///
 /// 引数:
 ///     <ポート>: このノードが待ち受けるポート番号
@@ -67,6 +68,7 @@ pub fn main() !void {
         std.log.err("       {s} --evm <バイトコードHEX> [--input <入力データHEX>] [--gas <ガス上限>]", .{args[0]});
         std.log.err("       {s} --deploy <バイトコードHEX> <コントラクトアドレス> [--gas <ガス上限>] [--sender <送信者アドレス>]", .{args[0]});
         std.log.err("       {s} --call <コントラクトアドレス> <入力データHEX> [--gas <ガス上限>] [--sender <送信者アドレス>]", .{args[0]});
+        std.log.err("       {s} --analyze <バイトコードHEX>", .{args[0]});
         return;
     }
 
@@ -164,6 +166,15 @@ pub fn main() !void {
                 return;
             }
             sender_address = args[i];
+        } else if (std.mem.eql(u8, arg, "--analyze")) {
+            i += 1;
+            if (i >= args.len) {
+                std.log.err("--analyze フラグの後にバイトコードが必要です", .{});
+                return;
+            }
+            // バイトコード解析機能を実行
+            try test_evm_bytecode_analysis(gpa, args[i]);
+            return;
         } else if (self_port == 0 and !evm_mode and !deploy_mode and !call_mode) {
             // 従来の方式（最初の引数はポート番号）
             self_port = try std.fmt.parseInt(u16, arg, 10);
@@ -432,4 +443,94 @@ test "マイニングが先頭1バイト0のハッシュを生成できる" {
     // 難易度1(先頭1バイトが0)を満たすまでマイニング
     blockchain.mineBlock(&block, 1);
     try std.testing.expectEqual(@as(u8, 0), block.hash[0]);
+}
+
+/// EVMバイトコード解析機能のテスト
+///
+/// 引数:
+///     allocator: メモリアロケータ
+///     bytecode_hex: テスト対象のバイトコード（16進数文字列）
+///
+/// 注意:
+///     この関数はテスト用に作成されたもので、実際のブロックチェーン操作では使用されません。
+pub fn test_evm_bytecode_analysis(allocator: std.mem.Allocator, bytecode_hex: []const u8) !void {
+    const evm_debug = @import("evm_debug.zig");
+    std.log.info("=== EVMバイトコード解析テスト ===", .{});
+    std.log.info("バイトコード: {s}", .{bytecode_hex});
+
+    // 16進文字列をバイナリに変換
+    const bytecode = try @import("utils.zig").hexToBytes(allocator, bytecode_hex);
+    defer allocator.free(bytecode);
+
+    // バイトコードサイズの確認
+    std.log.info("バイトコードサイズ: {d}バイト", .{bytecode.len});
+
+    // Solidityバージョンの推測
+    const version_info = evm_debug.guessSolidityVersion(bytecode);
+    std.log.info("推定コンパイラバージョン: {s}", .{version_info});
+
+    // バイトコードをHexdump形式で表示
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+
+    // 最初の32バイトを表示
+    try evm_debug.hexdumpCodeContext(bytecode, 0, 32, buffer.writer());
+    std.log.info("バイトコード（先頭部分）:\n{s}", .{buffer.items});
+    buffer.clearRetainingCapacity();
+
+    // 逆アセンブリ表示（先頭部分）
+    std.log.info("\n=== バイトコード逆アセンブル（先頭部分）===", .{});
+    try evm_debug.disassembleBytecode(bytecode, 0, 20, buffer.writer());
+    std.log.info("\n{s}", .{buffer.items});
+    buffer.clearRetainingCapacity();
+
+    // デプロイコードとランタイムコードの境界を探す
+    var constructor_end: usize = 0;
+    var i: usize = 0;
+    while (i < bytecode.len) : (i += 1) {
+        if (i + 2 < bytecode.len and bytecode[i] == 0x60 and bytecode[i + 1] == 0x80 and i > 32 and bytecode[i - 1] != 0xf3) {
+            constructor_end = i;
+            break;
+        }
+    }
+
+    if (constructor_end > 0) {
+        std.log.info("\n=== コントラクト構造解析 ===", .{});
+        std.log.info("コンストラクタコード長: {d}バイト", .{constructor_end});
+        std.log.info("ランタイムコード長: {d}バイト", .{bytecode.len - constructor_end});
+
+        // コンストラクタコードの終わり付近を表示
+        if (constructor_end > 16) {
+            std.log.info("\n=== コンストラクタ/ランタイム境界 ===", .{});
+            try evm_debug.hexdumpCodeContext(bytecode, constructor_end - 8, 16, buffer.writer());
+            std.log.info("\n{s}", .{buffer.items});
+            buffer.clearRetainingCapacity();
+
+            // 境界部分の逆アセンブリ
+            std.log.info("\n=== 境界部分の逆アセンブル ===", .{});
+            try evm_debug.disassembleBytecode(bytecode, constructor_end - 5, 10, buffer.writer());
+            std.log.info("\n{s}", .{buffer.items});
+            buffer.clearRetainingCapacity();
+        }
+
+        // ランタイムコードの先頭部分
+        std.log.info("\n=== ランタイムコード（先頭部分）===", .{});
+        try evm_debug.disassembleBytecode(bytecode, constructor_end, 15, buffer.writer());
+        std.log.info("\n{s}", .{buffer.items});
+        buffer.clearRetainingCapacity();
+    } else {
+        std.log.info("コンストラクタ/ランタイム境界が見つかりませんでした", .{});
+    }
+
+    // 潜在的なエラー原因を分析
+    std.log.info("\n=== 潜在的なエラー分析 ===", .{});
+    for ([_]usize{ 10, 32, 64 }) |pos| {
+        if (pos < bytecode.len) {
+            const opcode = bytecode[pos];
+            const analysis = evm_debug.analyzeErrorCause(bytecode, pos);
+            std.log.info("位置 {d} (0x{x:0>2}): {s}", .{ pos, opcode, analysis });
+        }
+    }
+
+    std.log.info("\n=== 解析完了 ===", .{});
 }
