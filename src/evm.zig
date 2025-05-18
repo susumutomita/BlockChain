@@ -807,7 +807,7 @@ fn executeStep(context: *EvmContext) !void {
         else => {
             // PUSH2-PUSH32 (0x61-0x7F)の実装
             if (opcode >= 0x61 and opcode <= 0x7F) {
-                const n = opcode - 0x60; // PUSHnのnを計算 (PUSH1は0x60)
+                const n = opcode - 0x60 + 1; // PUSHnの即値バイト数を計算
 
                 // コード範囲チェック
                 if (context.pc + n >= context.code.len) {
@@ -825,8 +825,10 @@ fn executeStep(context: *EvmContext) !void {
                     } else if (i < 16) {
                         // 次の8バイトはhiに格納
                         value.hi |= @as(u64, byte) << @as(u6, @intCast(8 * (15 - i)));
+                    } else {
+                        // 128ビットを超える即値は警告を出して無視
+                        logger.debugLog("Push命令: 128ビットを超える即値は切り捨てられます\n", .{});
                     }
-                    // 32バイト以上は無視（EVMu256は128ビットまでしかサポートしていない）
                 }
 
                 try context.stack.push(value);
@@ -1449,6 +1451,37 @@ test "EVM PUSH2-PUSH32 operations" {
     // 結果が0x1234になっていることを確認
     try std.testing.expect(value_push2.hi == 0);
     try std.testing.expect(value_push2.lo == 0x1234);
+
+    // バイトコード:
+    // PUSH2 0x000f,                   // 0x000fをプッシュ
+    // PUSH1 0x00, MSTORE,             // メモリに保存
+    // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
+    const bytecode_push2_zero = [_]u8{
+        0x61, 0x00, 0x0f, // PUSH2 0x000f
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    const result_push2_zero = try execute(allocator, &bytecode_push2_zero, &[_]u8{}, 100000);
+    defer allocator.free(result_push2_zero);
+
+    var value_push2_zero = EVMu256{ .hi = 0, .lo = 0 };
+    if (result_push2_zero.len >= 32) {
+        for (0..16) |i| {
+            const byte_val = result_push2_zero[i];
+            value_push2_zero.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+        for (0..16) |i| {
+            const byte_val = result_push2_zero[i + 16];
+            value_push2_zero.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
+        }
+    }
+
+    try std.testing.expect(value_push2_zero.hi == 0);
+    try std.testing.expect(value_push2_zero.lo == 0x000f);
 
     // バイトコード:
     // PUSH4 0x12345678,               // 0x12345678をプッシュ
