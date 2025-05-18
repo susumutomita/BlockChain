@@ -388,10 +388,10 @@ pub fn printChainState() void {
                     2 => "コントラクト呼び出し",
                     else => "不明",
                 };
-                
+
                 // 基本的なトランザクション情報を表示
                 std.debug.print("  #{s}# {s} -> {s} : {d}\n", .{ tx_type_str, tx.sender, tx.receiver, tx.amount });
-                
+
                 // トランザクションタイプに応じた追加情報を表示
                 if (tx.tx_type > 0) {
                     if (tx.evm_data) |data| {
@@ -409,7 +409,7 @@ pub fn printChainState() void {
                     }
                     std.debug.print("    ガス上限: {d}, ガス価格: {d} wei\n", .{ tx.gas_limit, tx.gas_price });
                 }
-                
+
                 // トランザクションIDの表示（最初の8バイトのみ）
                 std.debug.print("    TX ID: 0x", .{});
                 for (tx.id[0..8]) |byte| {
