@@ -318,13 +318,80 @@ pub fn syncChain(blocks: []types.Block) !void {
 
     // 受信したチェーンが現在のチェーンより長い場合のみ同期
     if (blocks.len > chain_store.items.len) {
+        std.log.info("Synchronizing chain with {d} blocks (current chain has {d} blocks)", .{ blocks.len, chain_store.items.len });
+
+        // コントラクトストレージの状態をログに出力（同期前）
+        var contract_count_before: usize = 0;
+        var it_before = contract_storage.iterator();
+        while (it_before.next()) |_| {
+            contract_count_before += 1;
+        }
+        std.log.info("Contract storage before sync: {d} contracts", .{contract_count_before});
+
         // 現在のチェーンをクリア
         chain_store.clearRetainingCapacity();
 
-        // 新しいチェーンからブロックをコピー
+        // 新しいチェーンからブロックをコピーし、各ブロックのコントラクトを処理
         for (blocks) |block| {
+            // ブロックをチェーンに追加
             try chain_store.append(block);
+
+            // ブロックに含まれるコントラクトを処理（addBlockと同様の処理）
+            if (block.contracts) |contracts| {
+                var it = contracts.iterator();
+                var contract_count: usize = 0;
+                while (it.next()) |entry| {
+                    const address = entry.key_ptr.*;
+                    const code = entry.value_ptr.*;
+                    contract_count += 1;
+
+                    // 既存のコントラクトを上書きしないように注意
+                    if (!contract_storage.contains(address)) {
+                        contract_storage.put(address, code) catch |err| {
+                            std.log.err("Failed to store contract at address: {s}, error: {any}", .{ address, err });
+                            continue;
+                        };
+                        std.log.info("Loaded contract at address: {s} from synchronized block, code length: {d} bytes", .{ address, code.len });
+                    }
+                }
+                std.log.info("Processed {d} contracts from block {d}", .{contract_count, block.index});
+            }
+
+            // トランザクションにコントラクトデプロイが含まれているか確認
+            for (block.transactions.items) |tx| {
+                if (tx.tx_type == 1) { // コントラクトデプロイトランザクション
+                    std.log.info("Found contract deploy transaction in block {d} for address: {s}", .{block.index, tx.receiver});
+
+                    // コントラクトがまだ保存されていないかつ、evm_dataがある場合
+                    if (!contract_storage.contains(tx.receiver) and tx.evm_data != null) {
+                        // ローカルで再実行して結果を保存
+                        const allocator = std.heap.page_allocator;
+                        const evm_data = tx.evm_data.?;
+                        const calldata = "";
+
+                        const result = @import("evm.zig").execute(allocator, evm_data, calldata, tx.gas_limit) catch |err| {
+                            std.log.err("Failed to re-execute contract deployment: {any}", .{err});
+                            continue;
+                        };
+
+                        // 結果をコントラクトストレージに保存
+                        contract_storage.put(tx.receiver, result) catch |err| {
+                            std.log.err("Failed to store contract result: {any}", .{err});
+                        };
+                        std.log.info("Re-executed and stored contract at address: {s}, code length: {d} bytes", .{ tx.receiver, result.len });
+                    }
+                }
+            }
         }
+
+        // コントラクトストレージの状態をログに出力（同期後）
+        var contract_count_after: usize = 0;
+        var it_after = contract_storage.iterator();
+        while (it_after.next()) |entry| {
+            contract_count_after += 1;
+            std.log.info("Contract in storage after sync: address={s}, code_length={d}", .{ entry.key_ptr.*, entry.value_ptr.*.len });
+        }
+        std.log.info("Contract storage after sync: {d} contracts", .{contract_count_after});
 
         std.log.info("Chain synchronized with {d} blocks", .{blocks.len});
     } else {
@@ -481,7 +548,7 @@ pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
 
         // ブロックを追加
         addBlock(new_block);
-        
+
         // 新しいブロックをピアにブロードキャスト
         @import("p2p.zig").broadcastBlock(new_block, null);
 
