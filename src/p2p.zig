@@ -250,6 +250,15 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
             return;
         };
 
+        // コントラクト情報をログ出力
+        if (blk.contracts) |contracts| {
+            std.log.info("Received block contains {d} contracts", .{contracts.count()});
+            var contract_it = contracts.iterator();
+            while (contract_it.next()) |entry| {
+                std.log.info("Block contains contract at address: {s}, code length: {d} bytes", .{ entry.key_ptr.*, entry.value_ptr.*.len });
+            }
+        }
+
         // チェーンにブロックを追加
         blockchain.addBlock(blk);
 
@@ -268,9 +277,22 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
         var it = blockchain.contract_storage.iterator();
         while (it.next()) |entry| {
             contract_count += 1;
-            std.log.debug("Contract in storage: address={s}, code_length={d}", .{ entry.key_ptr.*, entry.value_ptr.*.len });
+            std.log.info("Contract in storage after sync: address={s}, code_length={d}", .{ entry.key_ptr.*, entry.value_ptr.*.len });
         }
         std.log.info("Current contract storage has {d} contracts", .{contract_count});
+        
+        // チェーン内の全ブロックを検査してコントラクトを探す（デバッグ用）
+        for (blockchain.chain_store.items) |block| {
+            if (block.contracts) |contracts| {
+                std.log.info("Block {d} contains {d} contracts", .{block.index, contracts.count()});
+                var block_contract_it = contracts.iterator();
+                while (block_contract_it.next()) |entry| {
+                    std.log.info("Block {d} has contract: address={s}, code_length={d}", .{ 
+                        block.index, entry.key_ptr.*, entry.value_ptr.*.len 
+                    });
+                }
+            }
+        }
 
         // コントラクト呼び出しがペンディングの場合、実行する
         if (main.global_call_pending) {
