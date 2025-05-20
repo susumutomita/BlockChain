@@ -195,8 +195,11 @@ pub fn addBlock(new_block: types.Block) void {
         return;
     }
 
+    std.log.info("Adding block to chain: index={d}, hash={x}", .{ new_block.index, new_block.hash });
+
     // ブロックに含まれるコントラクトがあれば、コントラクトストレージに追加
     if (new_block.contracts) |contracts| {
+        std.log.info("Block contains {d} contracts to process", .{contracts.count()});
         var it = contracts.iterator();
         var contract_count: usize = 0;
         while (it.next()) |entry| {
@@ -335,32 +338,46 @@ pub fn syncChain(blocks: []types.Block) !void {
         for (blocks) |block| {
             // ブロックをチェーンに追加
             try chain_store.append(block);
+            std.log.info("Added block {d} to chain during sync", .{block.index});
 
             // ブロックに含まれるコントラクトを処理（addBlockと同様の処理）
             if (block.contracts) |contracts| {
+                std.log.info("Block {d} contains {d} contracts map entries", .{ block.index, contracts.count() });
                 var it = contracts.iterator();
                 var contract_count: usize = 0;
+
+                // 全てのアドレスをログに出力（同期前）
+                var addresses = std.ArrayList([]const u8).init(std.heap.page_allocator);
+                defer addresses.deinit();
+
+                while (it.next()) |entry| {
+                    const address = entry.key_ptr.*;
+                    try addresses.append(address);
+                }
+
+                std.log.info("Block {d} contains contracts at addresses: {s}", .{ block.index, try utils.joinStrings(std.heap.page_allocator, addresses.items, ", ") });
+
+                // 改めてイテレータを初期化して処理
+                it = contracts.iterator();
                 while (it.next()) |entry| {
                     const address = entry.key_ptr.*;
                     const code = entry.value_ptr.*;
                     contract_count += 1;
 
-                    // 既存のコントラクトを上書きしないように注意
-                    if (!contract_storage.contains(address)) {
-                        contract_storage.put(address, code) catch |err| {
-                            std.log.err("Failed to store contract at address: {s}, error: {any}", .{ address, err });
-                            continue;
-                        };
-                        std.log.info("Loaded contract at address: {s} from synchronized block, code length: {d} bytes", .{ address, code.len });
-                    }
+                    // すべてのコントラクトを強制的に更新 - 同期中は常に上書き
+                    contract_storage.put(address, code) catch |err| {
+                        std.log.err("Failed to store contract at address: {s}, error: {any}", .{ address, err });
+                        continue;
+                    };
+                    std.log.info("Loaded contract at address: {s} from synchronized block, code length: {d} bytes", .{ address, code.len });
                 }
-                std.log.info("Processed {d} contracts from block {d}", .{contract_count, block.index});
+                std.log.info("Processed {d} contracts from block {d}", .{ contract_count, block.index });
             }
 
             // トランザクションにコントラクトデプロイが含まれているか確認
             for (block.transactions.items) |tx| {
                 if (tx.tx_type == 1) { // コントラクトデプロイトランザクション
-                    std.log.info("Found contract deploy transaction in block {d} for address: {s}", .{block.index, tx.receiver});
+                    std.log.info("Found contract deploy transaction in block {d} for address: {s}", .{ block.index, tx.receiver });
 
                     // コントラクトがまだ保存されていないかつ、evm_dataがある場合
                     if (!contract_storage.contains(tx.receiver) and tx.evm_data != null) {

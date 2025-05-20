@@ -122,29 +122,19 @@ fn serializeTransactions(transactions: std.ArrayList(types.Transaction), allocat
         if (i > 0) {
             try list.appendSlice(",");
         }
-        
+
         // 基本的なトランザクション情報を含むJSONを作成
-        const tx_json_base = try std.fmt.allocPrintZ(allocator, "{{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d},\"tx_type\":{d},\"gas_limit\":{d},\"gas_price\":{d}", .{ 
-            tx.sender, 
-            tx.receiver, 
-            tx.amount,
-            tx.tx_type,
-            tx.gas_limit,
-            tx.gas_price
-        });
+        const tx_json_base = try std.fmt.allocPrintZ(allocator, "{{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d},\"tx_type\":{d},\"gas_limit\":{d},\"gas_price\":{d}", .{ tx.sender, tx.receiver, tx.amount, tx.tx_type, tx.gas_limit, tx.gas_price });
         defer allocator.free(tx_json_base);
-        
+
         // EVMデータがある場合は追加
         if (tx.evm_data) |evm_data| {
             // EVMデータを16進数に変換
             const evm_data_hex = try utils.bytesToHex(allocator, evm_data);
             defer allocator.free(evm_data_hex);
-            
+
             // EVMデータを含む完全なJSONを作成
-            const tx_json_full = try std.fmt.allocPrintZ(allocator, "{s},\"evm_data\":\"{s}\"}}", .{
-                tx_json_base,
-                evm_data_hex
-            });
+            const tx_json_full = try std.fmt.allocPrintZ(allocator, "{s},\"evm_data\":\"{s}\"}}", .{ tx_json_base, evm_data_hex });
             defer allocator.free(tx_json_full);
             try list.appendSlice(tx_json_full);
         } else {
@@ -508,12 +498,15 @@ fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator
 
     // コントラクト情報の解析（存在する場合）
     if (array_obj.get("contracts")) |contracts_val| {
+        std.log.info("Contracts field found in block, type: {s}", .{@tagName(contracts_val)});
+
         switch (contracts_val) {
             .null => {
+                std.log.info("Contracts field is null - no contracts in this block", .{});
                 // コントラクト情報なし
             },
             .object => |contracts_obj| {
-                std.log.info("Processing contracts field", .{});
+                std.log.info("Processing contracts field with {d} entries", .{contracts_obj.count()});
 
                 // 新しいコントラクトストレージを作成
                 var contracts = std.StringHashMap([]const u8).init(block_allocator);
@@ -522,6 +515,8 @@ fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator
                 var it = contracts_obj.iterator();
                 while (it.next()) |entry| {
                     const address = entry.key_ptr.*;
+                    std.log.info("Found contract address in block: {s}", .{address});
+
                     const code_hex = switch (entry.value_ptr.*) {
                         .string => |s| s,
                         else => {
