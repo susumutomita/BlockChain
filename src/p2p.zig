@@ -202,6 +202,22 @@ pub fn broadcastEvmTransaction(allocator: std.mem.Allocator, tx: types.Transacti
 pub fn sendFullChain(peer: types.Peer) !void {
     std.log.info("Sending full chain (height={d}) to {any}", .{ blockchain.chain_store.items.len, peer.address });
 
+    // チェーン送信前に現在のコントラクト状態をログに出力
+    var contract_count: usize = 0;
+    var contract_it = blockchain.contract_storage.iterator();
+    while (contract_it.next()) |entry| {
+        contract_count += 1;
+        std.log.info("Contract in storage before chain sync: address={s}, code_length={d}", .{ entry.key_ptr.*, entry.value_ptr.*.len });
+    }
+    std.log.info("Current contract storage has {d} contracts", .{contract_count});
+
+    // チェーン内の各ブロックのコントラクト情報をチェック
+    for (blockchain.chain_store.items) |block| {
+        if (block.contracts) |contracts| {
+            std.log.info("Block {d} contains {d} contracts to be sent", .{ block.index, contracts.count() });
+        }
+    }
+
     var writer = peer.stream.writer();
 
     for (blockchain.chain_store.items) |block| {
@@ -280,16 +296,14 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
             std.log.info("Contract in storage after sync: address={s}, code_length={d}", .{ entry.key_ptr.*, entry.value_ptr.*.len });
         }
         std.log.info("Current contract storage has {d} contracts", .{contract_count});
-        
+
         // チェーン内の全ブロックを検査してコントラクトを探す（デバッグ用）
         for (blockchain.chain_store.items) |block| {
             if (block.contracts) |contracts| {
-                std.log.info("Block {d} contains {d} contracts", .{block.index, contracts.count()});
+                std.log.info("Block {d} contains {d} contracts", .{ block.index, contracts.count() });
                 var block_contract_it = contracts.iterator();
                 while (block_contract_it.next()) |entry| {
-                    std.log.info("Block {d} has contract: address={s}, code_length={d}", .{ 
-                        block.index, entry.key_ptr.*, entry.value_ptr.*.len 
-                    });
+                    std.log.info("Block {d} has contract: address={s}, code_length={d}", .{ block.index, entry.key_ptr.*, entry.value_ptr.*.len });
                 }
             }
         }
@@ -297,6 +311,27 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
         // コントラクト呼び出しがペンディングの場合、実行する
         if (main.global_call_pending) {
             std.log.info("Executing pending contract call to {s}", .{main.global_contract_address});
+
+            // チェーン内の全ブロックを検査して特定のコントラクトを探す
+            std.log.info("Searching for contract at address {s} in all blocks...", .{main.global_contract_address});
+            var found_in_block = false;
+            for (blockchain.chain_store.items) |block| {
+                if (block.contracts) |contracts| {
+                    if (contracts.get(main.global_contract_address)) |code| {
+                        std.log.info("Contract found in block {d}, but might not be in storage. Code length: {d}", .{ block.index, code.len });
+                        found_in_block = true;
+
+                        // コントラクトコードが見つかったら、明示的にストレージに追加
+                        blockchain.contract_storage.put(main.global_contract_address, code) catch |err| {
+                            std.log.err("Failed to add contract to storage: {any}", .{err});
+                        };
+                    }
+                }
+            }
+
+            if (!found_in_block) {
+                std.log.warn("Contract not found in any blocks. Chain may not include the deployment block.", .{});
+            }
 
             // すでに同期されたチェーン上でコントラクトが存在するか確認
             if (blockchain.contract_storage.get(main.global_contract_address)) |contract_code| {

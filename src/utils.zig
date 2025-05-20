@@ -191,3 +191,45 @@ pub fn bytesToHexWithPrefix(allocator: std.mem.Allocator, bytes: []const u8) ![]
     const result = try std.mem.concat(allocator, u8, &[_][]const u8{ "0x", hex });
     return result;
 }
+
+/// 文字列のスライスを区切り文字で連結する
+///
+/// 引数:
+///     allocator: 結果の文字列を割り当てるメモリアロケータ
+///     slices: 連結する文字列のスライス
+///     separator: 文字列間の区切り文字
+///
+/// 戻り値:
+///     割り当てられた結合された文字列
+///
+/// エラー:
+///     アロケーションエラー
+pub fn joinStrings(allocator: std.mem.Allocator, slices: []const []const u8, separator: []const u8) ![]const u8 {
+    if (slices.len == 0) return "";
+
+    // 必要なサイズを計算
+    var total_size: usize = 0;
+    for (slices) |s| {
+        total_size += s.len;
+    }
+    total_size += separator.len * (slices.len - 1);
+
+    // 結果バッファを割り当て
+    var result = try allocator.alloc(u8, total_size);
+    errdefer allocator.free(result);
+
+    // バッファに文字列を連結
+    var pos: usize = 0;
+    for (slices, 0..slices.len) |slice, i| {
+        std.mem.copy(u8, result[pos..], slice);
+        pos += slice.len;
+
+        // セパレータを追加（最後の要素以外）
+        if (i < slices.len - 1) {
+            std.mem.copy(u8, result[pos..], separator);
+            pos += separator.len;
+        }
+    }
+
+    return result;
+}
