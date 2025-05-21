@@ -635,12 +635,11 @@ test "EVM transaction queuing and flushing" {
     }
     try std.testing.expectEqual(@as(usize, 0), pending_evm_txs.items.len);
 
-
     // Create a sample transaction
     const sample_evm_data_bytes = try allocator.dupe(u8, "test_evm_data"); // Raw bytes
     // defer allocator.free(sample_evm_data_bytes); // Will be owned by tx1
 
-    var tx1 = types.Transaction{
+    const tx1 = types.Transaction{
         .sender = try allocator.dupe(u8, "sender1_addr"),
         .receiver = try allocator.dupe(u8, "receiver1_addr"),
         .amount = 100,
@@ -686,7 +685,6 @@ test "EVM transaction queuing and flushing" {
     };
     try peer_list.append(mock_peer);
 
-
     // Manually call the flushing logic (as in listenLoop/connectToPeer)
     std.log.info("Test: Flushing {d} pending EVM transactions to new mock peer", .{pending_evm_txs.items.len});
     for (pending_evm_txs.items) |payload_to_flush| {
@@ -700,7 +698,6 @@ test "EVM transaction queuing and flushing" {
         allocator.free(pending_evm_txs.pop());
     }
     pending_evm_txs.clearRetainingCapacity(); // Match the main code's behavior
-
 
     // Assertions after flushing:
     // 1. Assert that pending_evm_txs is now empty
@@ -725,7 +722,7 @@ test "EVM transaction JSON format consistency (serialize/parse)" {
     const original_evm_data_bytes = try allocator.dupe(u8, "raw_evm_data_payload");
     // defer allocator.free(original_evm_data_bytes); // Owned by tx2
 
-    var tx2 = types.Transaction{
+    const tx2 = types.Transaction{
         .sender = try allocator.dupe(u8, "sender_addr_tx2"),
         .receiver = try allocator.dupe(u8, "receiver_addr_tx2"),
         .amount = 12345,
@@ -739,18 +736,16 @@ test "EVM transaction JSON format consistency (serialize/parse)" {
     defer allocator.free(tx2.receiver);
     if (tx2.evm_data) |d| allocator.free(d);
 
-
     // 2. Serialize tx2
     const payload = try parser.serializeTransaction(allocator, tx2);
     defer allocator.free(payload);
 
     // 3. Parse the payload
-    var parsed_tx = try parser.parseTransactionJson(payload);
+    const parsed_tx = try parser.parseTransactionJson(payload);
     // Defer freeing fields of parsed_tx
     defer allocator.free(parsed_tx.sender);
     defer allocator.free(parsed_tx.receiver);
     if (parsed_tx.evm_data) |d| allocator.free(d);
-
 
     // 4. Assertions
     // Using expectEqualStrings for direct comparison. Assumes null termination or exact length match.
