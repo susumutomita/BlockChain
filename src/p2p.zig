@@ -16,6 +16,10 @@ const main = @import("main.zig"); // Add this to access global variables
 /// ネットワーク内の他のノードへのアクティブな接続を維持します
 pub var peer_list = std.ArrayList(types.Peer).init(std.heap.page_allocator);
 
+/// 未送信のブロックを格納する待機キュー
+/// ピアが接続されていない場合に一時的にブロックを保存します
+pub var pending_blocks = std.ArrayList(types.Block).init(std.heap.page_allocator);
+
 /// リッスンソケットを開始し、着信接続を受け入れる
 ///
 /// 指定されたポートで着信接続を待機するTCPサーバーを作成します。
@@ -38,6 +42,17 @@ pub fn listenLoop(port: u16) !void {
         const peer = types.Peer{ .address = conn.address, .stream = conn.stream };
         try peer_list.append(peer);
         std.log.info("Accepted connection from: {any}", .{conn.address});
+
+        // 待機中のブロックを新しいピアに送信
+        if (pending_blocks.items.len > 0) {
+            std.log.info("Flushing {d} pending blocks to new peer {any}", .{ pending_blocks.items.len, conn.address });
+            for (pending_blocks.items) |blk| {
+                sendBlock(peer, blk) catch |err| {
+                    std.log.err("Failed to flush queued block index={d}: {any}", .{ blk.index, err });
+                };
+            }
+            pending_blocks.clearRetainingCapacity();
+        }
 
         // ピアとの通信を処理するスレッドを生成
         _ = try std.Thread.spawn(.{}, peerCommunicationLoop, .{peer});
@@ -67,6 +82,17 @@ pub fn connectToPeer(addr: std.net.Address) !void {
         const peer = types.Peer{ .address = addr, .stream = sock };
         try peer_list.append(peer);
 
+        // 待機中のブロックを新しいピアに送信
+        if (pending_blocks.items.len > 0) {
+            std.log.info("Flushing {d} pending blocks to new peer {any}", .{ pending_blocks.items.len, addr });
+            for (pending_blocks.items) |blk| {
+                sendBlock(peer, blk) catch |err| {
+                    std.log.err("Failed to flush queued block index={d}: {any}", .{ blk.index, err });
+                };
+            }
+            pending_blocks.clearRetainingCapacity();
+        }
+
         // 新しく接続されたピアからチェーン同期をリクエスト
         try requestChain(peer);
 
@@ -95,12 +121,15 @@ fn requestChain(peer: types.Peer) !void {
 ///
 /// ブロックをシリアル化し、接続されているすべてのピアに送信します。
 /// オプションで、送信元のピアを除外することができます。
+/// ピアが存在しない場合、ブロックは将来の送信のために待機キューに追加されます。
 ///
 /// 引数:
 ///     blk: ブロードキャストするブロック
 ///     from_peer: ブロードキャストから除外するオプションのソースピア
 pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
     const payload = parser.serializeBlock(blk) catch return;
+    var sent = false;
+    var available_peers: usize = 0;
 
     for (peer_list.items) |peer| {
         // 指定された場合、送信元のピアをスキップ
@@ -108,20 +137,70 @@ pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
             if (peer.address.getPort() == sender.address.getPort()) continue;
         }
 
+        available_peers += 1;
         var writer = peer.stream.writer();
-        _ = writer.writeAll("BLOCK:") catch |err| {
+        var send_success = true;
+
+        // 各部分を個別に送信し、エラーがあればcatchする
+        writer.writeAll("BLOCK:") catch |err| {
             std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
+            send_success = false;
             continue;
         };
-        _ = writer.writeAll(payload) catch |err| {
-            std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
-            continue;
-        };
-        _ = writer.writeAll("\n") catch |err| {
-            std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
-            continue;
-        };
+
+        if (send_success) {
+            writer.writeAll(payload) catch |err| {
+                std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
+                send_success = false;
+                continue;
+            };
+        }
+
+        if (send_success) {
+            writer.writeAll("\n") catch |err| {
+                std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
+                send_success = false;
+                continue;
+            };
+        }
+
+        if (send_success) sent = true;
     }
+
+    // 送信先のピアがないか、すべての送信が失敗した場合、キューに追加
+    if (available_peers == 0 or !sent) {
+        pending_blocks.append(blk) catch |err| {
+            std.log.err("Error adding block to pending queue: {any}", .{err});
+            return;
+        };
+        std.log.warn("No peers yet - queueing block index={d}", .{blk.index});
+    }
+
+    // 送信先のピアがないか、すべての送信が失敗した場合、キューに追加
+    if (available_peers == 0 or !sent) {
+        pending_blocks.append(blk) catch |err| {
+            std.log.err("Error adding block to pending queue: {any}", .{err});
+            return;
+        };
+        std.log.warn("No peers yet - queueing block index={d}", .{blk.index});
+    }
+}
+
+/// 単一のブロックを特定のピアに送信する
+///
+/// 引数:
+///     peer: ブロックを送信するピア
+///     blk: 送信するブロック
+///
+/// エラー:
+///     シリアル化またはネットワークエラー
+pub fn sendBlock(peer: types.Peer, blk: types.Block) !void {
+    const payload = try parser.serializeBlock(blk);
+    var writer = peer.stream.writer();
+    try writer.writeAll("BLOCK:");
+    try writer.writeAll(payload);
+    try writer.writeAll("\n");
+    std.log.info("Sent block index={d} to {any}", .{ blk.index, peer.address });
 }
 
 /// EVMトランザクションを他のノードに送信
