@@ -19,6 +19,7 @@ pub var peer_list = std.ArrayList(types.Peer).init(std.heap.page_allocator);
 /// 未送信のブロックを格納する待機キュー
 /// ピアが接続されていない場合に一時的にブロックを保存します
 pub var pending_blocks = std.ArrayList(types.Block).init(std.heap.page_allocator);
+pub var pending_evm_txs = std.ArrayList([]const u8).init(std.heap.page_allocator);
 
 /// リッスンソケットを開始し、着信接続を受け入れる
 ///
@@ -52,6 +53,18 @@ pub fn listenLoop(port: u16) !void {
                 };
             }
             pending_blocks.clearRetainingCapacity();
+        }
+
+        // 待機中のEVMトランザクションを新しいピアに送信
+        if (pending_evm_txs.items.len > 0) {
+            std.log.info("Flushing {d} pending EVM transactions to new peer {any}", .{ pending_evm_txs.items.len, conn.address });
+            for (pending_evm_txs.items) |payload| {
+                sendEvmTx(peer, payload) catch |err| {
+                    std.log.err("Failed to flush queued EVM transaction: {any}", .{err});
+                    // エラーが発生しても次のペイロードへ
+                };
+            }
+            pending_evm_txs.clearRetainingCapacity();
         }
 
         // ピアとの通信を処理するスレッドを生成
@@ -91,6 +104,18 @@ pub fn connectToPeer(addr: std.net.Address) !void {
                 };
             }
             pending_blocks.clearRetainingCapacity();
+        }
+
+        // 待機中のEVMトランザクションを新しいピアに送信
+        if (pending_evm_txs.items.len > 0) {
+            std.log.info("Flushing {d} pending EVM transactions to new peer {any}", .{ pending_evm_txs.items.len, addr });
+            for (pending_evm_txs.items) |payload| {
+                sendEvmTx(peer, payload) catch |err| {
+                    std.log.err("Failed to flush queued EVM transaction: {any}", .{err});
+                    // エラーが発生しても次のペイロードへ
+                };
+            }
+            pending_evm_txs.clearRetainingCapacity();
         }
 
         // 新しく接続されたピアからチェーン同期をリクエスト
@@ -203,68 +228,57 @@ pub fn sendBlock(peer: types.Peer, blk: types.Block) !void {
     std.log.info("Sent block index={d} to {any}", .{ blk.index, peer.address });
 }
 
+/// 指定されたピアにEVMトランザクションを送信する
+///
+/// 引数:
+///     peer: EVMトランザクションを送信するピア
+///     payload: 送信するEVMトランザクションのペイロード
+///
+/// エラー:
+///     ストリーム書き込みエラー
+fn sendEvmTx(peer: types.Peer, payload: []const u8) !void {
+    var writer = peer.stream.writer();
+    writer.writeAll("EVM_TX:") catch |err| {
+        std.log.err("Error sending EVM_TX to peer {any}: {any}", .{ peer.address, err });
+        return err;
+    };
+    writer.writeAll(payload) catch |err| {
+        std.log.err("Error sending EVM_TX payload to peer {any}: {any}", .{ peer.address, err });
+        return err;
+    };
+    writer.writeAll("\n") catch |err| {
+        std.log.err("Error sending newline after EVM_TX to peer {any}: {any}", .{ peer.address, err });
+        return err;
+    };
+}
+
 /// EVMトランザクションを他のノードに送信
 ///
 /// 引数:
-///     allocator: メモリアロケータ
 ///     tx: 送信するEVMトランザクション
 ///
 /// エラー:
 ///     送信に失敗した場合のエラー
-pub fn broadcastEvmTransaction(allocator: std.mem.Allocator, tx: types.Transaction) !void {
+pub fn broadcastEvmTransaction(tx: types.Transaction) !void {
+    const allocator = std.heap.page_allocator;
     std.log.info(">> broadcastEvmTransaction: tx_type={d}, evm_data.len={d}", .{ tx.tx_type, if (tx.evm_data) |data| data.len else 0 });
-    // トランザクションJSONを作成
-    var json_buffer = std.ArrayList(u8).init(allocator);
-    defer json_buffer.deinit();
 
-    // 完全なJSON構造を作成する - 確実に有効なJSONになるよう括弧で囲む
-    try json_buffer.appendSlice("{");
-    try json_buffer.appendSlice("\"type\": \"evm_tx\", \"data\": { ");
-    try json_buffer.appendSlice("\"sender\": \"");
-    try json_buffer.appendSlice(tx.sender);
-    try json_buffer.appendSlice("\", \"receiver\": \"");
-    try json_buffer.appendSlice(tx.receiver);
-    try json_buffer.appendSlice("\", \"amount\": ");
+    const payload = try parser.serializeTransaction(allocator, tx);
+    defer allocator.free(payload);
 
-    var amount_buf: [20]u8 = undefined;
-    const amount_str = try std.fmt.bufPrint(&amount_buf, "{d}", .{tx.amount});
-    try json_buffer.appendSlice(amount_str);
-
-    // EVMトランザクション固有のフィールドを追加
-    try json_buffer.appendSlice(", \"tx_type\": ");
-    var type_buf: [2]u8 = undefined;
-    const type_str = try std.fmt.bufPrint(&type_buf, "{d}", .{tx.tx_type});
-    try json_buffer.appendSlice(type_str);
-
-    // EVMデータを16進数で追加
-    try json_buffer.appendSlice(", \"evm_data\": \"0x");
-    if (tx.evm_data) |evm_data| {
-        const hex_data = try utils.bytesToHex(allocator, evm_data);
-        defer allocator.free(hex_data);
-        try json_buffer.appendSlice(hex_data);
-    }
-    try json_buffer.appendSlice("\"");
-
-    // ガス関連の情報を追加
-    try json_buffer.appendSlice(", \"gas_limit\": ");
-    var gas_buf: [20]u8 = undefined;
-    const gas_str = try std.fmt.bufPrint(&gas_buf, "{d}", .{tx.gas_limit});
-    try json_buffer.appendSlice(gas_str);
-
-    try json_buffer.appendSlice(", \"gas_price\": ");
-    var price_buf: [20]u8 = undefined;
-    const price_str = try std.fmt.bufPrint(&price_buf, "{d}", .{tx.gas_price});
-    try json_buffer.appendSlice(price_str);
-
-    try json_buffer.appendSlice(" } }");
-
-    // すべてのピアにメッセージを送信
+    var sent = false;
     for (peer_list.items) |peer| {
         std.log.info("ピアにEVMトランザクションを送信: {}", .{peer.address});
-        var w = peer.stream.writer();
-        try w.writeAll("EVM_TX:");
-        try w.writeAll(json_buffer.items); // 完全なJSON文字列として送信
-        try w.writeAll("\n"); // メッセージ境界に改行
+        sendEvmTx(peer, payload) catch |err| {
+            std.log.err("Error broadcasting EVM_TX to peer {any}: {any}", .{ peer.address, err });
+            continue; // エラーが発生しても次のピアへ
+        };
+        sent = true;
+    }
+
+    if (!sent) {
+        try pending_evm_txs.append(try allocator.dupe(u8, payload));
+        std.log.warn("No peers available or sending failed for all peers. EVM_TX queued.", .{});
     }
 }
 
@@ -595,4 +609,168 @@ fn peerCommunicationLoop(peer: types.Peer) !void {
     }
 
     std.log.info("Peer {any} disconnected.", .{peer.address});
+}
+
+// Helper struct for a mock stream writer that writes to an ArrayList(u8)
+const MockStreamWriter = struct {
+    buffer: *std.ArrayList(u8),
+
+    pub fn write(self: @This(), bytes: []const u8) !usize {
+        try self.buffer.appendSlice(bytes);
+        return bytes.len;
+    }
+
+    pub fn writeAll(self: @This(), bytes: []const u8) !void {
+        try self.buffer.appendSlice(bytes);
+    }
+};
+
+test "EVM transaction queuing and flushing" {
+    const allocator = std.testing.allocator;
+
+    // Ensure clean state before test by clearing and freeing any existing items
+    peer_list.clearRetainingCapacity(); // Does not free items
+    while (pending_evm_txs.items.len > 0) {
+        allocator.free(pending_evm_txs.pop());
+    }
+    try std.testing.expectEqual(@as(usize, 0), pending_evm_txs.items.len);
+
+
+    // Create a sample transaction
+    const sample_evm_data_bytes = try allocator.dupe(u8, "test_evm_data"); // Raw bytes
+    // defer allocator.free(sample_evm_data_bytes); // Will be owned by tx1
+
+    var tx1 = types.Transaction{
+        .sender = try allocator.dupe(u8, "sender1_addr"),
+        .receiver = try allocator.dupe(u8, "receiver1_addr"),
+        .amount = 100,
+        .tx_type = 1, // EVM Call
+        .evm_data = sample_evm_data_bytes,
+        .gas_limit = 21000,
+        .gas_price = 10,
+    };
+    defer allocator.free(tx1.sender);
+    defer allocator.free(tx1.receiver);
+    if (tx1.evm_data) |d| allocator.free(d); // Free original evm_data
+
+    // 1. Call broadcastEvmTransaction with no peers
+    try broadcastEvmTransaction(tx1);
+
+    // 2. Assert that peer_list is still empty
+    try std.testing.expectEqual(@as(usize, 0), peer_list.items.len);
+
+    // 3. Assert that pending_evm_txs now contains one item
+    try std.testing.expectEqual(@as(usize, 1), pending_evm_txs.items.len);
+
+    // 4. Verify the content of the item in pending_evm_txs
+    const expected_payload_tx1 = try parser.serializeTransaction(allocator, tx1);
+    defer allocator.free(expected_payload_tx1);
+    try std.testing.expect(std.mem.eql(u8, expected_payload_tx1, pending_evm_txs.items[0]));
+
+    // 5. Simulate a peer connecting
+    var mock_stream_data_buffer = std.ArrayList(u8).init(allocator);
+    defer mock_stream_data_buffer.deinit();
+
+    // Create a mock writer
+    var mock_writer_instance = MockStreamWriter{ .buffer = &mock_stream_data_buffer };
+
+    // Create a mock stream source. Reader is not used by sendEvmTx.
+    const mock_stream_source = std.io.StreamSource{
+        .reader = undefined, // Not used by sendEvmTx
+        .writer = .{ .context = &mock_writer_instance, .writeFn = MockStreamWriter.write },
+    };
+
+    const mock_peer = types.Peer{
+        .address = try std.net.Address.parseIp("127.0.0.1", 8080), // Dummy address
+        .stream = mock_stream_source,
+    };
+    try peer_list.append(mock_peer);
+
+
+    // Manually call the flushing logic (as in listenLoop/connectToPeer)
+    std.log.info("Test: Flushing {d} pending EVM transactions to new mock peer", .{pending_evm_txs.items.len});
+    for (pending_evm_txs.items) |payload_to_flush| {
+        try sendEvmTx(mock_peer, payload_to_flush);
+    }
+
+    // The actual code uses pending_evm_txs.clearRetainingCapacity() which doesn't free items.
+    // Items are freed because they are allocator.dupe'd into the queue.
+    // So, here we must free them manually as they are popped.
+    while (pending_evm_txs.items.len > 0) {
+        allocator.free(pending_evm_txs.pop());
+    }
+    pending_evm_txs.clearRetainingCapacity(); // Match the main code's behavior
+
+
+    // Assertions after flushing:
+    // 1. Assert that pending_evm_txs is now empty
+    try std.testing.expectEqual(@as(usize, 0), pending_evm_txs.items.len);
+
+    // 2. Assert that the mock stream associated with mock_peer received the data for tx1
+    var expected_sent_data_to_peer = std.ArrayList(u8).init(allocator);
+    defer expected_sent_data_to_peer.deinit();
+    try expected_sent_data_to_peer.writer().print("EVM_TX:{s}\n", .{expected_payload_tx1});
+
+    try std.testing.expect(std.mem.eql(u8, expected_sent_data_to_peer.items, mock_stream_data_buffer.items));
+
+    // Clean up peer_list
+    _ = peer_list.pop(); // Remove mock_peer
+}
+
+test "EVM transaction JSON format consistency (serialize/parse)" {
+    const allocator = std.testing.allocator;
+
+    // 1. Create tx2
+    // Original evm_data should be raw bytes, not hex pre-encoded, as serializeTransaction will handle hex encoding.
+    const original_evm_data_bytes = try allocator.dupe(u8, "raw_evm_data_payload");
+    // defer allocator.free(original_evm_data_bytes); // Owned by tx2
+
+    var tx2 = types.Transaction{
+        .sender = try allocator.dupe(u8, "sender_addr_tx2"),
+        .receiver = try allocator.dupe(u8, "receiver_addr_tx2"),
+        .amount = 12345,
+        .tx_type = 2, // EVM Deploy
+        .evm_data = original_evm_data_bytes, // tx2 owns this now
+        .gas_limit = 1000000,
+        .gas_price = 20,
+    };
+    // Defer freeing fields of tx2
+    defer allocator.free(tx2.sender);
+    defer allocator.free(tx2.receiver);
+    if (tx2.evm_data) |d| allocator.free(d);
+
+
+    // 2. Serialize tx2
+    const payload = try parser.serializeTransaction(allocator, tx2);
+    defer allocator.free(payload);
+
+    // 3. Parse the payload
+    var parsed_tx = try parser.parseTransactionJson(payload);
+    // Defer freeing fields of parsed_tx
+    defer allocator.free(parsed_tx.sender);
+    defer allocator.free(parsed_tx.receiver);
+    if (parsed_tx.evm_data) |d| allocator.free(d);
+
+
+    // 4. Assertions
+    // Using expectEqualStrings for direct comparison. Assumes null termination or exact length match.
+    try std.testing.expectEqualStrings(tx2.sender, parsed_tx.sender);
+    try std.testing.expectEqualStrings(tx2.receiver, parsed_tx.receiver);
+    try std.testing.expectEqual(tx2.amount, parsed_tx.amount);
+    try std.testing.expectEqual(tx2.tx_type, parsed_tx.tx_type);
+    try std.testing.expectEqual(tx2.gas_limit, parsed_tx.gas_limit);
+    try std.testing.expectEqual(tx2.gas_price, parsed_tx.gas_price);
+
+    // Compare evm_data: original raw bytes should match parsed (and decoded) raw bytes
+    if (tx2.evm_data) |original_data| {
+        try std.testing.expect(parsed_tx.evm_data != null);
+        if (parsed_tx.evm_data) |parsed_data| {
+            // parser.serializeTransaction hex-encodes evm_data.
+            // parser.parseTransactionJson hex-decodes evm_data.
+            // So, the original raw bytes in tx2.evm_data should match the raw bytes in parsed_tx.evm_data.
+            try std.testing.expect(std.mem.eql(u8, original_data, parsed_data));
+        }
+    } else {
+        try std.testing.expect(parsed_tx.evm_data == null);
+    }
 }
