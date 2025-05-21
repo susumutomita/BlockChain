@@ -1,10 +1,3 @@
-//! ブロックチェーンデータシリアル化・解析モジュール
-//!
-//! このモジュールはブロックチェーンデータ構造をJSONにシリアル化し、
-//! JSONデータをブロックチェーン構造に解析する機能を提供します。
-//! ハッシュなどのバイナリデータを16進文字列にエンコード・デコードし、
-//! 不正な入力データに対する包括的なエラー処理を提供します。
-
 const std = @import("std");
 const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
@@ -545,7 +538,19 @@ fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator
     return b;
 }
 
-/// JSON文字列からトランザクション構造体を解析する
+/// トランザクションをJSON文字列にシリアル化する
+///
+/// トランザクション構造体をネットワーク送信用のJSON文字列に変換します。
+/// EVMトランザクション固有のフィールドも含まれます。
+///
+/// 引数:
+///     tx: シリアル化するトランザクション
+///
+/// 戻り値:
+///     []const u8: 割り当てられたJSON文字列（呼び出し元がメモリを解放する必要があります）
+// This implementation has been moved to the new function below (at the end of the file).
+
+/// JSON形式のトランザクション文字列を解析する
 ///
 /// JSON形式のトランザクション文字列を解析して、トランザクション構造体に変換します。
 /// EVM関連のフィールドにも対応しています。
@@ -744,4 +749,44 @@ fn parseUsizeField(obj: std.json.ObjectMap, field_name: []const u8) !usize {
         },
         else => return error.InvalidFormat,
     }
+}
+
+/// トランザクション構造体をJSON文字列にシリアライズする
+///
+/// 与えられたトランザクション構造体からP2P通信に使用できるJSON文字列を生成します。
+/// EVMデータは16進数文字列にエンコードされます。
+///
+/// 引数:
+///     allocator: メモリアロケータ
+///     tx: シリアライズするトランザクション
+///
+/// 戻り値:
+///     []const u8: 割り当てられたJSON文字列（呼び出し元がメモリを所有）
+///
+/// エラー:
+///     割り当てまたはフォーマットエラー
+pub fn serializeTransaction(allocator: std.mem.Allocator, tx: types.Transaction) ![]const u8 {
+    // 基本的なトランザクション情報を含むJSONを作成
+    var json_obj = std.ArrayList(u8).init(allocator);
+    errdefer json_obj.deinit();
+
+    try json_obj.appendSlice("{");
+    
+    // 基本フィールドの追加
+    try json_obj.writer().print("\"sender\":\"{s}\",", .{tx.sender});
+    try json_obj.writer().print("\"receiver\":\"{s}\",", .{tx.receiver});
+    try json_obj.writer().print("\"amount\":{d},", .{tx.amount});
+    try json_obj.writer().print("\"tx_type\":{d},", .{tx.tx_type});
+    try json_obj.writer().print("\"gas_limit\":{d},", .{tx.gas_limit});
+    try json_obj.writer().print("\"gas_price\":{d}", .{tx.gas_price});
+
+    // EVMデータがある場合は16進数にエンコードして追加
+    if (tx.evm_data) |evm_data| {
+        const evm_data_hex = try utils.bytesToHex(allocator, evm_data);
+        defer allocator.free(evm_data_hex);
+        try json_obj.writer().print(",\"evm_data\":\"{s}\"", .{evm_data_hex});
+    }
+
+    try json_obj.appendSlice("}");
+    return json_obj.toOwnedSlice();
 }

@@ -305,7 +305,7 @@ fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contra
     };
 
     // P2Pネットワーク上でトランザクションをブロードキャスト
-    try p2p.broadcastEvmTransaction(allocator, tx);
+    try p2p.broadcastEvmTransaction(tx);
     std.log.info("デプロイトランザクションをブロードキャストしました", .{});
 
     // ローカルでもトランザクションを処理して即時デプロイする
@@ -358,7 +358,7 @@ fn callContract(allocator: std.mem.Allocator, contract_address: []const u8, inpu
     };
 
     // P2Pネットワーク上でトランザクションをブロードキャスト
-    try p2p.broadcastEvmTransaction(allocator, tx);
+    try p2p.broadcastEvmTransaction(tx);
 
     std.log.info("呼び出しトランザクションをブロードキャストしました", .{});
 
