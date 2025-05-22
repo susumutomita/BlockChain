@@ -771,7 +771,7 @@ pub fn serializeTransaction(allocator: std.mem.Allocator, tx: types.Transaction)
     errdefer json_obj.deinit();
 
     try json_obj.appendSlice("{");
-    
+
     // 基本フィールドの追加
     try json_obj.writer().print("\"sender\":\"{s}\",", .{tx.sender});
     try json_obj.writer().print("\"receiver\":\"{s}\",", .{tx.receiver});
