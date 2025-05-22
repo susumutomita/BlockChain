@@ -261,18 +261,25 @@ fn sendEvmTx(peer: types.Peer, payload: []const u8) !void {
 ///     送信に失敗した場合のエラー
 pub fn broadcastEvmTransaction(tx: types.Transaction) !void {
     const allocator = std.heap.page_allocator;
-    std.log.info(">> broadcastEvmTransaction: tx_type={d}, evm_data.len={d}", .{ tx.tx_type, if (tx.evm_data) |data| data.len else 0 });
+    std.log.info(">> broadcastEvmTransaction[行:{d}]: tx_type={d}, evm_data.len={d}", .{ @src().line, tx.tx_type, if (tx.evm_data) |data| data.len else 0 });
 
+    std.log.info("シリアライズ開始: serializeTransaction (行:{d})", .{@src().line + 1});
     const payload = try parser.serializeTransaction(allocator, tx);
     defer allocator.free(payload);
+    std.log.info("シリアライズ完了: JSON長さ={d}バイト", .{payload.len});
+    std.log.debug("生成されたJSONペイロード: {s}", .{payload});
 
     var sent = false;
-    for (peer_list.items) |peer| {
-        std.log.info("ピアにEVMトランザクションを送信: {}", .{peer.address});
+    const peer_count = peer_list.items.len;
+    std.log.info("接続済みピア数: {d}", .{peer_count});
+
+    for (peer_list.items, 0..) |peer, idx| {
+        std.log.info("ピア {d}/{d} にEVMトランザクションを送信 [行:{d}]: {}", .{ idx + 1, peer_count, @src().line, peer.address });
         sendEvmTx(peer, payload) catch |err| {
-            std.log.err("Error broadcasting EVM_TX to peer {any}: {any}", .{ peer.address, err });
+            std.log.err("Error broadcasting EVM_TX to peer {any}: {any} (at 行:{d})", .{ peer.address, err, @src().line });
             continue; // エラーが発生しても次のピアへ
         };
+        std.log.info("ピア {d}/{d} への送信成功", .{ idx + 1, peer_count });
         sent = true;
     }
 
@@ -461,23 +468,30 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
             }
         }
     } else if (std.mem.startsWith(u8, msg, "EVM_TX:")) {
-        std.log.info("<< handleMessage: got EVM_TX message", .{});
-        std.log.debug("<< raw payload: {s}", .{msg[8..]});
+        std.log.info("<< handleMessage[行:{d}]: got EVM_TX message", .{@src().line});
+        const payload = msg["EVM_TX:".len..];
+        std.log.debug("<< raw payload[{d}バイト]: {s}", .{ payload.len, payload });
+
         // EVMトランザクションメッセージを処理
+        std.log.info("解析開始: parseTransactionJson (行:{d})", .{@src().line + 1});
         var evm_tx = parser.parseTransactionJson(msg[8..]) catch |err| {
-            std.log.err("Error parsing EVM transaction from {any}: {any}", .{ from_peer.address, err });
+            std.log.err("Error parsing EVM transaction from {any}: {any} (at 行:{d})", .{ from_peer.address, err, @src().line });
             return;
         };
+        std.log.info("解析完了: トランザクションタイプ={d}, 送信者={s}, 受信者={s}", .{ evm_tx.tx_type, evm_tx.sender, evm_tx.receiver });
 
         // EVMトランザクションを処理
+        std.log.info("処理開始: processEvmTransaction (行:{d})", .{@src().line + 1});
         const result = blockchain.processEvmTransaction(&evm_tx) catch |err| {
-            std.log.err("Error processing EVM transaction from {any}: {any}", .{ from_peer.address, err });
+            std.log.err("Error processing EVM transaction from {any}: {any} (at 行:{d})", .{ from_peer.address, err, @src().line });
             return;
         };
+        std.log.info("処理完了: EVMトランザクション処理結果", .{});
 
         // 処理結果をログに出力
+        std.log.info("ログ出力開始: logEvmResult (行:{d})", .{@src().line + 1});
         blockchain.logEvmResult(&evm_tx, result) catch |err| {
-            std.log.err("Error logging EVM result: {any}", .{err});
+            std.log.err("Error logging EVM result: {any} (at 行:{d})", .{ err, @src().line });
         };
 
         // 受信したトランザクションは再ブロードキャストしない
