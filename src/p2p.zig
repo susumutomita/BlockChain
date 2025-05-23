@@ -474,7 +474,7 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
 
         // EVMトランザクションメッセージを処理
         std.log.info("解析開始: parseTransactionJson (行:{d})", .{@src().line + 1});
-        var evm_tx = parser.parseTransactionJson(msg[8..]) catch |err| {
+        var evm_tx = parser.parseTransactionJson(payload) catch |err| {
             std.log.err("Error parsing EVM transaction from {any}: {any} (at 行:{d})", .{ from_peer.address, err, @src().line });
             return;
         };
