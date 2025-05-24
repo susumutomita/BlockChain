@@ -355,7 +355,9 @@ pub fn syncChain(blocks: []types.Block) !void {
                     try addresses.append(address);
                 }
 
-                std.log.info("Block {d} contains contracts at addresses: {s}", .{ block.index, try utils.joinStrings(std.heap.page_allocator, addresses.items, ", ") });
+                const addresses_str = utils.joinStrings(std.heap.page_allocator, addresses.items, ", ") catch "";
+                defer std.heap.page_allocator.free(addresses_str);
+                std.log.info("Block {d} contains contracts at addresses: {s}", .{ block.index, addresses_str });
 
                 // 改めてイテレータを初期化して処理
                 it = contracts.iterator();
