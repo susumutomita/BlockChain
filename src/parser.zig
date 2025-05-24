@@ -503,24 +503,43 @@ fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator
 
                 // 新しいコントラクトストレージを作成
                 var contracts = std.StringHashMap([]const u8).init(block_allocator);
+                errdefer contracts.deinit();
 
                 // 各コントラクトを処理
                 var it = contracts_obj.iterator();
                 while (it.next()) |entry| {
-                    const address = entry.key_ptr.*;
-                    std.log.info("Found contract address in block: {s}", .{address});
+                    const original_address = entry.key_ptr.*;
+                    std.log.info("Found contract address in block: {s}", .{original_address});
 
                     const code_hex = switch (entry.value_ptr.*) {
                         .string => |s| s,
                         else => {
-                            std.log.err("Contract code for address {s} is not a string", .{address});
+                            std.log.err("Contract code for address {s} is not a string", .{original_address});
                             continue;
                         },
                     };
 
+                    // アドレス文字列のコピーを作成して所有権を管理
+                    const address = block_allocator.dupe(u8, original_address) catch |err| {
+                        std.log.err("Failed to duplicate address string: {any}", .{err});
+                        continue;
+                    };
+
                     // 16進数文字列をバイトに変換
-                    const code = try utils.hexToBytes(block_allocator, code_hex);
-                    try contracts.put(address, code);
+                    const code = utils.hexToBytes(block_allocator, code_hex) catch |err| {
+                        std.log.err("Failed to parse contract bytecode for address {s}: {any}", .{ address, err });
+                        block_allocator.free(address);
+                        continue;
+                    };
+
+                    // ハッシュマップに追加
+                    contracts.put(address, code) catch |err| {
+                        std.log.err("Failed to store contract for address {s}: {any}", .{ address, err });
+                        block_allocator.free(address);
+                        block_allocator.free(code);
+                        continue;
+                    };
+
                     std.log.info("Parsed contract at address: {s}, code length: {d} bytes", .{ address, code.len });
                 }
 

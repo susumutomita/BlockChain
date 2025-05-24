@@ -221,12 +221,12 @@ pub fn joinStrings(allocator: std.mem.Allocator, slices: []const []const u8, sep
     // バッファに文字列を連結
     var pos: usize = 0;
     for (slices, 0..slices.len) |slice, i| {
-        std.mem.copy(u8, result[pos..], slice);
+        @memcpy(result[pos .. pos + slice.len], slice);
         pos += slice.len;
 
         // セパレータを追加（最後の要素以外）
         if (i < slices.len - 1) {
-            std.mem.copy(u8, result[pos..], separator);
+            @memcpy(result[pos .. pos + separator.len], separator);
             pos += separator.len;
         }
     }
