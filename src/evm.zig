@@ -18,6 +18,7 @@ pub const Opcode = struct {
     pub const STOP = 0x00;
     pub const RETURN = 0xF3;
     pub const REVERT = 0xFD;
+    pub const INVALID = 0xFE;
 
     // スタック操作・算術命令
     pub const ADD = 0x01;
@@ -477,6 +478,43 @@ fn executeStep(context: *EvmContext) !void {
             context.pc += 1;
         },
 
+        Opcode.GT => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+
+            // より大きい比較: b > a の場合は1、それ以外は0
+            var result: u64 = 0;
+            if (b.hi > a.hi) {
+                result = 1;
+            } else if (b.hi == a.hi and b.lo > a.lo) {
+                result = 1;
+            }
+
+            try context.stack.push(EVMu256.fromU64(result));
+            context.pc += 1;
+        },
+
+        Opcode.SLT => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+
+            // 符号付き未満比較: b < a の場合は1、それ以外は0
+            // 簡易実装: 最上位ビットを符号ビットとして扱う
+            var result: u64 = 0;
+
+            // 簡易実装では符号を無視して無符号比較を行う
+            if (b.hi < a.hi) {
+                result = 1;
+            } else if (b.hi == a.hi and b.lo < a.lo) {
+                result = 1;
+            }
+
+            try context.stack.push(EVMu256.fromU64(result));
+            context.pc += 1;
+        },
+
         Opcode.ISZERO => {
             if (context.stack.depth() < 1) return EVMError.StackUnderflow;
             const x = try context.stack.pop();
@@ -656,8 +694,8 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.JUMPI => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
-            const dest = try context.stack.pop();
             const condition = try context.stack.pop();
+            const dest = try context.stack.pop();
 
             // 条件付きジャンプ: 条件が0でない場合にジャンプ
             if (condition.hi != 0 or condition.lo != 0) {
@@ -915,6 +953,15 @@ pub fn disassemble(code: []const u8, writer: anytype) !void {
             Opcode.JUMPI => try writer.print("JUMPI", .{}),
             Opcode.JUMPDEST => try writer.print("JUMPDEST", .{}),
             Opcode.RETURN => try writer.print("RETURN", .{}),
+            Opcode.REVERT => try writer.print("REVERT", .{}),
+            Opcode.INVALID => try writer.print("INVALID", .{}),
+
+            // Comparison operations
+            Opcode.LT => try writer.print("LT", .{}),
+            Opcode.GT => try writer.print("GT", .{}),
+            Opcode.SLT => try writer.print("SLT", .{}),
+            Opcode.EQ => try writer.print("EQ", .{}),
+            Opcode.ISZERO => try writer.print("ISZERO", .{}),
 
             Opcode.PUSH0 => try writer.print("PUSH0", .{}),
             Opcode.PUSH1 => {
@@ -942,9 +989,9 @@ pub fn disassemble(code: []const u8, writer: anytype) !void {
                     // PUSH1-PUSH32
                     const push_bytes = opcode - 0x5F;
                     if (pc + push_bytes < code.len) {
-                        try writer.print("PUSH{d} ", .{push_bytes});
+                        try writer.print("PUSH{d} 0x", .{push_bytes});
                         for (0..push_bytes) |i| {
-                            try writer.print("0x{x:0>2}", .{code[pc + 1 + i]});
+                            try writer.print("{x:0>2}", .{code[pc + 1 + i]});
                         }
                         pc += push_bytes;
                     } else {

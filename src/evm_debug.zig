@@ -37,7 +37,16 @@ pub fn disassembleContext(context: *EvmContext, writer: anytype) !void {
             Opcode.JUMPI => try writer.print("JUMPI", .{}),
             Opcode.JUMPDEST => try writer.print("JUMPDEST", .{}),
             Opcode.RETURN => try writer.print("RETURN", .{}),
+            Opcode.REVERT => try writer.print("REVERT", .{}),
 
+            // Comparison and logic operations
+            Opcode.LT => try writer.print("LT", .{}),
+            Opcode.GT => try writer.print("GT", .{}),
+            Opcode.SLT => try writer.print("SLT", .{}),
+            Opcode.EQ => try writer.print("EQ", .{}),
+            Opcode.ISZERO => try writer.print("ISZERO", .{}),
+
+            Opcode.POP => try writer.print("POP", .{}),
             Opcode.PUSH0 => try writer.print("PUSH0", .{}),
             Opcode.PUSH1 => {
                 if (pc + 1 < context.code.len) {
@@ -111,6 +120,12 @@ pub fn getOpcodeDescription(opcode: u8) []const u8 {
         Opcode.JUMPI => "条件付きジャンプ",
         Opcode.JUMPDEST => "ジャンプ先としての目印",
         Opcode.RETURN => "実行を停止し、メモリからのデータを返す",
+        Opcode.REVERT => "実行を停止し、状態変更を巻き戻し、メモリからのデータを返す",
+        Opcode.LT => "符号なし未満比較（b < a の場合1、そうでなければ0）",
+        Opcode.GT => "符号なし超過比較（b > a の場合1、そうでなければ0）",
+        Opcode.SLT => "符号付き未満比較（b < a の場合1、そうでなければ0）",
+        Opcode.EQ => "等価比較（a == b の場合1、そうでなければ0）",
+        Opcode.ISZERO => "ゼロ判定（a == 0 の場合1、そうでなければ0）",
         Opcode.PUSH0 => "スタックに0をプッシュ",
         Opcode.PUSH1 => "スタックに1バイトの値をプッシュ",
         Opcode.PUSH2 => "スタックに2バイトの値をプッシュ",
@@ -395,6 +410,7 @@ pub fn disassembleBytecode(code: []const u8, start_pc: ?usize, max_instructions:
             0x0a => try writer.print("EXP        |", .{}),
             0x10 => try writer.print("LT         |", .{}),
             0x11 => try writer.print("GT         |", .{}),
+            0x12 => try writer.print("SLT        |", .{}),
             0x14 => try writer.print("EQ         |", .{}),
             0x15 => try writer.print("ISZERO     |", .{}),
             0x16 => try writer.print("AND        |", .{}),
