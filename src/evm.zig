@@ -325,6 +325,26 @@ fn executeStep(context: *EvmContext) !void {
             context.pc += 1;
         },
 
+        Opcode.MOD => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+            // 0除算の場合は0を返す
+            if (b.hi == 0 and b.lo == 0) {
+                try context.stack.push(EVMu256.zero());
+            } else {
+                // 簡易版ではu64の範囲のみサポート
+                if (a.hi == 0 and b.hi == 0) {
+                    const result = EVMu256.fromU64(@intCast(a.lo % b.lo));
+                    try context.stack.push(result);
+                } else {
+                    // 本来はより複雑な処理が必要
+                    try context.stack.push(EVMu256.zero());
+                }
+            }
+            context.pc += 1;
+        },
+
         // PUSH1: 1バイトをスタックにプッシュ
         Opcode.PUSH1 => {
             if (context.pc + 1 >= context.code.len) return EVMError.InvalidOpcode;
