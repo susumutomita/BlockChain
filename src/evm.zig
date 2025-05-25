@@ -694,9 +694,8 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.JUMPI => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
-            const condition = try context.stack.pop();
             const dest = try context.stack.pop();
-
+            const condition = try context.stack.pop();
             // 条件付きジャンプ: 条件が0でない場合にジャンプ
             if (condition.hi != 0 or condition.lo != 0) {
                 // ジャンプ先は現在u64範囲のみサポート
