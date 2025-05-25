@@ -208,13 +208,20 @@ pub fn addBlock(new_block: types.Block) void {
             contract_count += 1;
 
             // 既存のコントラクトを上書きしないように注意
-            if (!contract_storage.contains(address)) {
-                contract_storage.put(address, code) catch |err| {
-                    std.log.err("Failed to store contract at address: {s}, error: {any}", .{ address, err });
-                    continue;
-                };
-                std.log.info("Loaded contract at address: {s} from synchronized block, code length: {d} bytes", .{ address, code.len });
-            }
+            // if (!contract_storage.contains(address)) {
+            //     contract_storage.put(address, code) catch |err| {
+            //         std.log.err("Failed to store contract at address: {s}, error: {any}", .{ address, err });
+            //         continue;
+            //     };
+            //     std.log.info("Loaded contract at address: {s} from synchronized block, code length: {d} bytes", .{ address, code.len });
+            // }
+
+            // 既存コードの有無にかかわらず **必ず** 上書きする
+            contract_storage.put(address, code) catch |err| {
+                std.log.err("Failed to store contract at address: {s}, error: {any}", .{ address, err });
+                continue;
+            };
+            std.log.info("Updated contract {s} (stored {d} bytes)", .{ address, code.len });
         }
         std.log.info("Processed {d} contracts from received block", .{contract_count});
     }
