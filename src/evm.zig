@@ -255,6 +255,11 @@ fn executeStep(context: *EvmContext) !void {
     // 現在のオペコードを取得
     const opcode = context.code[context.pc];
 
+    // 詳細デバッグ: 特定のPC位置での実行状況をログ
+    if (context.pc >= 20 and context.pc <= 50) {
+        std.log.info("DEBUG: PC={d}, opcode=0x{x:0>2}, stack_depth={d}", .{ context.pc, opcode, context.stack.depth() });
+    }
+
     // ガス消費（シンプル版 - 本来は命令ごとに異なる）
     if (context.gas < 1) {
         context.error_msg = "Out of gas";
@@ -273,12 +278,6 @@ fn executeStep(context: *EvmContext) !void {
             const a = try context.stack.pop();
             const b = try context.stack.pop();
             try context.stack.push(a.add(b));
-            context.pc += 1;
-        },
-
-        Opcode.PUSH0 => {
-            // PUSH0: スタックに即値0をプッシュ
-            try context.stack.push(EVMu256.zero());
             context.pc += 1;
         },
 
@@ -760,6 +759,7 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.JUMPI => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            // EVM仕様に従い、最初にジャンプ先、次に条件を取り出す
             const dest = try context.stack.pop();
             const condition = try context.stack.pop();
 
@@ -953,34 +953,45 @@ fn executeStep(context: *EvmContext) !void {
         },
 
         else => {
-            // PUSH2-PUSH32 (0x61-0x7F)の実装
-            if (opcode >= 0x61 and opcode <= 0x7F) {
-                const push_bytes = opcode - 0x5F; // PUSHnのnを計算 - 正しくバイト数に変換
+            // PUSH0-PUSH32 (0x5F-0x7F)の実装
+            if (opcode >= 0x5F and opcode <= 0x7F) {
+                const push_bytes = opcode - 0x5F; // PUSH0は0バイト、PUSH1は1バイト...
 
-                // コード範囲チェック
-                if (context.pc + push_bytes >= context.code.len) {
-                    context.error_msg = "コード範囲外のPUSH操作";
-                    return EVMError.InvalidOpcode;
-                }
-
-                // push_bytes バイトを読み取り、256ビット値に変換
-                var value = EVMu256.zero();
-                for (0..push_bytes) |i| {
-                    const byte = context.code[context.pc + 1 + i];
-                    if (i < 8) {
-                        // 最初の8バイトはloに格納（ビッグエンディアン順を正しく処理）
-                        value.lo |= @as(u128, byte) << @as(u7, @intCast(8 * (push_bytes - 1 - i)));
-                    } else if (i < 16) {
-                        // 次の8バイトはhiに格納（ビッグエンディアン順を正しく処理）
-                        value.hi |= @as(u128, byte) << @as(u7, @intCast(8 * (push_bytes - 1 - i + 8)));
-                    } else if (i == 16) {
-                        std.log.warn("PUSH命令: 128ビットを超える即値は切り捨てられます (命令: PUSH{d})", .{push_bytes});
+                if (push_bytes == 0) {
+                    // PUSH0: スタックに0をプッシュ
+                    try context.stack.push(EVMu256.zero());
+                    context.pc += 1;
+                } else {
+                    // PUSH1-PUSH32: 指定バイト数を読み取り
+                    // コード範囲チェック
+                    if (context.pc + push_bytes >= context.code.len) {
+                        context.error_msg = "コード範囲外のPUSH操作";
+                        return EVMError.InvalidOpcode;
                     }
-                    // 32バイト以上は無視（EVMu256は128ビットまでしかサポートしていない）
-                }
 
-                try context.stack.push(value);
-                context.pc += push_bytes + 1; // オペコード + push_bytesバイトをスキップ
+                    // push_bytes バイトを読み取り、256ビット値に変換（ビッグエンディアン）
+                    var value = EVMu256.zero();
+                    for (0..push_bytes) |i| {
+                        const byte = context.code[context.pc + 1 + i];
+                        if (push_bytes <= 16) {
+                            // 16バイト以下の場合はloに格納
+                            const shift_amount = @as(u7, @intCast(8 * (push_bytes - 1 - i)));
+                            value.lo |= @as(u128, byte) << shift_amount;
+                        } else {
+                            // 16バイト超の場合、最初の16バイトはhiに、残りはloに
+                            if (i < (push_bytes - 16)) {
+                                const shift_amount = @as(u7, @intCast(8 * (push_bytes - 17 - i)));
+                                value.hi |= @as(u128, byte) << shift_amount;
+                            } else {
+                                const shift_amount = @as(u7, @intCast(8 * (push_bytes - 1 - i)));
+                                value.lo |= @as(u128, byte) << shift_amount;
+                            }
+                        }
+                    }
+
+                    try context.stack.push(value);
+                    context.pc += push_bytes + 1; // オペコード + push_bytesバイトをスキップ
+                }
             } else {
                 // 詳細なエラーログ出力
                 const opcodeHex = std.fmt.allocPrint(std.heap.page_allocator, "0x{x:0>2}", .{opcode}) catch "Unknown";
@@ -1834,13 +1845,13 @@ test "EVM JUMPI with PUSH2 destination" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // バイトコード: PUSH1 0x01, PUSH2 0x000f, JUMPI, PUSH1 0xff, JUMPDEST, PUSH1 0x42
+    // バイトコード: PUSH1 0x01, PUSH2 0x0008, JUMPI, PUSH1 0xff, JUMPDEST, PUSH1 0x42
     const bytecode = [_]u8{
         0x60, 0x01, // PUSH1 0x01 (条件)
-        0x61, 0x00, 0x0f, // PUSH2 0x000f (ジャンプ先)
+        0x61, 0x00, 0x08, // PUSH2 0x0008 (ジャンプ先 - JUMPDEST位置)
         0x57, // JUMPI (条件付きジャンプ)
         0x60, 0xff, // PUSH1 0xff (スキップされるはず)
-        0x5b, // JUMPDEST (ジャンプ先)
+        0x5b, // JUMPDEST (ジャンプ先) <- position 8
         0x60, 0x42, // PUSH1 0x42 (最終結果)
         0x60, 0x00, // PUSH1 0x00
         0x52, // MSTORE
