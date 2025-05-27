@@ -415,6 +415,8 @@ fn executeStep(context: *EvmContext) !void {
             var result = EVMu256.zero();
             const off = @as(usize, @intCast(offset.lo));
 
+            std.log.info("CALLDATALOAD: offset={d}, calldata.len={d}", .{ off, context.calldata.len });
+
             // calldataから32バイトをロード（範囲外は0埋め）
             for (0..32) |i| {
                 const byte_pos = off + i;
@@ -429,6 +431,21 @@ fn executeStep(context: *EvmContext) !void {
                     }
                 }
             }
+
+            // オフセット0の場合（関数セレクター読み込み）の詳細ログ
+            if (off == 0) {
+                std.log.info("CALLDATALOAD: Loading function selector from calldata", .{});
+                if (context.calldata.len >= 4) {
+                    const selector = (@as(u32, context.calldata[0]) << 24) |
+                                   (@as(u32, context.calldata[1]) << 16) |
+                                   (@as(u32, context.calldata[2]) << 8) |
+                                   @as(u32, context.calldata[3]);
+                    std.log.info("CALLDATALOAD: First 4 bytes (function selector): 0x{x:0>8}", .{selector});
+                }
+                std.log.info("CALLDATALOAD: Full calldata: {any}", .{context.calldata});
+            }
+
+            std.log.info("CALLDATALOAD: Result - hi: 0x{x:0>32}, lo: 0x{x:0>32}", .{ result.hi, result.lo });
 
             try context.stack.push(result);
             context.pc += 1;
@@ -472,10 +489,20 @@ fn executeStep(context: *EvmContext) !void {
             const a = try context.stack.pop();
             const b = try context.stack.pop();
 
+            // 関数セレクター比較の場合をログ出力
+            if ((a.hi == 0 and a.lo <= 0xFFFFFFFF) or (b.hi == 0 and b.lo <= 0xFFFFFFFF)) {
+                std.log.info("EQ: Comparing values (possibly function selector)", .{});
+                std.log.info("EQ: a = hi: 0x{x:0>32}, lo: 0x{x:0>32} (as u32: 0x{x:0>8})", .{ a.hi, a.lo, @as(u32, @intCast(a.lo & 0xFFFFFFFF)) });
+                std.log.info("EQ: b = hi: 0x{x:0>32}, lo: 0x{x:0>32} (as u32: 0x{x:0>8})", .{ b.hi, b.lo, @as(u32, @intCast(b.lo & 0xFFFFFFFF)) });
+            }
+
             // 等価比較: 両方の値が完全に一致する場合は1、それ以外は0
-            if (a.hi == b.hi and a.lo == b.lo) {
+            const is_equal = a.hi == b.hi and a.lo == b.lo;
+            if (is_equal) {
+                std.log.info("EQ: Values are EQUAL, pushing 1", .{});
                 try context.stack.push(EVMu256.fromU64(1));
             } else {
+                std.log.info("EQ: Values are NOT EQUAL, pushing 0", .{});
                 try context.stack.push(EVMu256.zero());
             }
             context.pc += 1;
@@ -598,6 +625,12 @@ fn executeStep(context: *EvmContext) !void {
             const shift = try context.stack.pop();
             const value = try context.stack.pop();
 
+            // 関数セレクター抽出の場合（224ビットシフト）をログ出力
+            if (shift.lo == 224) {
+                std.log.info("SHR: Function selector extraction detected (224-bit shift)", .{});
+                std.log.info("SHR: Input value - hi: 0x{x:0>32}, lo: 0x{x:0>32}", .{ value.hi, value.lo });
+            }
+
             // シフト量が256以上の場合は結果は0
             if (shift.hi > 0 or shift.lo >= 256) {
                 try context.stack.push(EVMu256.zero());
@@ -619,10 +652,23 @@ fn executeStep(context: *EvmContext) !void {
                     const adjusted_shift = @as(u7, @intCast(shift_amount - 64));
                     result.lo = value.hi >> adjusted_shift;
                     result.hi = 0;
+                } else if (shift_amount < 256) {
+                    // 128-255ビットのシフト: value.hiの一部をresult.loに移す
+                    const high_shift = @as(u7, @intCast(shift_amount - 128));
+                    result.lo = value.hi >> high_shift;
+                    result.hi = 0;
                 } else {
-                    // 128ビット以上のシフト
+                    // 256ビット以上のシフト（全ビット消える）
                     result.lo = 0;
                     result.hi = 0;
+                }
+
+                // 関数セレクター抽出の場合の結果をログ出力
+                if (shift.lo == 224) {
+                    std.log.info("SHR: Result after 224-bit shift - hi: 0x{x:0>32}, lo: 0x{x:0>32}", .{ result.hi, result.lo });
+                    if (result.lo <= 0xFFFFFFFF) {
+                        std.log.info("SHR: Extracted function selector: 0x{x:0>8}", .{ @as(u32, @intCast(result.lo)) });
+                    }
                 }
 
                 try context.stack.push(result);
@@ -716,8 +762,12 @@ fn executeStep(context: *EvmContext) !void {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const dest = try context.stack.pop();
             const condition = try context.stack.pop();
+
+            std.log.info("JUMPI: PC={d}, destination=0x{x}, condition=0x{x} (hi=0x{x}, lo=0x{x})", .{ context.pc, dest.lo, condition.lo, condition.hi, condition.lo });
+
             // 条件付きジャンプ: 条件が0でない場合にジャンプ
             if (condition.hi != 0 or condition.lo != 0) {
+                std.log.info("JUMPI: Condition is TRUE, jumping to 0x{x}", .{dest.lo});
                 // ジャンプ先は現在u64範囲のみサポート
                 if (dest.hi != 0) return EVMError.InvalidJump;
 
@@ -729,6 +779,7 @@ fn executeStep(context: *EvmContext) !void {
 
                 context.pc = jump_dest;
             } else {
+                std.log.info("JUMPI: Condition is FALSE, continuing to next instruction (PC={})", .{context.pc + 1});
                 // 条件が0の場合は次の命令へ
                 context.pc += 1;
             }
@@ -774,6 +825,34 @@ fn executeStep(context: *EvmContext) !void {
             const offset = try context.stack.pop();
             const length = try context.stack.pop();
 
+            // REVERT時の詳細情報をログ出力
+            std.log.err("REVERT executed at PC={d}", .{context.pc});
+            std.log.err("REVERT parameters - offset: {d}, length: {d}", .{ offset.lo, length.lo });
+
+            // スタックの内容を表示
+            std.log.err("Stack depth at REVERT: {d}", .{context.stack.depth()});
+            if (context.stack.depth() > 0) {
+                std.log.err("Stack contents (last 5 entries):", .{});
+                const start_idx = if (context.stack.depth() >= 5) context.stack.depth() - 5 else 0;
+                for (start_idx..context.stack.depth()) |i| {
+                    const value = context.stack.data[context.stack.sp - 1 - (context.stack.depth() - 1 - i)];
+                    std.log.err("  [{}]: hi=0x{x:0>32}, lo=0x{x:0>32}", .{ i, value.hi, value.lo });
+                }
+            }
+
+            // 周辺コードの逆アセンブル
+            const start_pc = if (context.pc >= 10) context.pc - 10 else 0;
+            const end_pc = if (context.pc + 10 < context.code.len) context.pc + 10 else context.code.len;
+            std.log.err("Code context around PC={d}:", .{context.pc});
+            for (start_pc..end_pc) |pc| {
+                const opcode_val = context.code[pc];
+                if (pc == context.pc) {
+                    std.log.err("  PC={d}: [0x{x:0>2}] <-- REVERT HERE", .{ pc, opcode_val });
+                } else {
+                    std.log.err("  PC={d}: 0x{x:0>2}", .{ pc, opcode_val });
+                }
+            }
+
             // 現在はu64範囲のみサポート
             if (offset.hi != 0 or length.hi != 0) return EVMError.MemoryOutOfBounds;
 
@@ -791,6 +870,11 @@ fn executeStep(context: *EvmContext) !void {
                         context.returndata.items[i] = 0;
                     }
                 }
+
+                // リバートデータも表示
+                std.log.err("REVERT data ({d} bytes): {any}", .{ len, context.returndata.items });
+            } else {
+                std.log.err("REVERT with no data", .{});
             }
 
             context.stopped = true;
