@@ -512,14 +512,23 @@ fn executeStep(context: *EvmContext) !void {
             const a = try context.stack.pop();
             const b = try context.stack.pop();
 
+            std.log.info("LT: Comparing b < a", .{});
+            std.log.info("LT: a = hi: 0x{x:0>32}, lo: 0x{x:0>32} (decimal: {d})", .{ a.hi, a.lo, a.lo });
+            std.log.info("LT: b = hi: 0x{x:0>32}, lo: 0x{x:0>32} (decimal: {d})", .{ b.hi, b.lo, b.lo });
+
             // 未満比較: b < a の場合は1、それ以外は0
             var result: u64 = 0;
             if (b.hi < a.hi) {
                 result = 1;
+                std.log.info("LT: b.hi < a.hi, result = 1", .{});
             } else if (b.hi == a.hi and b.lo < a.lo) {
                 result = 1;
+                std.log.info("LT: b.hi == a.hi and b.lo < a.lo, result = 1", .{});
+            } else {
+                std.log.info("LT: b >= a, result = 0", .{});
             }
 
+            std.log.info("LT: Final result = {d}", .{result});
             try context.stack.push(EVMu256.fromU64(result));
             context.pc += 1;
         },
@@ -883,12 +892,21 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.CALLDATASIZE => {
             // 呼び出しデータのサイズをスタックにプッシュ
-            try context.stack.push(EVMu256.fromU64(context.calldata.len));
+            std.log.info("CALLDATASIZE: calldata.len={d}, actual_bytes: {any}", .{ context.calldata.len, context.calldata });
+            const size_value = EVMu256.fromU64(context.calldata.len);
+            std.log.info("CALLDATASIZE: Pushing size value - hi: 0x{x:0>32}, lo: 0x{x:0>32}", .{ size_value.hi, size_value.lo });
+            try context.stack.push(size_value);
             context.pc += 1;
         },
 
         Opcode.CALLVALUE => {
             // 簡易実装: 常に0を返す
+            try context.stack.push(EVMu256.zero());
+            context.pc += 1;
+        },
+
+        Opcode.PUSH0 => {
+            // PUSH0: スタックに0をプッシュ (EIP-3855で追加)
             try context.stack.push(EVMu256.zero());
             context.pc += 1;
         },
@@ -953,8 +971,29 @@ fn executeStep(context: *EvmContext) !void {
         },
 
         else => {
+            // DUP1-DUP16 (0x80-0x8F)の実装
+            if (opcode >= 0x80 and opcode <= 0x8F) {
+                const dup_index = opcode - 0x7F; // DUP1=1, DUP2=2, ...
+                if (context.stack.depth() < dup_index) return EVMError.StackUnderflow;
+
+                // stack[sp - dup_index]をコピー
+                const value = context.stack.data[context.stack.sp - dup_index];
+                try context.stack.push(value);
+                context.pc += 1;
+            }
+            // SWAP1-SWAP16 (0x90-0x9F)の実装
+            else if (opcode >= 0x90 and opcode <= 0x9F) {
+                const swap_index = opcode - 0x8F; // SWAP1=1, SWAP2=2, ...
+                if (context.stack.depth() < swap_index + 1) return EVMError.StackUnderflow;
+
+                // stack[sp-1]とstack[sp-1-swap_index]を交換
+                const temp = context.stack.data[context.stack.sp - 1];
+                context.stack.data[context.stack.sp - 1] = context.stack.data[context.stack.sp - 1 - swap_index];
+                context.stack.data[context.stack.sp - 1 - swap_index] = temp;
+                context.pc += 1;
+            }
             // PUSH0-PUSH32 (0x5F-0x7F)の実装
-            if (opcode >= 0x5F and opcode <= 0x7F) {
+            else if (opcode >= 0x5F and opcode <= 0x7F) {
                 const push_bytes = opcode - 0x5F; // PUSH0は0バイト、PUSH1は1バイト...
 
                 if (push_bytes == 0) {
