@@ -13,25 +13,21 @@ contract SimpleAdderAssembly {
             let selector := shr(224, calldataload(0))
 
             // Check if selector matches add function (0x771602f7)
-            if eq(selector, 0x771602f7) {
-                // Load first argument from calldata (offset 4, skip selector)
-                let a := calldataload(4)
 
-                // Load second argument from calldata (offset 36, skip selector + first arg)
-                let b := calldataload(36)
+            // Load first argument from calldata (offset 4, skip selector)
+            let a := calldataload(4)
 
-                // Add the two numbers
-                let result := add(a, b)
+            // Load second argument from calldata (offset 36, skip selector + first arg)
+            let b := calldataload(36)
 
-                // Store result in memory at position 0
-                mstore(0, result)
+            // Add the two numbers
+            let result := add(a, b)
 
-                // Return the result (32 bytes from memory position 0)
-                return(0, 32)
-            }
+            // Store result in memory at position 0
+            mstore(0, result)
 
-            // If selector doesn't match, revert
-            revert(0, 0)
+            // Return the result (32 bytes from memory position 0)
+            return(0, 32)
         }
     }
 }
