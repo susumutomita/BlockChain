@@ -13,6 +13,7 @@ contract SimpleAdderAssembly {
             let selector := shr(224, calldataload(0))
 
             // Check if selector matches add function (0x771602f7)
+
             // Load first argument from calldata (offset 4, skip selector)
             let a := calldataload(4)
 
