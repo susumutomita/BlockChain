@@ -436,9 +436,9 @@ fn executeStep(context: *EvmContext) !void {
                 std.log.info("CALLDATALOAD: Loading function selector from calldata", .{});
                 if (context.calldata.len >= 4) {
                     const selector = (@as(u32, context.calldata[0]) << 24) |
-                                   (@as(u32, context.calldata[1]) << 16) |
-                                   (@as(u32, context.calldata[2]) << 8) |
-                                   @as(u32, context.calldata[3]);
+                        (@as(u32, context.calldata[1]) << 16) |
+                        (@as(u32, context.calldata[2]) << 8) |
+                        @as(u32, context.calldata[3]);
                     std.log.info("CALLDATALOAD: First 4 bytes (function selector): 0x{x:0>8}", .{selector});
                 }
                 std.log.info("CALLDATALOAD: Full calldata: {any}", .{context.calldata});
@@ -675,7 +675,7 @@ fn executeStep(context: *EvmContext) !void {
                 if (shift.lo == 224) {
                     std.log.info("SHR: Result after 224-bit shift - hi: 0x{x:0>32}, lo: 0x{x:0>32}", .{ result.hi, result.lo });
                     if (result.lo <= 0xFFFFFFFF) {
-                        std.log.info("SHR: Extracted function selector: 0x{x:0>8}", .{ @as(u32, @intCast(result.lo)) });
+                        std.log.info("SHR: Extracted function selector: 0x{x:0>8}", .{@as(u32, @intCast(result.lo))});
                     }
                 }
 
@@ -1115,6 +1115,10 @@ pub fn disassemble(code: []const u8, writer: anytype) !void {
             Opcode.SLT => try writer.print("SLT", .{}),
             Opcode.EQ => try writer.print("EQ", .{}),
             Opcode.ISZERO => try writer.print("ISZERO", .{}),
+
+            // Missing opcodes that were showing as UNKNOWN
+            Opcode.MOD => try writer.print("MOD", .{}),
+            Opcode.CALLDATACOPY => try writer.print("CALLDATACOPY", .{}),
 
             Opcode.PUSH0 => try writer.print("PUSH0", .{}),
             Opcode.PUSH1 => {
