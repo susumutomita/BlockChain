@@ -61,7 +61,7 @@ zig build run -- --listen 8003 --connect 127.0.0.1:8001 --call 0x123456 771602f7
   - `evm.zig`: EVM（Ethereum Virtual Machine）の実装
   - `p2p.zig`: P2Pネットワークの実装
 - `contract/`: Solidityのスマートコントラクト
-- `references/`: [Zig言語で学ぶブロックチェイン](https://github.com/susumutomita/zenn-article/books/zig-blockchain)の各章で完成したコード、ステップバイステップで構築できるようにしてあります。
+- `references/`: [Zig言語で学ぶブロックチェイン](https://github.com/susumutomita/zenn-article/books/zig-blockchain)の各章で完成したコード、ステップバイステップで構築できるようにしてあります。各Chapeter事に対応するコードが格納されています。また本の原稿もbooksディレクトリにコピーしてあります。例えばreferences/books/chapter9.mdに対応するコードが`references/chapter9/`に格納されています。また本の目的は、Zig言語でブロックチェインをゼロから作り上げる過程を通じてその仕組みへの理解を深め、最終的にEVM互換のチェインを自分で動かせるようになることです。堅苦しい教科書ではなく、手を動かしながら学べる工作キットのような感覚で楽しんでもらうです。
 - `design/`: 設計資料
 
 ### EVMの詳細
