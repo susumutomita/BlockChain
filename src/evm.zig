@@ -768,9 +768,9 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.JUMPI => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
-            // EVM仕様に従い、最初にジャンプ先、次に条件を取り出す
-            const dest = try context.stack.pop();
+            // EVM仕様に従い、最初に条件、次にジャンプ先を取り出す
             const condition = try context.stack.pop();
+            const dest = try context.stack.pop();
 
             std.log.info("JUMPI: PC={d}, destination=0x{x}, condition=0x{x} (hi=0x{x}, lo=0x{x})", .{ context.pc, dest.lo, condition.lo, condition.hi, condition.lo });
 
@@ -1003,7 +1003,7 @@ fn executeStep(context: *EvmContext) !void {
                 } else {
                     // PUSH1-PUSH32: 指定バイト数を読み取り
                     // コード範囲チェック
-                    if (context.pc + push_bytes >= context.code.len) {
+                    if (context.pc + push_bytes + 1 > context.code.len) {
                         context.error_msg = "コード範囲外のPUSH操作";
                         return EVMError.InvalidOpcode;
                     }
