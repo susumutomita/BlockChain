@@ -111,3 +111,125 @@ pub fn toBytes(comptime T: type, value: T) []const u8 {
         return bytes[0..];
     }
 }
+
+/// 16進数文字列をバイト配列に変換する
+///
+/// 引数:
+///     allocator: メモリアロケータ
+///     hex_str: 16進数文字列（"0x"プレフィックス付きでも可）
+///
+/// 戻り値:
+///     []const u8: 変換されたバイト配列
+///     エラー: 無効な16進数文字列の場合
+pub fn hexToBytes(allocator: std.mem.Allocator, hex_str: []const u8) ![]const u8 {
+    // 16進数文字列の先頭に0xがある場合は取り除く
+    const hex = if (std.mem.startsWith(u8, hex_str, "0x"))
+        hex_str[2..]
+    else
+        hex_str;
+
+    // 奇数長の場合は先頭に0を追加して偶数長にする
+    var padded_hex: []const u8 = hex;
+    var padded_allocated = false;
+
+    if (hex.len % 2 != 0) {
+        var padded_buffer = try allocator.alloc(u8, hex.len + 1);
+        padded_buffer[0] = '0';
+        @memcpy(padded_buffer[1..], hex);
+        padded_hex = padded_buffer;
+        padded_allocated = true;
+    }
+    defer if (padded_allocated) allocator.free(padded_hex);
+
+    // 16進数文字列をバイト配列に変換
+    const result = try allocator.alloc(u8, padded_hex.len / 2);
+    errdefer allocator.free(result);
+
+    var i: usize = 0;
+    while (i < result.len) : (i += 1) {
+        const high = try std.fmt.charToDigit(padded_hex[i * 2], 16);
+        const low = try std.fmt.charToDigit(padded_hex[i * 2 + 1], 16);
+        result[i] = @as(u8, @intCast(high)) * 16 + @as(u8, @intCast(low));
+    }
+
+    return result;
+}
+
+/// バイト配列を16進数文字列に変換する
+///
+/// 引数:
+///     allocator: メモリアロケータ
+///     bytes: 変換するバイト配列
+///
+/// 戻り値:
+///     []const u8: 変換された16進数文字列
+pub fn bytesToHex(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+    const hex_chars = "0123456789abcdef";
+    const hex = try allocator.alloc(u8, bytes.len * 2);
+    errdefer allocator.free(hex);
+
+    for (bytes, 0..) |b, i| {
+        hex[i * 2] = hex_chars[b >> 4];
+        hex[i * 2 + 1] = hex_chars[b & 0xF];
+    }
+
+    return hex;
+}
+
+/// "0x"プレフィックス付きの16進数文字列を生成する
+///
+/// 引数:
+///     allocator: メモリアロケータ
+///     bytes: 変換するバイト配列
+///
+/// 戻り値:
+///     []const u8: "0x"プレフィックス付きの16進数文字列
+pub fn bytesToHexWithPrefix(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+    const hex = try bytesToHex(allocator, bytes);
+    defer allocator.free(hex);
+
+    const result = try std.mem.concat(allocator, u8, &[_][]const u8{ "0x", hex });
+    return result;
+}
+
+/// 文字列のスライスを区切り文字で連結する
+///
+/// 引数:
+///     allocator: 結果の文字列を割り当てるメモリアロケータ
+///     slices: 連結する文字列のスライス
+///     separator: 文字列間の区切り文字
+///
+/// 戻り値:
+///     割り当てられた結合された文字列
+///
+/// エラー:
+///     アロケーションエラー
+pub fn joinStrings(allocator: std.mem.Allocator, slices: []const []const u8, separator: []const u8) ![]const u8 {
+    if (slices.len == 0) return "";
+
+    // 必要なサイズを計算
+    var total_size: usize = 0;
+    for (slices) |s| {
+        total_size += s.len;
+    }
+    total_size += separator.len * (slices.len - 1);
+
+    // 結果バッファを割り当て
+    var result = try allocator.alloc(u8, total_size);
+    errdefer allocator.free(result);
+
+    // バッファに文字列を連結
+    var pos: usize = 0;
+    for (slices, 0..slices.len) |slice, i| {
+        @memcpy(result[pos .. pos + slice.len], slice);
+        pos += slice.len;
+
+        // セパレータを追加（最後の要素以外）
+        if (i < slices.len - 1) {
+            @memcpy(result[pos .. pos + separator.len], separator);
+            pos += separator.len;
+        }
+    }
+
+    return result;
+}
