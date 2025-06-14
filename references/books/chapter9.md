@@ -750,9 +750,9 @@ EVMの実行エンジン部分は、オペコードの読み取り、解釈、�
 
 下記は実行エンジンの核となる部分です。
 
-evm.zigを新規に作成し、以下のように記述します。
+`src/evm.zig`を新規に作成し、以下のように記述します。
 
-```evm.zig
+```zig
 //! Ethereum Virtual Machine (EVM) 実装
 //!
 //! このモジュールはEthereumのスマートコントラクト実行環境であるEVMを
@@ -1316,4 +1316,486 @@ test "EVM multiple operations" {
 }
 ```
 
-この実装では、最初にあるシンプルな演算命令(ADD、MUL、SUB、DIV)。スタック操作命令(PUSH1、DUP1、SWAP1)。メモリ/ストレージアクセス(MLOAD/MSTORE/SLOAD/SSTORE)。そして制御フロー(RETURNなど)を実装します。EVMには140種類以上の命令がありますが、今回はAdder.solのようなシンプルなコントラクトを実行するのに必要な最小限の命令セットに絞っています。
+## Solidityコントラクトの実行
+
+ここまでで基本的なEVM実装ができましたので、実際のSolidityコントラクトを実行してみましょう。
+
+### Solidityコントラクトのコンパイルとデプロイ
+
+まず、Solidityで書かれた簡単な加算コントラクトをコンパイルします。`contract/SimpleAdder2.sol`に以下のコントラクトがあります：
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+contract SimpleAdder {
+    function add(uint256 a, uint256 b) external pure returns (uint256) {
+        unchecked {
+            return a + b;
+        }
+    }
+}
+```
+
+このコントラクトをコンパイルするには：
+
+```bash
+solc --bin --abi contract/SimpleAdder2.sol
+```
+
+コンパイル結果のバイトコードは、コントラクトのデプロイコード（コンストラクタ）とランタイムコード（実際の関数実装）の両方を含みます。
+
+### 関数セレクタとABI
+
+EVMでスマートコントラクトの関数を呼び出す際は、**関数セレクタ**という仕組みを使います。関数セレクタは、関数シグネチャ（関数名と引数の型）のKeccak-256ハッシュの最初の4バイトです。
+
+例えば、`add(uint256,uint256)`の関数セレクタは`0x771602f7`です。これは以下のように計算されます：
+
+1. 関数シグネチャ: `add(uint256,uint256)`
+2. Keccak-256ハッシュ: `771602f70e831cbc32b27580e53e6e4b1aa9aec52a62c2329c181691bcd0720f`
+3. 最初の4バイト: `0x771602f7`
+
+関数を呼び出す際のcalldataは以下の構造になります：
+
+- 最初の4バイト: 関数セレクタ
+- 続く32バイト: 第1引数（uint256）
+- 続く32バイト: 第2引数（uint256）
+
+### アセンブリ版の実装
+
+EVMの動作をより深く理解するために、Solidityのインラインアセンブリを使った実装も見てみましょう。`contract/SimpleAdderAssembly.sol`：
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+contract SimpleAdderAssembly {
+    fallback() external payable {
+        assembly {
+            // calldataが68バイト以上あることを確認
+            if lt(calldatasize(), 68) {
+                revert(0, 0)
+            }
+
+            // 関数セレクタを読み込み（最初の4バイト）
+            let selector := shr(224, calldataload(0))
+
+            // 第1引数を読み込み（オフセット4から32バイト）
+            let a := calldataload(4)
+
+            // 第2引数を読み込み（オフセット36から32バイト）
+            let b := calldataload(36)
+
+            // 加算を実行
+            let result := add(a, b)
+
+            // 結果をメモリのアドレス0に格納
+            mstore(0, result)
+
+            // メモリのアドレス0から32バイトを返す
+            return(0, 32)
+        }
+    }
+}
+```
+
+### EVMでのコントラクト実行テスト
+
+では、実際にEVMでSolidityコントラクトを実行するテストを追加します。`src/evm.zig`の最後に以下のテストを追加：
+
+```zig
+// Solidityコントラクトの実行テスト
+test "Execute Solidity add function" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // SimpleAdderのランタイムバイトコード（抜粋）
+    // 実際のバイトコードは solc でコンパイルして取得
+    // ここでは関数ディスパッチャーと add 関数の実装を含む簡略版
+    const runtime_bytecode = [_]u8{
+        // 関数セレクタのチェック
+        0x60, 0x00, // PUSH1 0x00
+        0x35, // CALLDATALOAD
+        0x60, 0xe0, // PUSH1 0xe0
+        0x1c, // SHR
+        0x63, 0x77, 0x16, 0x02, 0xf7, // PUSH4 0x771602f7 (add関数のセレクタ)
+        0x14, // EQ
+        0x60, 0x1b, // PUSH1 0x1b (ジャンプ先)
+        0x57, // JUMPI
+        0x00, // STOP (セレクタが一致しない場合)
+        
+        // add関数の実装 (0x1b)
+        0x5b, // JUMPDEST
+        0x60, 0x04, // PUSH1 0x04
+        0x35, // CALLDATALOAD (第1引数)
+        0x60, 0x24, // PUSH1 0x24
+        0x35, // CALLDATALOAD (第2引数)
+        0x01, // ADD
+        0x60, 0x00, // PUSH1 0x00
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 0x20
+        0x60, 0x00, // PUSH1 0x00
+        0xf3, // RETURN
+    };
+
+    // 関数呼び出しのcalldata
+    // 0x771602f7 (関数セレクタ) + 0x0000...0005 (a=5) + 0x0000...0003 (b=3)
+    var calldata = std.ArrayList(u8).init(allocator);
+    defer calldata.deinit();
+    
+    // 関数セレクタ
+    try calldata.appendSlice(&[_]u8{ 0x77, 0x16, 0x02, 0xf7 });
+    
+    // 第1引数: 5 (32バイト、右詰め)
+    try calldata.appendNTimes(0, 31);
+    try calldata.append(5);
+    
+    // 第2引数: 3 (32バイト、右詰め)
+    try calldata.appendNTimes(0, 31);
+    try calldata.append(3);
+
+    // EVMを実行
+    const result = try execute(allocator, &runtime_bytecode, calldata.items, 100000);
+    defer allocator.free(result);
+
+    // 結果をチェック（5 + 3 = 8）
+    try std.testing.expectEqual(@as(usize, 32), result.len);
+    
+    var value: u256 = 0;
+    for (result[31], 0..) |byte, i| {
+        value |= @as(u256, byte) << @intCast(i * 8);
+    }
+    
+    try std.testing.expectEqual(@as(u256, 8), value);
+}
+```
+
+### EVMデバッグツール
+
+EVM実行をデバッグするために、`src/evm_debug.zig`にデバッグ用のユーティリティを実装します：
+
+```zig
+//! EVMデバッグユーティリティ
+
+const std = @import("std");
+const evm_types = @import("evm_types.zig");
+const EvmContext = evm_types.EvmContext;
+const Opcode = @import("evm.zig").Opcode;
+
+/// コンテキストの現在位置付近のオペコードを逆アセンブルするヘルパー関数
+pub fn disassembleContext(context: *EvmContext, writer: anytype) !void {
+    // PC前後の限定された範囲のオペコードを逆アセンブル
+    const startPc = if (context.pc > 10) context.pc - 10 else 0;
+    const endPc = if (context.pc + 10 < context.code.len) context.pc + 10 else context.code.len;
+    var pc = startPc;
+
+    while (pc < endPc) {
+        const opcode = context.code[pc];
+        if (pc == context.pc) {
+            try writer.print("[0x{x:0>4}]: ", .{pc}); // 現在のPCをマーク
+        } else {
+            try writer.print("0x{x:0>4}: ", .{pc});
+        }
+
+        // オペコードに応じた出力
+        switch (opcode) {
+            Opcode.STOP => try writer.print("STOP", .{}),
+            Opcode.ADD => try writer.print("ADD", .{}),
+            Opcode.MUL => try writer.print("MUL", .{}),
+            // ... 他のオペコード
+            
+            Opcode.PUSH1 => {
+                if (pc + 1 < context.code.len) {
+                    const value = context.code[pc + 1];
+                    try writer.print("PUSH1 0x{x:0>2}", .{value});
+                    pc += 1;
+                } else {
+                    try writer.print("PUSH1 <データ不足>", .{});
+                }
+            },
+            
+            else => {
+                try writer.print("UNKNOWN 0x{x:0>2}", .{opcode});
+            },
+        }
+
+        try writer.print("\n", .{});
+        pc += 1;
+    }
+}
+
+/// スタックの内容をダンプする
+pub fn dumpStack(context: *EvmContext, writer: anytype) !void {
+    try writer.print("Stack (depth: {}):\n", .{context.stack.depth()});
+    
+    var i: usize = 0;
+    while (i < context.stack.sp) : (i += 1) {
+        const value = context.stack.data[context.stack.sp - 1 - i];
+        try writer.print("  [{d}]: 0x{x}\n", .{ i, value });
+    }
+}
+
+/// EVMの実行状態を表示する
+pub fn dumpContext(context: *EvmContext, writer: anytype) !void {
+    try writer.print("=== EVM State ===\n", .{});
+    try writer.print("PC: 0x{x:0>4}\n", .{context.pc});
+    try writer.print("Gas: {d}\n", .{context.gas});
+    try writer.print("Stopped: {}\n", .{context.stopped});
+    
+    if (context.error_msg) |msg| {
+        try writer.print("Error: {s}\n", .{msg});
+    }
+    
+    try writer.print("\n", .{});
+    try dumpStack(context, writer);
+    try writer.print("\n", .{});
+    try disassembleContext(context, writer);
+}
+```
+
+### EVMトレースの実装
+
+EVMの実行をステップごとに追跡できるトレース機能も追加しましょう：
+
+```zig
+/// EVMトレースログ
+pub const TraceLog = struct {
+    pc: usize,
+    opcode: u8,
+    gas: usize,
+    stack_before: []const evm_types.EVMu256,
+    stack_after: []const evm_types.EVMu256,
+    memory_size: usize,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *TraceLog) void {
+        self.allocator.free(self.stack_before);
+        self.allocator.free(self.stack_after);
+    }
+};
+
+/// トレース機能付きEVM実行
+pub fn executeWithTrace(
+    allocator: std.mem.Allocator,
+    code: []const u8,
+    calldata: []const u8,
+    gas_limit: usize
+) !struct { result: []const u8, trace: []TraceLog } {
+    var context = EvmContext.init(allocator, code, calldata);
+    context.gas = gas_limit;
+    defer context.deinit();
+    
+    var trace_logs = std.ArrayList(TraceLog).init(allocator);
+    defer trace_logs.deinit();
+    
+    // 実行ループ
+    while (context.pc < context.code.len and !context.stopped) {
+        // 実行前のスタック状態を記録
+        var stack_before = try allocator.alloc(evm_types.EVMu256, context.stack.sp);
+        @memcpy(stack_before, context.stack.data[0..context.stack.sp]);
+        
+        const opcode = context.code[context.pc];
+        const gas_before = context.gas;
+        
+        // ステップ実行
+        try executeStep(&context);
+        
+        // 実行後のスタック状態を記録
+        var stack_after = try allocator.alloc(evm_types.EVMu256, context.stack.sp);
+        @memcpy(stack_after, context.stack.data[0..context.stack.sp]);
+        
+        // トレースログを追加
+        try trace_logs.append(TraceLog{
+            .pc = context.pc,
+            .opcode = opcode,
+            .gas = gas_before - context.gas,
+            .stack_before = stack_before,
+            .stack_after = stack_after,
+            .memory_size = context.memory.data.items.len,
+            .allocator = allocator,
+        });
+    }
+    
+    // 結果をコピー
+    const result = try allocator.alloc(u8, context.returndata.items.len);
+    @memcpy(result, context.returndata.items);
+    
+    return .{ 
+        .result = result,
+        .trace = try trace_logs.toOwnedSlice(),
+    };
+}
+```
+
+## ブロックチェインへのEVM統合
+
+ここまでで独立したEVM実装ができました。次は、これを前章までで作成したブロックチェインに統合します。
+
+### スマートコントラクトのデプロイと実行
+
+ブロックチェインでスマートコントラクトを扱うには、以下の2つの操作が必要です：
+
+1. **デプロイ**: コントラクトのバイトコードをブロックチェインに保存
+2. **実行**: デプロイされたコントラクトの関数を呼び出す
+
+これらの操作を`src/blockchain.zig`に追加します：
+
+```zig
+/// スマートコントラクトのデプロイ
+pub fn deployContract(
+    self: *Blockchain,
+    deployer: []const u8,
+    bytecode: []const u8,
+    gas_limit: usize
+) ![]const u8 {
+    // コントラクトアドレスを生成（簡易版：デプロイヤーアドレス + nonce）
+    var hasher = std.crypto.hash.sha3.Sha3_256.init(.{});
+    hasher.update(deployer);
+    hasher.update(&[_]u8{self.contracts.count()});
+    var hash: [32]u8 = undefined;
+    hasher.final(&hash);
+    
+    // アドレスは最後の20バイト
+    const contract_address = hash[12..];
+    
+    // EVMでコンストラクタを実行
+    const runtime_code = try evm.execute(
+        self.allocator,
+        bytecode,
+        &[_]u8{},  // コンストラクタ引数なし
+        gas_limit
+    );
+    
+    // コントラクトコードを保存
+    try self.contracts.put(
+        try self.allocator.dupe(u8, contract_address),
+        try self.allocator.dupe(u8, runtime_code)
+    );
+    
+    return contract_address;
+}
+
+/// スマートコントラクトの呼び出し
+pub fn callContract(
+    self: *Blockchain,
+    contract_address: []const u8,
+    calldata: []const u8,
+    gas_limit: usize
+) ![]const u8 {
+    // コントラクトコードを取得
+    const code = self.contracts.get(contract_address) orelse
+        return error.ContractNotFound;
+    
+    // EVMで実行
+    return try evm.execute(
+        self.allocator,
+        code,
+        calldata,
+        gas_limit
+    );
+}
+```
+
+### トランザクションタイプの拡張
+
+スマートコントラクト関連のトランザクションを扱うため、トランザクション構造を拡張します：
+
+```zig
+pub const TransactionType = enum {
+    Transfer,        // 通常の送金
+    ContractDeploy,  // コントラクトデプロイ
+    ContractCall,    // コントラクト呼び出し
+};
+
+pub const Transaction = struct {
+    from: []const u8,
+    to: ?[]const u8,      // デプロイ時はnull
+    amount: u64,
+    data: []const u8,     // コントラクトコードまたはcalldata
+    tx_type: TransactionType,
+    gas_limit: u64,
+    gas_price: u64,
+    nonce: u64,
+    signature: ?[]const u8,
+};
+```
+
+## 実践的な使用例
+
+最後に、完成したEVM統合ブロックチェインの使用例を示します：
+
+```zig
+// メインプログラムでの使用例
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // ブロックチェインの初期化
+    var blockchain = try Blockchain.init(allocator);
+    defer blockchain.deinit();
+
+    // SimpleAdderコントラクトのバイトコード（コンパイル済み）
+    const contract_bytecode = [_]u8{
+        // ... Solidityコンパイラで生成されたバイトコード
+    };
+
+    // コントラクトをデプロイ
+    const deployer = "0x1234567890123456789012345678901234567890";
+    const contract_address = try blockchain.deployContract(
+        deployer,
+        &contract_bytecode,
+        1_000_000  // ガスリミット
+    );
+
+    std.debug.print("コントラクトアドレス: 0x", .{});
+    for (contract_address) |byte| {
+        std.debug.print("{x:0>2}", .{byte});
+    }
+    std.debug.print("\n", .{});
+
+    // add(5, 3)を呼び出すcalldataを作成
+    var calldata = std.ArrayList(u8).init(allocator);
+    defer calldata.deinit();
+    
+    // 関数セレクタ: 0x771602f7
+    try calldata.appendSlice(&[_]u8{ 0x77, 0x16, 0x02, 0xf7 });
+    
+    // 引数1: 5
+    try calldata.appendNTimes(0, 31);
+    try calldata.append(5);
+    
+    // 引数2: 3
+    try calldata.appendNTimes(0, 31);
+    try calldata.append(3);
+
+    // コントラクトを実行
+    const result = try blockchain.callContract(
+        contract_address,
+        calldata.items,
+        100_000  // ガスリミット
+    );
+    defer allocator.free(result);
+
+    // 結果を表示（8が返るはず）
+    if (result.len >= 32) {
+        const value = result[31];
+        std.debug.print("結果: {d}\n", .{value});
+    }
+}
+```
+
+## まとめ
+
+この章では、Zigを使用してEthereum Virtual Machine (EVM)の簡易版を実装しました。実装した主な要素は以下の通りです：
+
+1. **256ビット整数型**: EVMの基本データ型を独自に実装
+2. **スタック・メモリ・ストレージ**: EVMの3つの主要なデータ領域を実装
+3. **オペコード実行エンジン**: バイトコードを解釈・実行する仮想マシン
+4. **Solidityコントラクトの実行**: 実際のスマートコントラクトを動作させる
+5. **ブロックチェインへの統合**: コントラクトのデプロイと実行をサポート
+
+この実装により、スマートコントラクトがどのように動作するかを深く理解できました。実際のEthereumのEVMはより多くの機能（全オペコード、ガス計算、プリコンパイルコントラクトなど）を持ちますが、基本的な仕組みは同じです。
+
+次章では、このEVM統合ブロックチェインをP2Pネットワークで動作させ、複数ノード間でスマートコントラクトを共有・実行する分散システムを構築します。
