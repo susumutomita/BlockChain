@@ -4,6 +4,12 @@
 //! コアブロックチェーン機能を実装しています。ブロックハッシュの計算、
 //! プルーフオブワークによる新しいブロックのマイニング、ブロックチェーン状態の
 //! 維持のための関数を提供します。
+//!
+//! ブロックチェーンの基本概念：
+//! - ブロック: データ（トランザクション）を含む不変のレコード
+//! - チェーン: ブロックが暗号学的にリンクされた連鎖構造
+//! - ハッシュ: ブロックの内容から生成される一意の識別子
+//! - プルーフオブワーク: ブロック生成に計算資源を必要とする仕組み
 
 const std = @import("std");
 const crypto = std.crypto.hash;
@@ -17,13 +23,29 @@ const evm_debug = @import("evm_debug.zig");
 
 /// プルーフオブワークマイニングの難易度設定
 /// 有効なブロックハッシュに必要な先頭のゼロバイト数を表します
-const DIFFICULTY: u8 = 2;
+/// 
+/// 難易度の意味：
+/// - 難易度1 = "00"で始まるハッシュが必要（約256回の試行）
+/// - 難易度2 = "0000"で始まるハッシュが必要（約65,536回の試行）
+/// - 難易度3 = "000000"で始まるハッシュが必要（約16,777,216回の試行）
+/// 難易度が1上がるごとに、必要な計算量は約256倍に増加します
+const MINING_DIFFICULTY_ZEROS: u8 = 2;
 
 /// メインブロックチェーンデータストレージ
 /// 完全なブロックチェーンをBlock構造体の動的配列として格納します
+/// 
+/// なぜArrayListを使うのか：
+/// - 動的にブロックを追加できる（チェーンは時間とともに成長）
+/// - インデックスによる高速アクセス（O(1)）
+/// - メモリ効率的（必要な分だけメモリを使用）
 pub var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
 
 /// EVMコントラクトストレージ - アドレスからコントラクトコードへのマッピング
+/// 
+/// なぜHashMapを使うのか：
+/// - アドレスによる高速検索（平均O(1)）
+/// - スマートコントラクトは頻繁にアドレスで参照される
+/// - 任意のアドレスにコントラクトをデプロイ可能
 pub var contract_storage = std.StringHashMap([]const u8).init(std.heap.page_allocator);
 
 //------------------------------------------------------------------------------
@@ -36,15 +58,31 @@ pub var contract_storage = std.StringHashMap([]const u8).init(std.heap.page_allo
 /// 前のハッシュ、トランザクション、データ）をバイトシーケンスに
 /// 連結してハッシュすることにより、ブロックの内容のSHA-256ハッシュを計算します。
 ///
+/// ハッシュ値は以下の手順で計算されます：
+/// 1. ブロックのすべてのフィールドをバイト配列に変換
+/// 2. SHA-256アルゴリズムでハッシュ化
+/// 3. 32バイトの固定長配列として返す
+///
+/// なぜハッシュを使うのか：
+/// - データの改ざん検知（1ビットでも変わると全く異なるハッシュに）
+/// - 固定長出力（どんなサイズの入力でも32バイト）
+/// - 一方向性（ハッシュから元データは復元不可能）
+///
 /// 引数:
 ///     block: ハッシュ化するBlock構造体へのポインタ
 ///
 /// 戻り値:
 ///     [32]u8: ブロックの32バイトのSHA-256ハッシュ
 pub fn calculateHash(block: *const types.Block) [32]u8 {
+    // SHA-256ハッシュ関数の初期化
+    // SHA-256は暗号学的に安全なハッシュ関数で、以下の特性を持ちます：
+    // - 出力サイズ: 256ビット（32バイト）
+    // - 衝突耐性: 異なる入力で同じハッシュを見つけるのは事実上不可能
     var hasher = Sha256.init(.{});
 
-    // ノンスをバイト配列に変換し、デバッグ用にログ出力
+    // ステップ1: ノンスをバイト配列に変換
+    // ノンスはマイニング時に変更される値で、目標の難易度を満たすハッシュを
+    // 見つけるまで増加させます
     const nonce_bytes = utils.toBytesU64(block.nonce);
     logger.debugLog("nonce bytes: ", .{});
     if (comptime logger.debug_logging) {
@@ -54,24 +92,26 @@ pub fn calculateHash(block: *const types.Block) [32]u8 {
         std.debug.print("\n", .{});
     }
 
-    // ハッシュ計算にブロックフィールドを順番に追加
-    hasher.update(utils.toBytes(u32, block.index));
-    hasher.update(utils.toBytes(u64, block.timestamp));
-    hasher.update(nonce_bytes[0..]);
-    hasher.update(&block.prev_hash);
+    // ステップ2: ブロックフィールドを順番にハッシュ関数に追加
+    // 順序が重要：異なる順序では異なるハッシュになります
+    hasher.update(utils.toBytes(u32, block.index));      // ブロック番号
+    hasher.update(utils.toBytes(u64, block.timestamp));  // 作成時刻
+    hasher.update(nonce_bytes[0..]);                     // ノンス値
+    hasher.update(&block.prev_hash);                     // 前ブロックのハッシュ（チェーンを形成）
 
-    // すべてのトランザクションデータをハッシュに追加
+    // ステップ3: すべてのトランザクションデータをハッシュに追加
+    // トランザクションの順序も重要：順序が変わるとハッシュも変わります
     for (block.transactions.items) |tx| {
-        hasher.update(tx.sender);
-        hasher.update(tx.receiver);
+        hasher.update(tx.sender);       // 送信者アドレス
+        hasher.update(tx.receiver);     // 受信者アドレス
         const amount_bytes = utils.toBytesU64(tx.amount);
-        hasher.update(&amount_bytes);
+        hasher.update(&amount_bytes);   // 送金額
     }
 
-    // 追加のデータフィールドをハッシュに追加
+    // ステップ4: 追加のデータフィールドをハッシュに追加
     hasher.update(block.data);
 
-    // ハッシュを確定して返す
+    // ステップ5: 最終的なハッシュ値（32バイト）を取得
     const hash = hasher.finalResult();
     logger.debugLog("nonce: {d}, hash: {x}\n", .{ block.nonce, hash });
     return hash;
@@ -115,6 +155,17 @@ pub fn calculateTransactionHash(tx: *const types.Transaction) [32]u8 {
 /// ハッシュが難易度パラメータで指定された必要な先頭ゼロバイト数を
 /// 持っているかを検証します。
 ///
+/// プルーフオブワークの仕組み：
+/// - マイナーは異なるノンス値を試し続けます
+/// - 各ノンスで新しいハッシュが生成されます
+/// - 目標：指定された数の先頭ゼロを持つハッシュを見つける
+/// - 例：難易度2 = "0000..."で始まるハッシュ（確率: 1/65,536）
+///
+/// なぜこれが重要なのか：
+/// - ブロックの作成に計算コストを要求（スパム防止）
+/// - ネットワークのセキュリティを向上（改ざんコストが高い）
+/// - 公平な競争（計算能力に応じた報酬）
+///
 /// 引数:
 ///     hash: チェックする32バイトのハッシュ
 ///     difficulty: 必要な先頭ゼロバイト数（32を上限とする）
@@ -122,13 +173,17 @@ pub fn calculateTransactionHash(tx: *const types.Transaction) [32]u8 {
 /// 戻り値:
 ///     bool: ハッシュが難易度要件を満たす場合はtrue、そうでなければfalse
 pub fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
-    // 難易度を32バイト（256ビット）に制限
+    // 安全性チェック：難易度を32バイト（256ビット）に制限
     const limit = if (difficulty <= 32) difficulty else 32;
 
-    // 最初の 'limit' バイトがすべてゼロであることを確認
+    // 先頭から指定されたバイト数分をチェック
     for (hash[0..limit]) |byte| {
-        if (byte != 0) return false;
+        if (byte != 0) {
+            // ゼロでないバイトが見つかった場合、難易度を満たしていない
+            return false;
+        }
     }
+    // すべてのチェックをパスした場合、難易度を満たしている
     return true;
 }
 
@@ -137,6 +192,18 @@ pub fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
 /// 指定された難易度要件（先頭のゼロバイト）を満たすハッシュを
 /// 見つけるまでブロックのノンス値を段階的に調整します。
 ///
+/// マイニングプロセス：
+/// 1. 現在のノンスでハッシュを計算
+/// 2. ハッシュが難易度を満たすかチェック
+/// 3. 満たさない場合、ノンスを増やして再試行
+/// 4. 満たすハッシュが見つかるまで繰り返す
+///
+/// 計算例（難易度2の場合）：
+/// - 試行1: nonce=0 → hash="a3f2..." ❌（先頭が"00"でない）
+/// - 試行2: nonce=1 → hash="5b91..." ❌
+/// - ...多数の試行...
+/// - 試行65536: nonce=65535 → hash="0000..." ✅（成功！）
+///
 /// 引数:
 ///     block: マイニングするBlock構造体へのポインタ（その場で変更される）
 ///     difficulty: ハッシュに必要な先頭ゼロバイト数
@@ -144,13 +211,32 @@ pub fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
 /// 注意:
 ///     この関数はブロックのノンスとハッシュフィールドを更新することでブロックを変更します
 pub fn mineBlock(block: *types.Block, difficulty: u8) void {
+    // マイニング開始をログに記録
+    logger.debugLog("マイニング開始: 難易度={d}\n", .{difficulty});
+    const start_time = std.time.milliTimestamp();
+    
     while (true) {
+        // ステップ1: 現在のノンスでハッシュを計算
         const new_hash = calculateHash(block);
+        
+        // ステップ2: ハッシュが難易度を満たすかチェック
         if (meetsDifficulty(new_hash, difficulty)) {
+            // 成功！有効なハッシュが見つかった
             block.hash = new_hash;
+            
+            // マイニング統計をログ出力
+            const elapsed = std.time.milliTimestamp() - start_time;
+            logger.debugLog("マイニング成功! ノンス={d}, 時間={d}ms\n", .{ block.nonce, elapsed });
             break;
         }
+        
+        // ステップ3: 次のノンス値を試す
         block.nonce += 1;
+        
+        // 進捗報告（10000回ごと）
+        if (block.nonce % 10000 == 0) {
+            logger.debugLog("マイニング中... 試行回数: {d}\n", .{block.nonce});
+        }
     }
 }
 
@@ -172,7 +258,7 @@ pub fn verifyBlockPow(b: *const types.Block) bool {
     }
 
     // ハッシュが必要な難易度を満たしているか確認
-    if (!meetsDifficulty(recalculated, DIFFICULTY)) {
+    if (!meetsDifficulty(recalculated, MINING_DIFFICULTY_ZEROS)) {
         return false; // ハッシュが難易度要件を満たしていない
     }
 
@@ -184,18 +270,41 @@ pub fn verifyBlockPow(b: *const types.Block) bool {
 /// チェーンに追加する前にブロックのプルーフオブワークを検証します。
 /// 検証に失敗したブロックは拒否されます。
 ///
+/// 検証プロセス：
+/// 1. プルーフオブワークの検証（ハッシュが難易度を満たすか）
+/// 2. ブロック番号の連続性チェック
+/// 3. 前ブロックハッシュの一致確認
+/// 4. すべての検証をパスしたらチェーンに追加
+///
 /// 引数:
 ///     new_block: チェーンに追加するBlock構造体
 ///
 /// 注意:
 ///     この関数は成功または失敗のメッセージをログに記録します
 pub fn addBlock(new_block: types.Block) void {
+    // ステップ1: プルーフオブワークの検証
     if (!verifyBlockPow(&new_block)) {
-        std.log.err("Received block fails PoW check. Rejecting it.", .{});
+        std.log.err("ブロック検証失敗: プルーフオブワークが無効です（index={d}）", .{new_block.index});
         return;
     }
 
-    std.log.info("Adding block to chain: index={d}, hash={x}", .{ new_block.index, new_block.hash });
+    // ステップ2: ブロック番号の連続性チェック（ジェネシスブロックを除く）
+    if (chain_store.items.len > 0) {
+        const last_block = chain_store.items[chain_store.items.len - 1];
+        if (new_block.index != last_block.index + 1) {
+            std.log.err("ブロック検証失敗: インデックスが連続していません（期待: {d}, 実際: {d}）", 
+                .{ last_block.index + 1, new_block.index });
+            return;
+        }
+        
+        // ステップ3: 前ブロックハッシュの一致確認
+        if (!std.mem.eql(u8, &new_block.prev_hash, &last_block.hash)) {
+            std.log.err("ブロック検証失敗: 前ブロックハッシュが一致しません", .{});
+            return;
+        }
+    }
+
+    std.log.info("ブロックを追加中: index={d}, hash={x}", .{ new_block.index, new_block.hash });
 
     // ブロックに含まれるコントラクトがあれば、コントラクトストレージに追加
     if (new_block.contracts) |contracts| {
@@ -297,7 +406,7 @@ pub fn createTestGenesisBlock(allocator: std.mem.Allocator) !types.Block {
         .hash = [_]u8{0} ** 32,
     };
     try genesis.transactions.append(types.Transaction{ .sender = "Alice", .receiver = "Bob", .amount = 100 });
-    mineBlock(&genesis, DIFFICULTY);
+    mineBlock(&genesis, MINING_DIFFICULTY_ZEROS);
     return genesis;
 }
 
@@ -552,7 +661,7 @@ pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
         new_block.contracts = contracts;
 
         // ブロックをマイニングして追加
-        mineBlock(&new_block, DIFFICULTY);
+        mineBlock(&new_block, MINING_DIFFICULTY_ZEROS);
 
         std.log.info("コントラクトデプロイブロック作成開始: アドレス={s}, トランザクション数={d}, コントラクト数={d}", .{ tx.receiver, new_block.transactions.items.len, contracts.count() });
 

@@ -3,6 +3,18 @@
 //! このモジュールはEthereumのスマートコントラクト実行環境であるEVMを
 //! 簡易的に実装します。EVMバイトコードを解析・実行し、スタックベースの
 //! 仮想マシンとして動作します。
+//!
+//! EVMの基本概念：
+//! - スタックマシン: 最大1024要素、各要素は256ビット整数
+//! - メモリ: バイト配列、動的に拡張可能
+//! - ストレージ: 永続的なキー・バリューストア
+//! - ガス: 計算資源を制限し、無限ループを防止する仕組み
+//!
+//! 実行モデル：
+//! 1. バイトコードを1命令ずつ読み取る
+//! 2. 各命令に対応した操作を実行
+//! 3. ガスを消費
+//! 4. エラーまたはSTOP/RETURNで終了
 
 const std = @import("std");
 const logger = @import("logger.zig");
@@ -13,18 +25,29 @@ const EVMu256 = evm_types.EVMu256;
 const EvmContext = evm_types.EvmContext;
 
 /// EVMオペコード定義
+/// 
+/// オペコードは1バイトの命令で、EVMが実行できる操作を表します。
+/// 各カテゴリは異なる用途を持ちます：
+/// - 0x00-0x0F: 算術演算（計算処理）
+/// - 0x10-0x1F: 比較・ビット演算（条件判定）
+/// - 0x30-0x3F: 環境情報（実行コンテキスト）
+/// - 0x50-0x5F: スタック・メモリ・ストレージ操作
+/// - 0x60-0x7F: PUSH操作（データをスタックに積む）
+/// - 0x80-0x8F: DUP操作（スタック要素の複製）
+/// - 0x90-0x9F: SWAP操作（スタック要素の交換）
+/// - 0xF0-0xFF: システム操作（コントラクト作成、自己破壊など）
 pub const Opcode = struct {
     // 終了・リバート系
-    pub const STOP = 0x00;
-    pub const RETURN = 0xF3;
-    pub const REVERT = 0xFD;
-    pub const INVALID = 0xFE;
+    pub const STOP = 0x00;    // 実行を正常終了
+    pub const RETURN = 0xF3;   // データを返して終了
+    pub const REVERT = 0xFD;   // 状態変更を取り消して終了
+    pub const INVALID = 0xFE;  // 無効な命令（意図的なエラー）
 
     // スタック操作・算術命令
-    pub const ADD = 0x01;
-    pub const MUL = 0x02;
-    pub const SUB = 0x03;
-    pub const DIV = 0x04;
+    pub const ADD = 0x01;      // 加算: a + b
+    pub const MUL = 0x02;      // 乗算: a * b
+    pub const SUB = 0x03;      // 減算: a - b
+    pub const DIV = 0x04;      // 除算: a / b（0除算は0を返す）
     pub const SDIV = 0x05;
     pub const MOD = 0x06;
     pub const SMOD = 0x07;
@@ -107,6 +130,14 @@ pub const EVMError = error{
 
 /// EVMバイトコードを実行する
 ///
+/// EVMの実行プロセス：
+/// 1. 実行コンテキストを初期化（スタック、メモリ、ストレージ）
+/// 2. プログラムカウンタ（PC）が指すオペコードを読み取る
+/// 3. オペコードに応じた処理を実行
+/// 4. ガスを消費（不足したらエラー）
+/// 5. PCを進めて次の命令へ
+/// 6. STOP/RETURN/REVERTまたはエラーで終了
+///
 /// 引数:
 ///     allocator: メモリアロケータ
 ///     code: EVMバイトコード
@@ -117,15 +148,17 @@ pub const EVMError = error{
 ///     []const u8: 実行結果のバイト列
 ///
 /// エラー:
-///     様々なEVM実行エラー
+///     OutOfGas: ガス不足
+///     StackOverflow/Underflow: スタックエラー
+///     InvalidOpcode: 無効な命令
+///     その他のEVM実行エラー
 pub fn execute(allocator: std.mem.Allocator, code: []const u8, calldata: []const u8, gas_limit: usize) ![]const u8 {
-    // EVMコンテキストの初期化
+    // ステップ1: EVMコンテキストの初期化
     var context = EvmContext.init(allocator, code, calldata);
-    // ガスリミット設定
-    context.gas = gas_limit;
-    defer context.deinit();
+    context.gas = gas_limit; // 利用可能なガスを設定
+    defer context.deinit(); // 関数終了時にメモリを解放
 
-    // メインの実行ループ
+    // ステップ2: メインの実行ループ
     while (context.pc < context.code.len and !context.stopped) {
         executeStep(&context) catch |err| {
             // エラー発生時に詳細な診断情報を表示
@@ -250,65 +283,47 @@ pub fn executeWithErrorInfo(allocator: std.mem.Allocator, code: []const u8, call
     return result;
 }
 
-/// 単一のEVM命令を実行
-fn executeStep(context: *EvmContext) !void {
-    // 現在のオペコードを取得
-    const opcode = context.code[context.pc];
+/// ガスコストの定義
+/// 
+/// 各オペコードには実行コストがあります：
+/// - 単純な演算: 3ガス（ADD, SUB等）
+/// - メモリアクセス: 3ガス + メモリ拡張コスト
+/// - ストレージ読み取り: 200ガス
+/// - ストレージ書き込み: 5000〜20000ガス
+const GasCost = struct {
+    const SIMPLE_ARITHMETIC = 3;  // ADD, SUB, MUL等
+    const MEMORY_OPERATION = 3;   // MLOAD, MSTORE
+    const STORAGE_READ = 200;     // SLOAD
+    const STORAGE_WRITE = 20000;  // SSTORE（新規書き込み）
+    const JUMP = 8;              // JUMP, JUMPI
+};
 
-    // 詳細デバッグ: 特定のPC位置での実行状況をログ
-    if (context.pc >= 20 and context.pc <= 50) {
-        std.log.info("DEBUG: PC={d}, opcode=0x{x:0>2}, stack_depth={d}", .{ context.pc, opcode, context.stack.depth() });
-    }
-
-    // ガス消費（シンプル版 - 本来は命令ごとに異なる）
-    if (context.gas < 1) {
-        context.error_msg = "Out of gas";
-        return EVMError.OutOfGas;
-    }
-    context.gas -= 1;
-
-    // オペコードを解釈して実行
+/// 算術演算オペコードを処理
+fn executeArithmetic(context: *EvmContext, opcode: u8) !void {
     switch (opcode) {
-        Opcode.STOP => {
-            context.stopped = true;
-        },
-
         Opcode.ADD => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const a = try context.stack.pop();
             const b = try context.stack.pop();
             try context.stack.push(a.add(b));
-            context.pc += 1;
         },
-
-        Opcode.POP => {
-            // POP: スタックトップの値を削除
-            if (context.stack.depth() < 1) return EVMError.StackUnderflow;
-            _ = try context.stack.pop(); // 値を捨てる
-            context.pc += 1;
-        },
-
-        Opcode.MUL => {
-            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
-            const a = try context.stack.pop();
-            const b = try context.stack.pop();
-            try context.stack.push(a.mul(b));
-            context.pc += 1;
-        },
-
         Opcode.SUB => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const a = try context.stack.pop();
             const b = try context.stack.pop();
             try context.stack.push(a.sub(b));
-            context.pc += 1;
         },
-
+        Opcode.MUL => {
+            if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            const a = try context.stack.pop();
+            const b = try context.stack.pop();
+            try context.stack.push(a.mul(b));
+        },
         Opcode.DIV => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
             const a = try context.stack.pop();
             const b = try context.stack.pop();
-            // 0除算の場合は0を返す
+            // 0除算の場合は0を返す（EVMの仕様）
             if (b.hi == 0 and b.lo == 0) {
                 try context.stack.push(EVMu256.zero());
             } else {
@@ -317,10 +332,64 @@ fn executeStep(context: *EvmContext) !void {
                     const result = EVMu256.fromU64(@intCast(a.lo / b.lo));
                     try context.stack.push(result);
                 } else {
-                    // 本来はより複雑な処理が必要
                     try context.stack.push(EVMu256.zero());
                 }
             }
+        },
+        else => return EVMError.InvalidOpcode,
+    }
+}
+
+/// 単一のEVM命令を実行
+/// 
+/// 実行ステップ：
+/// 1. 現在のPC位置からオペコードを読み取る
+/// 2. ガスを消費する
+/// 3. オペコードの種類に応じて処理を分岐
+/// 4. PCを適切に更新する
+fn executeStep(context: *EvmContext) !void {
+    // ステップ1: 現在のオペコードを取得
+    const opcode = context.code[context.pc];
+
+    // デバッグ情報の出力（開発時に便利）
+    if (context.pc >= 20 and context.pc <= 50) {
+        std.log.info("実行中: PC={d}, オペコード=0x{x:0>2}, スタック深度={d}", 
+            .{ context.pc, opcode, context.stack.depth() });
+    }
+
+    // ステップ2: ガス消費（簡易版 - 実際は命令ごとに異なる）
+    const gas_cost = switch (opcode) {
+        Opcode.ADD, Opcode.SUB, Opcode.MUL, Opcode.DIV => GasCost.SIMPLE_ARITHMETIC,
+        Opcode.SLOAD => GasCost.STORAGE_READ,
+        Opcode.SSTORE => GasCost.STORAGE_WRITE,
+        Opcode.JUMP, Opcode.JUMPI => GasCost.JUMP,
+        else => 1, // デフォルトコスト
+    };
+    
+    if (context.gas < gas_cost) {
+        context.error_msg = "ガス不足";
+        return EVMError.OutOfGas;
+    }
+    context.gas -= gas_cost;
+
+    // ステップ3: オペコードを解釈して実行
+    switch (opcode) {
+        Opcode.STOP => {
+            // 実行を正常終了
+            context.stopped = true;
+        },
+
+        // 算術演算
+        Opcode.ADD, Opcode.SUB, Opcode.MUL, Opcode.DIV => {
+            try executeArithmetic(context, opcode);
+            context.pc += 1;
+        },
+
+        Opcode.POP => {
+            // POP: スタックトップの値を削除
+            // 用途: 不要な値をスタックから取り除く
+            if (context.stack.depth() < 1) return EVMError.StackUnderflow;
+            _ = try context.stack.pop(); // 値を捨てる
             context.pc += 1;
         },
 
@@ -346,10 +415,14 @@ fn executeStep(context: *EvmContext) !void {
 
         // PUSH1: 1バイトをスタックにプッシュ
         Opcode.PUSH1 => {
+            // PUSH命令の仕組み：
+            // - PUSH1は次の1バイトをスタックに積む
+            // - PUSH2は次の2バイト、PUSH32は次の32バイトを積む
+            // - これによりコントラクトは定数値を扱える
             if (context.pc + 1 >= context.code.len) return EVMError.InvalidOpcode;
             const value = EVMu256.fromU64(context.code[context.pc + 1]);
             try context.stack.push(value);
-            context.pc += 2; // オペコード＋データで2バイト進む
+            context.pc += 2; // オペコード(1) + データ(1) = 2バイト進む
         },
 
         // DUP1: スタックトップの値を複製

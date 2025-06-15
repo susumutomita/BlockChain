@@ -4,6 +4,12 @@
 //! 他のノードとの接続確立、着信接続の待ち受け、ノード間の通信プロトコルの
 //! 処理機能を提供します。このモジュールはネットワーク全体にブロックチェーンデータを
 //! ブロードキャストし、同期することを可能にします。
+//!
+//! P2Pネットワークの基本概念：
+//! - ピア（Peer）: ネットワーク内の各ノード（参加者）
+//! - ブロードキャスト: 全ピアへのメッセージ送信
+//! - 同期: ノード間でブロックチェーンの状態を一致させる
+//! - 非中央集権: 特権的なサーバーが存在しない
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -11,13 +17,24 @@ const parser = @import("parser.zig");
 const blockchain = @import("blockchain.zig"); // トップレベルでblockchainをインポート
 const utils = @import("utils.zig"); // すでに関数内で使用されているので追加
 const main = @import("main.zig"); // Add this to access global variables
+const logger = @import("logger.zig"); // デバッグログ用
 
 /// 接続済みピアのグローバルリスト
 /// ネットワーク内の他のノードへのアクティブな接続を維持します
+/// 
+/// なぜグローバル変数を使うのか：
+/// - 複数のスレッドから同じピアリストにアクセスする必要がある
+/// - 新規接続時に既存のピアを参照できる
+/// - シンプルな実装で理解しやすい
 pub var peer_list = std.ArrayList(types.Peer).init(std.heap.page_allocator);
 
 /// 未送信のブロックを格納する待機キュー
 /// ピアが接続されていない場合に一時的にブロックを保存します
+/// 
+/// なぜ待機キューが必要なのか：
+/// - ノード起動直後はピアが接続されていない可能性がある
+/// - 重要なブロックやトランザクションを失わないため
+/// - ピア接続時に自動的に送信される
 pub var pending_blocks = std.ArrayList(types.Block).init(std.heap.page_allocator);
 pub var pending_evm_txs = std.ArrayList([]const u8).init(std.heap.page_allocator);
 
@@ -26,23 +43,37 @@ pub var pending_evm_txs = std.ArrayList([]const u8).init(std.heap.page_allocator
 /// 指定されたポートで着信接続を待機するTCPサーバーを作成します。
 /// 新しい接続ごとに、専用の通信スレッドを生成します。
 ///
+/// ネットワーク接続の流れ：
+/// 1. TCPソケットを作成し、指定ポートでリッスン開始
+/// 2. 新規接続を待機（ブロッキング）
+/// 3. 接続が来たらピアリストに追加
+/// 4. 待機中のデータがあれば新規ピアに送信
+/// 5. 専用スレッドで通信処理を開始
+///
 /// 引数:
 ///     port: リッスンするポート番号
 ///
 /// 注意:
 ///     この関数は独自のスレッドで無期限に実行されます
 pub fn listenLoop(port: u16) !void {
+    // ステップ1: ソケットアドレスを作成（0.0.0.0 = 全インターフェースで待機）
     var addr = try std.net.Address.resolveIp("0.0.0.0", port);
+    
+    // ステップ2: TCPリスナーを作成
     var listener = try addr.listen(.{});
-    defer listener.deinit();
+    defer listener.deinit(); // 関数終了時に自動的にリソースを解放
 
-    std.log.info("listen 0.0.0.0:{d}", .{port});
+    std.log.info("P2Pネットワークをポート {d} で待機中...", .{port});
 
+    // ステップ3: 無限ループで接続を待機
     while (true) {
+        // 新しい接続を受け入れる（ブロッキング）
         const conn = try listener.accept();
         const peer = types.Peer{ .address = conn.address, .stream = conn.stream };
+        
+        // ピアリストに追加
         try peer_list.append(peer);
-        std.log.info("Accepted connection from: {any}", .{conn.address});
+        std.log.info("新規ピア接続: {any} (現在のピア数: {d})", .{ conn.address, peer_list.items.len });
 
         // 待機中のブロックを新しいピアに送信
         if (pending_blocks.items.len > 0) {
@@ -78,21 +109,39 @@ pub fn listenLoop(port: u16) !void {
 /// 接続に失敗した場合、遅延後に再試行します。接続が確立されると、
 /// チェーン同期をリクエストします。
 ///
+/// 接続プロセス：
+/// 1. TCP接続を試行
+/// 2. 失敗した場合は5秒待って再試行（ネットワークの一時的な問題に対処）
+/// 3. 成功したらピアリストに追加
+/// 4. 待機中のデータを送信
+/// 5. チェーン同期をリクエスト
+///
+/// なぜ再接続を行うのか：
+/// - ネットワークは不安定で一時的な障害が発生する
+/// - ピアがまだ起動していない可能性がある
+/// - 接続を維持することでネットワークの堅牢性を向上
+///
 /// 引数:
 ///     addr: 接続するピアのネットワークアドレス
 ///
 /// 注意:
 ///     この関数は独自のスレッドで無期限に実行され、再接続を処理します
 pub fn connectToPeer(addr: std.net.Address) !void {
+    // 再接続の待機時間（秒）
+    const RECONNECT_DELAY_SECONDS = 5;
+    
     while (true) {
+        // ステップ1: TCP接続を試行
         const sock = std.net.tcpConnectToAddress(addr) catch |err| {
-            std.log.warn("Connection failed to {any}: {any}", .{ addr, err });
-            std.time.sleep(5 * std.time.ns_per_s); // 5秒待機してから再試行
+            std.log.warn("ピア接続失敗 {any}: {any} - {d}秒後に再試行", .{ addr, err, RECONNECT_DELAY_SECONDS });
+            std.time.sleep(RECONNECT_DELAY_SECONDS * std.time.ns_per_s);
             continue;
         };
 
-        std.log.info("Connected to peer: {any}", .{addr});
+        std.log.info("ピア接続成功: {any}", .{addr});
         const peer = types.Peer{ .address = addr, .stream = sock };
+        
+        // ステップ2: ピアリストに追加
         try peer_list.append(peer);
 
         // 待機中のブロックを新しいピアに送信
@@ -148,18 +197,38 @@ fn requestChain(peer: types.Peer) !void {
 /// オプションで、送信元のピアを除外することができます。
 /// ピアが存在しない場合、ブロックは将来の送信のために待機キューに追加されます。
 ///
+/// ブロードキャストの仕組み：
+/// 1. ブロックをJSON形式にシリアル化
+/// 2. 接続されているすべてのピアに送信
+/// 3. 送信元のピアは除外（無限ループ防止）
+/// 4. 送信失敗時は待機キューに保存
+///
+/// なぜブロードキャストが重要なのか：
+/// - ネットワーク全体でブロックチェーンの同期を保つ
+/// - 新しいブロックを即座に全ノードに伝播
+/// - 分散システムの一貫性を維持
+///
 /// 引数:
 ///     blk: ブロードキャストするブロック
 ///     from_peer: ブロードキャストから除外するオプションのソースピア
 pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
-    const payload = parser.serializeBlock(blk) catch return;
+    // ステップ1: ブロックをJSON形式にシリアル化
+    const payload = parser.serializeBlock(blk) catch {
+        std.log.err("ブロックのシリアル化に失敗しました", .{});
+        return;
+    };
+    
     var sent = false;
     var available_peers: usize = 0;
 
+    // ステップ2: すべてのピアに送信を試行
     for (peer_list.items) |peer| {
-        // 指定された場合、送信元のピアをスキップ
+        // 送信元のピアはスキップ（エコーバック防止）
         if (from_peer) |sender| {
-            if (peer.address.getPort() == sender.address.getPort()) continue;
+            if (peer.address.getPort() == sender.address.getPort()) {
+                logger.debugLog("送信元ピアをスキップ: {any}\n", .{peer.address});
+                continue;
+            }
         }
 
         available_peers += 1;
@@ -347,10 +416,77 @@ fn removePeerFromList(target: types.Peer) void {
     }
 }
 
+/// BLOCKメッセージを処理する
+///
+/// 新しいブロックを受信し、検証してチェーンに追加し、
+/// 他のピアにブロードキャストします。
+fn handleBlockMessage(msg: []const u8, from_peer: types.Peer) !void {
+    // JSONからブロックをパース
+    const blk = parser.parseBlockJson(msg) catch |err| {
+        std.log.err("ブロックのパースエラー from {any}: {any}", .{ from_peer.address, err });
+        return;
+    };
+
+    // コントラクト情報をログ出力
+    if (blk.contracts) |contracts| {
+        std.log.info("受信ブロックに{d}個のコントラクトが含まれています", .{contracts.count()});
+        var contract_it = contracts.iterator();
+        while (contract_it.next()) |entry| {
+            std.log.info("コントラクト: アドレス={s}, コード長={d}バイト", 
+                .{ entry.key_ptr.*, entry.value_ptr.*.len });
+        }
+    }
+
+    // チェーンにブロックを追加
+    blockchain.addBlock(blk);
+
+    // 他のピアにブロードキャスト（送信元を除く）
+    broadcastBlock(blk, from_peer);
+}
+
+/// EVMトランザクションメッセージを処理する
+///
+/// EVMトランザクションを受信し、実行して結果をログに記録します。
+fn handleEvmTxMessage(msg: []const u8, from_peer: types.Peer) !void {
+    const payload = msg;
+    std.log.debug("EVMトランザクション受信: {d}バイト", .{payload.len});
+
+    // EVMトランザクションをパース
+    var evm_tx = parser.parseTransactionJson(payload) catch |err| {
+        std.log.err("EVMトランザクションのパースエラー from {any}: {any}", .{ from_peer.address, err });
+        return;
+    };
+    
+    std.log.info("トランザクション詳細: タイプ={d}, 送信者={s}, 受信者={s}", 
+        .{ evm_tx.tx_type, evm_tx.sender, evm_tx.receiver });
+
+    // EVMトランザクションを処理
+    const result = blockchain.processEvmTransaction(&evm_tx) catch |err| {
+        std.log.err("EVMトランザクション処理エラー from {any}: {any}", .{ from_peer.address, err });
+        return;
+    };
+
+    // 処理結果をログに出力
+    blockchain.logEvmResult(&evm_tx, result) catch |err| {
+        std.log.err("EVMResult ログ出力エラー: {any}", .{err});
+    };
+}
+
 /// 種類に基づいて受信メッセージを処理する
 ///
 /// BLOCKやGET_CHAINメッセージなど、ピアからの異なるメッセージタイプを
 /// 解析して処理します。
+///
+/// メッセージタイプ：
+/// - "BLOCK:": 新しいブロックの受信
+/// - "GET_CHAIN": ブロックチェーン全体のリクエスト
+/// - "CHAIN_SYNC_COMPLETE": チェーン同期完了の通知
+/// - "EVM_TX:": EVMトランザクションの受信
+///
+/// 処理フロー：
+/// 1. メッセージのプレフィックスを確認
+/// 2. 対応するハンドラーを呼び出し
+/// 3. エラーがあればログに記録
 ///
 /// 引数:
 ///     msg: 改行区切りのない、メッセージの内容
@@ -360,26 +496,8 @@ fn removePeerFromList(target: types.Peer) void {
 ///     解析エラーまたは処理エラー
 fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
     if (std.mem.startsWith(u8, msg, "BLOCK:")) {
-        // BLOCKメッセージを処理
-        const blk = parser.parseBlockJson(msg[6..]) catch |err| {
-            std.log.err("Error parsing block from {any}: {any}", .{ from_peer.address, err });
-            return;
-        };
-
-        // コントラクト情報をログ出力
-        if (blk.contracts) |contracts| {
-            std.log.info("Received block contains {d} contracts", .{contracts.count()});
-            var contract_it = contracts.iterator();
-            while (contract_it.next()) |entry| {
-                std.log.info("Block contains contract at address: {s}, code length: {d} bytes", .{ entry.key_ptr.*, entry.value_ptr.*.len });
-            }
-        }
-
-        // チェーンにブロックを追加
-        blockchain.addBlock(blk);
-
-        // 他のピアにブロックをブロードキャスト
-        broadcastBlock(blk, from_peer);
+        // BLOCKメッセージを処理（6文字のプレフィックスをスキップ）
+        try handleBlockMessage(msg[6..], from_peer);
     } else if (std.mem.startsWith(u8, msg, "GET_CHAIN")) {
         // GET_CHAINメッセージを処理
         std.log.info("Received GET_CHAIN from {any}", .{from_peer.address});
@@ -468,34 +586,11 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
             }
         }
     } else if (std.mem.startsWith(u8, msg, "EVM_TX:")) {
-        std.log.info("<< handleMessage[行:{d}]: got EVM_TX message", .{@src().line});
-        const payload = msg["EVM_TX:".len..];
-        std.log.debug("<< raw payload[{d}バイト]: {s}", .{ payload.len, payload });
-
-        // EVMトランザクションメッセージを処理
-        std.log.info("解析開始: parseTransactionJson (行:{d})", .{@src().line + 1});
-        var evm_tx = parser.parseTransactionJson(payload) catch |err| {
-            std.log.err("Error parsing EVM transaction from {any}: {any} (at 行:{d})", .{ from_peer.address, err, @src().line });
-            return;
-        };
-        std.log.info("解析完了: トランザクションタイプ={d}, 送信者={s}, 受信者={s}", .{ evm_tx.tx_type, evm_tx.sender, evm_tx.receiver });
-
-        // EVMトランザクションを処理
-        std.log.info("処理開始: processEvmTransaction (行:{d})", .{@src().line + 1});
-        const result = blockchain.processEvmTransaction(&evm_tx) catch |err| {
-            std.log.err("Error processing EVM transaction from {any}: {any} (at 行:{d})", .{ from_peer.address, err, @src().line });
-            return;
-        };
-        std.log.info("処理完了: EVMトランザクション処理結果", .{});
-
-        // 処理結果をログに出力
-        std.log.info("ログ出力開始: logEvmResult (行:{d})", .{@src().line + 1});
-        blockchain.logEvmResult(&evm_tx, result) catch |err| {
-            std.log.err("Error logging EVM result: {any} (at 行:{d})", .{ err, @src().line });
-        };
-
-        // 受信したトランザクションは再ブロードキャストしない
-        // 無限ループを防止するため
+        // EVMトランザクションメッセージを処理（7文字のプレフィックスをスキップ）
+        try handleEvmTxMessage(msg["EVM_TX:".len..], from_peer);
+        
+        // 注意: 受信したトランザクションは再ブロードキャストしない
+        // 理由: 無限ループを防止するため
     } else {
         // 不明なメッセージを処理
         std.log.info("Unknown message from {any}: {s}", .{ from_peer.address, msg });
@@ -562,6 +657,13 @@ pub fn resolveHostPort(spec: []const u8) !std.net.Address {
 /// ピア接続から継続的に読み取り、メッセージを処理し、
 /// 切断を処理します。
 ///
+/// 処理フロー：
+/// 1. ストリームからデータを読み取る
+/// 2. 改行で区切られたメッセージを探す
+/// 3. 完全なメッセージがあれば処理
+/// 4. 不完全なメッセージはバッファに保持
+/// 5. 接続が切れるまで繰り返す
+///
 /// 引数:
 ///     peer: 通信するピア
 ///
@@ -573,8 +675,12 @@ fn peerCommunicationLoop(peer: types.Peer) !void {
         peer.stream.close();
     }
 
+    // メッセージ受信バッファのサイズ（4KB）
+    // 大きすぎるとメモリを無駄にし、小さすぎると大きなメッセージが処理できない
+    const MESSAGE_BUFFER_SIZE = 4096;
+    
     var reader = peer.stream.reader();
-    var buf: [4096]u8 = undefined; // 受信メッセージ用のバッファ
+    var buf: [MESSAGE_BUFFER_SIZE]u8 = undefined;
     var total_bytes: usize = 0;
 
     while (true) {

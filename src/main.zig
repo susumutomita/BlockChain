@@ -5,6 +5,13 @@
 //! ネットワーキングとユーザー操作用のスレッドの起動を行います。
 //! また、適合性テストを実行するためのサポートも提供します。
 //! EVMのバイトコード実行もサポートします。
+//!
+//! アプリケーションの主要機能：
+//! 1. P2Pノードとして動作（--listen, --connect）
+//! 2. スマートコントラクトのデプロイ（--deploy）
+//! 3. スマートコントラクトの呼び出し（--call）
+//! 4. EVMバイトコードの直接実行（--evm）
+//! 5. バイトコード解析（--analyze）
 
 const std = @import("std");
 const blockchain = @import("blockchain.zig");
@@ -16,12 +23,19 @@ const evm_types = @import("evm_types.zig");
 const utils = @import("utils.zig");
 
 // グローバル変数で保存しておく（p2p.zigから使用）
-pub var global_call_pending: bool = false;
-pub var global_contract_address: []const u8 = "";
-pub var global_evm_input: []const u8 = undefined;
-pub var global_gas_limit: usize = 0;
-pub var global_allocator: std.mem.Allocator = undefined;
-pub var global_sender_address: []const u8 = "";
+// 
+// なぜグローバル変数を使うのか：
+// - 非同期にチェーン同期後にコントラクト呼び出しを実行するため
+// - 複数のモジュール間で状態を共有する必要があるため
+// - シンプルな実装で教育的にわかりやすくするため
+// 
+// 実際のプロダクションコードでは、より洗練された状態管理を使用すべき
+pub var global_call_pending: bool = false;          // コントラクト呼び出しが保留中か
+pub var global_contract_address: []const u8 = "";   // 呼び出し対象のコントラクトアドレス
+pub var global_evm_input: []const u8 = undefined;   // EVMへの入力データ
+pub var global_gas_limit: usize = 0;                // ガス上限
+pub var global_allocator: std.mem.Allocator = undefined; // メモリアロケータ
+pub var global_sender_address: []const u8 = "";     // トランザクション送信者
 
 /// アプリケーションエントリーポイント
 ///
@@ -72,17 +86,21 @@ pub fn main() !void {
         return;
     }
 
+    // デフォルト値の定義（マジックナンバーを避ける）
+    const DEFAULT_GAS_LIMIT: usize = 1000000;  // 100万ガス（複雑な処理に十分）
+    const DEFAULT_SENDER_ADDRESS = "0x0000000000000000000000000000000000000000"; // ゼロアドレス
+    
     // EVMモード変数
     var evm_mode = false;
     var evm_bytecode: []const u8 = "";
     var evm_input: []const u8 = "";
-    var evm_gas_limit: usize = 1000000; // デフォルトガス上限
+    var evm_gas_limit: usize = DEFAULT_GAS_LIMIT;
 
     // ネットワークEVMトランザクションモード
     var deploy_mode = false;
     var call_mode = false;
     var contract_address: []const u8 = "";
-    var sender_address: []const u8 = "0x0000000000000000000000000000000000000000"; // デフォルト送信者アドレス
+    var sender_address: []const u8 = DEFAULT_SENDER_ADDRESS;
 
     var self_port: u16 = 0;
     var known_peers = std.ArrayList([]const u8).init(gpa);
@@ -281,27 +299,36 @@ fn runEvm(allocator: std.mem.Allocator, bytecode_hex: []const u8, input_hex: []c
 }
 
 /// コントラクトをブロックチェーン上にデプロイする
+/// 
+/// デプロイプロセス：
+/// 1. 16進数のバイトコードをバイナリに変換
+/// 2. デプロイトランザクションを作成
+/// 3. P2Pネットワークにブロードキャスト
+/// 4. ローカルでも実行して即座に利用可能にする
 fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contract_address: []const u8, gas_limit: usize, sender_address: []const u8) !void {
-    std.log.info("コントラクトをブロックチェーンにデプロイしています...", .{});
+    std.log.info("=== スマートコントラクトのデプロイ開始 ===", .{});
 
-    // 16進数文字列をバイト配列に変換
+    // ステップ1: 16進数文字列をバイト配列に変換
+    // なぜ変換が必要か: EVMはバイナリ形式のバイトコードを実行する
     const bytecode = try utils.hexToBytes(allocator, bytecode_hex);
     defer allocator.free(bytecode);
 
-    std.log.info("バイトコード: 0x{s}", .{try utils.bytesToHex(allocator, bytecode)});
+    // デプロイ情報の表示
+    std.log.info("バイトコードサイズ: {d}バイト", .{bytecode.len});
     std.log.info("デプロイ先アドレス: {s}", .{contract_address});
     std.log.info("送信者アドレス: {s}", .{sender_address});
     std.log.info("ガス上限: {d}", .{gas_limit});
 
-    // トランザクションを作成
+    // ステップ2: デプロイトランザクションを作成
+    const DEFAULT_GAS_PRICE = 10; // Gweiではなく、簡易的な単位
     const tx = types.Transaction{
         .sender = sender_address,
         .receiver = contract_address,
-        .amount = 0,
-        .tx_type = 1, // コントラクトデプロイ
-        .evm_data = bytecode,
+        .amount = 0,                    // デプロイ時は通常0
+        .tx_type = 1,                   // 1 = コントラクトデプロイ
+        .evm_data = bytecode,           // デプロイするコード
         .gas_limit = gas_limit,
-        .gas_price = 10, // デフォルトのガス価格を設定
+        .gas_price = DEFAULT_GAS_PRICE,
     };
 
     // P2Pネットワーク上でトランザクションをブロードキャスト
