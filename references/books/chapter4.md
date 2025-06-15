@@ -22,6 +22,25 @@ free: true
 
 それでは、このPoWのアイデアを使って、ブロックに**マイニング(nonce探し)**の処理を追加しましょう。
 
+```mermaid
+flowchart TB
+    Start([開始]) --> Init[nonce = 0]
+    Init --> Calc[ハッシュ計算]
+    Calc --> Check{難易度条件を<br/>満たすか？}
+    Check -->|はい| Save[ハッシュを保存]
+    Check -->|いいえ| Inc[nonce++]
+    Inc --> Calc
+    Save --> End([終了])
+    
+    style Start fill:#f9f,stroke:#333,stroke-width:2px
+    style End fill:#f9f,stroke:#333,stroke-width:2px
+    style Check fill:#ffd,stroke:#333,stroke-width:2px
+    style Save fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+**図4-1: マイニングプロセスのフローチャート**  
+マイニングは、nonceを0から始めて条件を満たすハッシュが見つかるまで繰り返す処理です。条件を満たさない場合はnonceをインクリメントして再計算します。
+
 ### nonceフィールドの追加
 
 Block構造体に`nonce`(ナンス)を追加します。
@@ -248,6 +267,28 @@ node3 exited with code 0
 今のコード状態では、nonceを増やす処理は無いので、いつ見てもnonce=0です。
 次に、実際のPoWマイニングを簡単に再現するには以下のような関数を導入します。
 マイニングでは、`nonce`の値を0から始めて1ずつ増やしながら繰り返しハッシュを計算し、条件に合致するハッシュが出るまでループします。
+
+```mermaid
+graph LR
+    subgraph Nonceとハッシュ値の関係
+        B1[ブロックデータ<br/>nonce: 0] --> H1[ハッシュ: 0x7a9b...]
+        B2[ブロックデータ<br/>nonce: 1] --> H2[ハッシュ: 0xf2c3...]
+        B3[ブロックデータ<br/>nonce: 2] --> H3[ハッシュ: 0x8d4e...]
+        B4[ブロックデータ<br/>nonce: ...] --> H4[ハッシュ: ...]
+        B5[ブロックデータ<br/>nonce: 12345] --> H5[ハッシュ: 0x0000...✓]
+    end
+    
+    style B1 fill:#bbf,stroke:#333,stroke-width:1px
+    style B2 fill:#bbf,stroke:#333,stroke-width:1px
+    style B3 fill:#bbf,stroke:#333,stroke-width:1px
+    style B4 fill:#bbf,stroke:#333,stroke-width:1px
+    style B5 fill:#bfb,stroke:#333,stroke-width:2px
+    style H5 fill:#ffd,stroke:#333,stroke-width:2px
+```
+
+**図4-2: Nonceとハッシュ値の関係図**  
+nonceの値を変えるだけで、ブロック全体のハッシュ値が完全に変わります。マイニングは、条件を満たすハッシュ（先頭が0で始まる）が見つかるまでnonceを試し続ける作業です。
+
 条件とは今回は簡単のため「ハッシュ値の先頭のバイトが一定数0であること」と定義しましょう。例えば難易度を`difficulty = 2`とした場合、「ハッシュ値配列の先頭2バイトが0×00であること」とします。
 (これは16進数で「0000....」と始まるハッシュという意味で、先頭16ビットがゼロという条件です)。
 
@@ -294,6 +335,24 @@ fn mineBlock(block: *Block, difficulty: u8) void {
 
 - `difficulty` は先頭に何バイト `0x00` が並んでいれば良いかを指定します。
 - `difficulty = 2` でも場合によっては何万回とハッシュ計算が繰り返されるため、テスト時は**値を小さめ**にするのがおすすめです。
+
+```mermaid
+graph TB
+    subgraph 難易度調整の概念
+        D1[難易度1<br/>0x00...] --> C1[確率: 1/256<br/>約256回の試行]
+        D2[難易度2<br/>0x0000...] --> C2[確率: 1/65,536<br/>約65,536回の試行]
+        D3[難易度3<br/>0x000000...] --> C3[確率: 1/16,777,216<br/>約1,677万回の試行]
+        D4[難易度4<br/>0x00000000...] --> C4[確率: 1/4,294,967,296<br/>約43億回の試行]
+    end
+    
+    style D1 fill:#bfb,stroke:#333,stroke-width:2px
+    style D2 fill:#ffb,stroke:#333,stroke-width:2px
+    style D3 fill:#fbb,stroke:#333,stroke-width:2px
+    style D4 fill:#f66,stroke:#333,stroke-width:2px
+```
+
+**図4-3: 難易度調整の概念図**  
+難易度が1増えるごとに、条件を満たすハッシュを見つける確率は256分の1になります。これにより、必要な計算回数は指数関数的に増加し、マイニングの難易度を調整できます。
 
 `meetsDifficulty`はハッシュ配列の先頭から指定バイト数をチェックし、すべて`0x00`ならtrueを返す関数です。`mineBlock`では無限ループの中で`calculateHash`を呼び出し、難易度条件を満たしたらループを抜けます。見つからなければ`nonce`を増やして再度ハッシュ計算、という流れです。
 

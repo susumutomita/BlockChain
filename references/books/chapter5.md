@@ -36,6 +36,85 @@ src/
 └── blockchain.zig    # PoWロジック、calculateHash, mineBlock, etc.
 ```
 
+#### モジュール構成図
+
+以下の図は、各ファイルの役割とモジュール構成を示しています。
+
+```mermaid
+graph TD
+    subgraph "エントリポイント"
+        main[main.zig<br/>アプリケーション起動]
+    end
+    
+    subgraph "ブロックチェインコア"
+        blockchain[blockchain.zig<br/>PoWロジック・マイニング]
+    end
+    
+    subgraph "データ定義層"
+        types[types.zig<br/>基本データ構造]
+        errors[errors.zig<br/>エラー定義]
+    end
+    
+    subgraph "ユーティリティ層"
+        utils[utils.zig<br/>ヘルパー関数]
+        logger[logger.zig<br/>ログ出力]
+    end
+    
+    main --> blockchain
+    main --> types
+    blockchain --> types
+    blockchain --> logger
+    blockchain --> utils
+    utils --> errors
+    
+    style main fill:#f9f,stroke:#333,stroke-width:2px
+    style blockchain fill:#9ff,stroke:#333,stroke-width:2px
+    style types fill:#ff9,stroke:#333,stroke-width:2px
+    style errors fill:#ff9,stroke:#333,stroke-width:2px
+    style utils fill:#f96,stroke:#333,stroke-width:2px
+    style logger fill:#f96,stroke:#333,stroke-width:2px
+```
+
+#### ファイル間の依存関係図
+
+ファイル分割後の依存関係を詳細に示した図です。
+
+```mermaid
+graph LR
+    subgraph "アプリケーション層"
+        main.zig
+    end
+    
+    subgraph "ドメイン層"
+        blockchain.zig
+        parser.zig[parser.zig<br/>将来追加予定]
+    end
+    
+    subgraph "基盤層"
+        types.zig
+        errors.zig
+        utils.zig
+        logger.zig
+    end
+    
+    main.zig -->|import| blockchain.zig
+    main.zig -->|import| types.zig
+    blockchain.zig -->|import| types.zig
+    blockchain.zig -->|import| logger.zig
+    blockchain.zig -->|import| utils.zig
+    utils.zig -->|import| errors.zig
+    parser.zig -.->|import| types.zig
+    parser.zig -.->|import| errors.zig
+    
+    style main.zig fill:#e6f3ff,stroke:#4169e1,stroke-width:2px
+    style blockchain.zig fill:#ffe6e6,stroke:#dc143c,stroke-width:2px
+    style types.zig fill:#e6ffe6,stroke:#228b22,stroke-width:2px
+    style errors.zig fill:#e6ffe6,stroke:#228b22,stroke-width:2px
+    style utils.zig fill:#fff8dc,stroke:#daa520,stroke-width:2px
+    style logger.zig fill:#fff8dc,stroke:#daa520,stroke-width:2px
+    style parser.zig fill:#f0f0f0,stroke:#999,stroke-width:2px,stroke-dasharray: 5 5
+```
+
 ## データ型定義の実装
 
 ```types.zig

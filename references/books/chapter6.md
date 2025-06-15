@@ -35,6 +35,37 @@ Zigには低レベルのソケットAPIが用意されており、`std.net`モ�
 
 - **クライアント側 (別のノード)**: 接続したい相手のIPアドレスとポートを指定し、`std.net.tcpConnectToAddress()`でサーバに接続します ([Zig Common Tasks](https://renatoathaydes.github.io/zig-common-tasks/#:~:text=pub%20fn%20main%28%29%20%21void%20,%7D))。接続が確立したら、ソケットに対してデータの読み書きができます。
 
+#### TCP/IPソケット通信の図
+
+以下の図は、TCP/IPソケット通信の基本的な流れを示しています。
+
+```mermaid
+sequenceDiagram
+    participant Server as サーバー<br/>(ノードA)
+    participant Client as クライアント<br/>(ノードB)
+    
+    Note over Server: ポート8080で待機
+    Server->>Server: socket()
+    Server->>Server: bind(0.0.0.0:8080)
+    Server->>Server: listen()
+    Server->>Server: accept() [ブロッキング]
+    
+    Note over Client: サーバーに接続
+    Client->>Client: socket()
+    Client->>Server: connect(127.0.0.1:8080)
+    Server-->>Client: 接続確立
+    
+    Client->>Server: send("Hello from NodeB")
+    Server->>Server: recv()
+    Note over Server: メッセージ受信:<br/>"Hello from NodeB"
+    
+    Server->>Client: send("ACK")
+    Client->>Client: recv()
+    
+    Client->>Client: close()
+    Server->>Server: close()
+```
+
 ```zig
 const std = @import("std");
 
@@ -119,6 +150,45 @@ info: ノードA: メッセージ内容: Hello from NodeB
 
 - **クリーンアップ**: 通信が終わったら`connection.stream.close()`でソケットを閉じます。また、サーバソケット自体も`listener.deinit()`で閉じる必要があります（上記では`defer`で自動クローズ指定）。適切にクローズしないと、プログラム終了後もしばらくポートが「使用中」となり再起動時に接続エラーが発生します。
 
+#### サーバー・クライアントモデル図
+
+P2P通信の基礎となるサーバー・クライアントモデルを示します。
+
+```mermaid
+graph TB
+    subgraph "従来のサーバー・クライアントモデル"
+        Server[サーバー<br/>ポート8080]
+        Client1[クライアント1]
+        Client2[クライアント2]
+        Client3[クライアント3]
+        
+        Client1 -->|接続要求| Server
+        Client2 -->|接続要求| Server
+        Client3 -->|接続要求| Server
+        Server -.->|応答| Client1
+        Server -.->|応答| Client2
+        Server -.->|応答| Client3
+    end
+    
+    subgraph "P2Pモデル（各ノードがサーバー兼クライアント）"
+        NodeA[ノードA<br/>ポート8080]
+        NodeB[ノードB<br/>ポート8081]
+        NodeC[ノードC<br/>ポート8082]
+        NodeD[ノードD<br/>ポート8083]
+        
+        NodeA <-->|双方向通信| NodeB
+        NodeB <-->|双方向通信| NodeC
+        NodeC <-->|双方向通信| NodeD
+        NodeD <-->|双方向通信| NodeA
+    end
+    
+    style Server fill:#ff9999,stroke:#333,stroke-width:2px
+    style NodeA fill:#99ccff,stroke:#333,stroke-width:2px
+    style NodeB fill:#99ccff,stroke:#333,stroke-width:2px
+    style NodeC fill:#99ccff,stroke:#333,stroke-width:2px
+    style NodeD fill:#99ccff,stroke:#333,stroke-width:2px
+```
+
 ## ステップ2: ノード同士の接続と基本メッセージ交換
 
 先ほど紹介したサーバ(A)・クライアント(B)という一対のやり取りを、ブロックチェインのP2Pネットワークではより柔軟な相互接続に拡張します。実際のブロックチェインP2Pネットワークでは、各ノード（ピア）が複数の隣接ノードと接続し合い、ブロックやトランザクションなどのデータを中継・共有します。そのため、ノードの実装には以下の2つの機能が必要になります。
@@ -136,6 +206,38 @@ info: ノードA: メッセージ内容: Hello from NodeB
 •これにより互いに相手のIDを認識したら、その後はブロックやトランザクションの同期メッセージをやりとりする。
 
 実際のBitcoinプロトコルでも、接続直後にversionメッセージを交換し、続いてverack（承認応答）のやりとりを行う「ハンドシェイク」があります（詳しくは[こちら](https://learnmeabitcoin.com/technical/networking/)参照）。ここではあくまでもシンプルな例として、「HELLO」で始める方法を示しているだけです。
+
+#### メッセージフォーマット図
+
+P2P通信で使用するメッセージフォーマットの例を示します。
+
+```mermaid
+graph LR
+    subgraph "メッセージ構造"
+        direction TB
+        Message[メッセージ全体]
+        Message --> Type[タイプ<br/>HELLO/BLOCK/TX]
+        Message --> Payload[ペイロード<br/>データ本体]
+    end
+    
+    subgraph "メッセージ例"
+        direction TB
+        Hello["HELLO NodeA"]
+        Block["BLOCK:{index:1,data:...}"]
+        Transaction["TX:{from:Alice,to:Bob,amount:100}"]
+    end
+    
+    Type -.->|例| Hello
+    Type -.->|例| Block
+    Type -.->|例| Transaction
+    
+    style Message fill:#f9f,stroke:#333,stroke-width:2px
+    style Type fill:#9ff,stroke:#333,stroke-width:2px
+    style Payload fill:#9ff,stroke:#333,stroke-width:2px
+    style Hello fill:#ff9,stroke:#333,stroke-width:1px
+    style Block fill:#ff9,stroke:#333,stroke-width:1px
+    style Transaction fill:#ff9,stroke:#333,stroke-width:1px
+```
 
 以下のコードでは、サーバーモードとクライアントモードを起動引数で切り替え、クライアント側がサーバーに接続してメッセージ送信し、サーバー側が受信・表示するところまでを実装しています。
 

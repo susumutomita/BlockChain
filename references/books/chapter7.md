@@ -7,6 +7,42 @@ free: true
 
 前章でP2Pがどのように動作するのかを理解し、ノード間でのメッセージ交換ができるようになりました。分散型のブロックチェインを構築するには、複数のノード間でブロック情報を共有する仕組みが不可欠です。これまでにローカルにブロックチェインを構築できましたが、このままでは各ノードが別々のチェインを持つだけで、ネットワーク全体で一貫した台帳を保つことができません。そのためここからは、ブロックチェインのデータをネットワーク全体で共有する仕組みを実装します。ノードが新しいブロックを生成した際、それを他のノードに伝え、全体で同じブロックチェインを維持することが重要です。このステップでは、ブロックのやり取りをするためのメッセージフォーマットを定義し、ノード間でブロックを共有する仕組みを構築します。
 
+### ノード間のブロック共有フロー
+
+以下の図は、ノード間でブロックが共有される基本的な流れを示しています。
+
+```mermaid
+sequenceDiagram
+    participant NodeA as ノードA<br/>(マイナー)
+    participant NodeB as ノードB
+    participant NodeC as ノードC
+    participant NodeD as ノードD
+    
+    Note over NodeA: 新しいブロックを<br/>マイニング成功
+    NodeA->>NodeA: mineBlock()
+    NodeA->>NodeA: addBlock()
+    
+    NodeA->>NodeB: BLOCK:{新しいブロック}
+    NodeA->>NodeC: BLOCK:{新しいブロック}
+    
+    Note over NodeB: ブロック受信・検証
+    NodeB->>NodeB: verifyBlockPow()
+    NodeB->>NodeB: addBlock()
+    
+    Note over NodeC: ブロック受信・検証
+    NodeC->>NodeC: verifyBlockPow()
+    NodeC->>NodeC: addBlock()
+    
+    NodeB->>NodeD: BLOCK:{新しいブロック}
+    NodeC->>NodeD: BLOCK:{新しいブロック}
+    
+    Note over NodeD: ブロック受信・検証
+    NodeD->>NodeD: verifyBlockPow()
+    NodeD->>NodeD: addBlock()
+    
+    Note over NodeA,NodeB,NodeC,NodeD: 全ノードが同じブロックを保持
+```
+
 ポイントを整理すると、ネットワーク対応により以下が可能になります。
 
 - ブロックの伝播: あるノードで生成（マイニング）されたブロックをネットワーク内の他ノードへ配信し、全ノードのブロックチェインを同期させる。これによりPoWで得たブロックにネットワーク上の意味を持たせます。
@@ -121,6 +157,37 @@ pub const ConnHandler = struct {
 - トランザクション配列のJSON変換: ブロック内のトランザクション一覧（transactions）をJSON文字列にシリアライズする関数を作ります。逆にJSONからトランザクション配列を構築する処理も行います。
 - ブロック全体のシリアライズ: ブロック構造体→JSON文字列への変換関数を実装します。
 - ブロックJSONのパース: JSON文字列→ブロック構造体への変換関数（parseBlockJson）を実装します。
+
+#### JSONメッセージ構造
+
+ブロックデータをJSON形式でシリアライズした場合の構造を示します。
+
+```mermaid
+graph TD
+    subgraph "ブロックJSONメッセージ"
+        Root[ブロックJSON]
+        Root --> Index["index: 1"]
+        Root --> Timestamp["timestamp: 1672531200"]
+        Root --> Nonce["nonce: 1924"]
+        Root --> Data["data: &quot;Hello, Blockchain!&quot;"]
+        Root --> PrevHash["prev_hash: &quot;000057e2...&quot;"]
+        Root --> Hash["hash: &quot;0000a0c6...&quot;"]
+        Root --> Transactions[transactions]
+        
+        Transactions --> TX1["{ sender: &quot;Alice&quot;,<br/>receiver: &quot;Bob&quot;,<br/>amount: 100 }"]
+        Transactions --> TX2["{ sender: &quot;Charlie&quot;,<br/>receiver: &quot;Dave&quot;,<br/>amount: 50 }"]
+    end
+    
+    subgraph "ネットワークメッセージ"
+        Message["BLOCK:{...JSON...}"]
+    end
+    
+    Message -.->|含む| Root
+    
+    style Root fill:#f9f,stroke:#333,stroke-width:2px
+    style Message fill:#9ff,stroke:#333,stroke-width:2px
+    style Transactions fill:#ff9,stroke:#333,stroke-width:1px
+```
 
 それでは、parser.zigにこれらの関数群を実装していきます。まずはヘルパーとなる16進変換とトランザクション配列のシリアライズ関数です。
 
@@ -937,6 +1004,132 @@ node1  | debug: Transactions field is directly an array. end transactions=array_
 node1  | debug: Block info: index=1, timestamp=1746057682, prev_hash={ 0, 0, 208, 15, 153, 34, 92, 210, 173, 179, 8, 86, 49, 69, 106, 142, 163, 98, 210, 51, 170, 150, 92, 180, 140, 13, 143, 139, 72, 138, 144, 34 }, transactions=array_list.ArrayListAligned(types.Transaction,null){ .items = {  }, .capacity = 0, .allocator = mem.Allocator{ .ptr = anyopaque@0, .vtable = mem.Allocator.VTable{ .alloc = fn (*anyopaque, usize, mem.Alignment, usize) ?[*]u8@1164a00, .resize = fn (*anyopaque, []u8, mem.Alignment, usize, usize) bool@1164fd0, .remap = fn (*anyopaque, []u8, mem.Alignment, usize, usize) ?[*]u8@1165200, .free = fn (*anyopaque, []u8, mem.Alignment, usize) void@1165250 } } } nonce=73344, data=hi, hash={ 0, 0, 163, 182, 49, 162, 163, 42, 221, 3, 187, 151, 52, 112, 226, 74, 133, 242, 255, 148, 96, 17, 33, 217, 64, 212, 190, 114, 1, 118, 135, 47 }
 node1  | debug: parseBlockJson end
 node1  | info: Added new block index=1, nonce=73344, hash={ 0, 0, a3, b6, 31, a2, a3, 2a, dd, 3, bb, 97, 34, 70, e2, 4a, 85, f2, ff, 94, 60, 11, 21, d9, 40, d4, be, 72, 1, 76, 87, 2f }
+```
+
+### ゴシッププロトコルの概念図
+
+P2Pネットワークでブロックが伝播する仕組みを示します。
+
+```mermaid
+graph TB
+    subgraph "初期状態"
+        A1[ノードA<br/>新ブロック生成]
+        B1[ノードB]
+        C1[ノードC]
+        D1[ノードD]
+        E1[ノードE]
+        
+        A1 -.-> B1
+        A1 -.-> C1
+        B1 -.-> D1
+        C1 -.-> E1
+        D1 -.-> E1
+    end
+    
+    subgraph "第1段階"
+        A2[ノードA]
+        B2[ノードB<br/>ブロック受信]
+        C2[ノードC<br/>ブロック受信]
+        D2[ノードD]
+        E2[ノードE]
+        
+        A2 -->|BLOCK| B2
+        A2 -->|BLOCK| C2
+        B2 -.-> D2
+        C2 -.-> E2
+        D2 -.-> E2
+    end
+    
+    subgraph "第2段階"
+        A3[ノードA]
+        B3[ノードB]
+        C3[ノードC]
+        D3[ノードD<br/>ブロック受信]
+        E3[ノードE<br/>ブロック受信]
+        
+        A3 -.-> B3
+        A3 -.-> C3
+        B3 -->|BLOCK| D3
+        C3 -->|BLOCK| E3
+        D3 -.-> E3
+    end
+    
+    subgraph "最終状態"
+        A4[ノードA]
+        B4[ノードB]
+        C4[ノードC]
+        D4[ノードD]
+        E4[ノードE]
+        
+        A4 -.-> B4
+        A4 -.-> C4
+        B4 -.-> D4
+        C4 -.-> E4
+        D4 -->|BLOCK| E4
+    end
+    
+    style A1 fill:#ff9999,stroke:#333,stroke-width:2px
+    style B2 fill:#99ff99,stroke:#333,stroke-width:2px
+    style C2 fill:#99ff99,stroke:#333,stroke-width:2px
+    style D3 fill:#99ff99,stroke:#333,stroke-width:2px
+    style E3 fill:#99ff99,stroke:#333,stroke-width:2px
+    style A4 fill:#99ccff,stroke:#333,stroke-width:2px
+    style B4 fill:#99ccff,stroke:#333,stroke-width:2px
+    style C4 fill:#99ccff,stroke:#333,stroke-width:2px
+    style D4 fill:#99ccff,stroke:#333,stroke-width:2px
+    style E4 fill:#99ccff,stroke:#333,stroke-width:2px
+```
+
+### P2Pネットワークトポロジー
+
+ブロックチェインネットワークの典型的な接続パターンを示します。
+
+```mermaid
+graph LR
+    subgraph "メッシュ型トポロジー"
+        M1[ノード1]
+        M2[ノード2]
+        M3[ノード3]
+        M4[ノード4]
+        M5[ノード5]
+        
+        M1 <--> M2
+        M1 <--> M3
+        M1 <--> M4
+        M2 <--> M3
+        M2 <--> M5
+        M3 <--> M4
+        M3 <--> M5
+        M4 <--> M5
+    end
+    
+    subgraph "部分接続型トポロジー"
+        P1[ノード1]
+        P2[ノード2]
+        P3[ノード3]
+        P4[ノード4]
+        P5[ノード5]
+        P6[ノード6]
+        
+        P1 <--> P2
+        P1 <--> P3
+        P2 <--> P4
+        P3 <--> P5
+        P4 <--> P6
+        P5 <--> P6
+    end
+    
+    style M1 fill:#99ccff,stroke:#333,stroke-width:2px
+    style M2 fill:#99ccff,stroke:#333,stroke-width:2px
+    style M3 fill:#99ccff,stroke:#333,stroke-width:2px
+    style M4 fill:#99ccff,stroke:#333,stroke-width:2px
+    style M5 fill:#99ccff,stroke:#333,stroke-width:2px
+    style P1 fill:#ffcc99,stroke:#333,stroke-width:2px
+    style P2 fill:#ffcc99,stroke:#333,stroke-width:2px
+    style P3 fill:#ffcc99,stroke:#333,stroke-width:2px
+    style P4 fill:#ffcc99,stroke:#333,stroke-width:2px
+    style P5 fill:#ffcc99,stroke:#333,stroke-width:2px
+    style P6 fill:#ffcc99,stroke:#333,stroke-width:2px
 ```
 
 ### まとめ

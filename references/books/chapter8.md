@@ -183,6 +183,43 @@ sequenceDiagram
     L->>K: accept() (loop)
 ```
 
+### チェーン同期のシーケンス図
+
+新しいノードがネットワークに参加してチェーンを同期する流れを示します。
+
+```mermaid
+sequenceDiagram
+    participant NewNode as 新規ノード
+    participant ExistingNode as 既存ノード
+    participant Network as ネットワーク
+    
+    Note over NewNode: ノード起動
+    NewNode->>ExistingNode: connect()
+    ExistingNode-->>NewNode: 接続確立
+    
+    NewNode->>ExistingNode: GET_CHAIN
+    Note over ExistingNode: チェーン全体を送信
+    
+    loop 各ブロックごと
+        ExistingNode->>NewNode: BLOCK:{block_0}
+        NewNode->>NewNode: verifyBlockPow()
+        NewNode->>NewNode: addBlock()
+        
+        ExistingNode->>NewNode: BLOCK:{block_1}
+        NewNode->>NewNode: verifyBlockPow()
+        NewNode->>NewNode: addBlock()
+        
+        ExistingNode->>NewNode: BLOCK:{block_n}
+        NewNode->>NewNode: verifyBlockPow()
+        NewNode->>NewNode: addBlock()
+    end
+    
+    Note over NewNode: チェーン同期完了
+    
+    NewNode->>Network: 他のノードに接続
+    Note over NewNode,Network: 通常のP2P通信開始
+```
+
 ピアを管理するのに必要な関数を追加します。
 
 ```p2p.zig
@@ -321,6 +358,54 @@ flowchart LR
     send --> comm[peerCommunicationLoop]
     comm -->|disconnect| Retry
     Retry -->|sleep 5s| Start
+```
+
+### 最長チェーンルールの図解
+
+ブロックチェインのフォーク時に最長チェーンを選択するルールを示します。
+
+```mermaid
+graph TB
+    subgraph "フォーク発生前"
+        Genesis1[ジェネシスブロック]
+        Block1A[ブロック1]
+        Block2A[ブロック2]
+        
+        Genesis1 --> Block1A
+        Block1A --> Block2A
+    end
+    
+    subgraph "フォーク発生"
+        Genesis2[ジェネシスブロック]
+        Block1B[ブロック1]
+        Block2B[ブロック2]
+        Block3A[ブロック3A]
+        Block3B[ブロック3B]
+        
+        Genesis2 --> Block1B
+        Block1B --> Block2B
+        Block2B --> Block3A
+        Block2B --> Block3B
+    end
+    
+    subgraph "最長チェーン選択"
+        Genesis3[ジェネシスブロック]
+        Block1C[ブロック1]
+        Block2C[ブロック2]
+        Block3C[ブロック3A]
+        Block4C[ブロック4]
+        Block3D[ブロック3B]
+        
+        Genesis3 --> Block1C
+        Block1C --> Block2C
+        Block2C --> Block3C
+        Block3C --> Block4C
+        Block2C -.-> Block3D
+        
+        style Block3D fill:#ffcccc,stroke:#ff0000,stroke-width:2px,stroke-dasharray: 5 5
+        style Block3C fill:#ccffcc,stroke:#00ff00,stroke-width:2px
+        style Block4C fill:#ccffcc,stroke:#00ff00,stroke-width:2px
+    end
 ```
 
 ### broadcastBlock — ゴシップのコア
@@ -1276,6 +1361,63 @@ node1  |   (no transactions)
 node1  | Hash       : 00000d8ec77d808b0d3c9633590f12e6100987029ebd90c209d9896592eaba42
 node1  |
 node1  | ---------------------------
+```
+
+### 双方向通信のアーキテクチャ
+
+P2P通信における双方向通信の構造を示します。
+
+```mermaid
+graph TB
+    subgraph "ノードA"
+        A_Listen[リスナースレッド<br/>ポート8080]
+        A_Client1[クライアントスレッド1<br/>→ノードBへ]
+        A_Client2[クライアントスレッド2<br/>→ノードCへ]
+        A_Handler1[ハンドラースレッド1<br/>ノードBから]
+        A_Handler2[ハンドラースレッド2<br/>ノードCから]
+        A_PeerList[ピアリスト]
+        
+        A_Listen --> A_Handler1
+        A_Listen --> A_Handler2
+        A_Client1 --> A_PeerList
+        A_Client2 --> A_PeerList
+        A_Handler1 --> A_PeerList
+        A_Handler2 --> A_PeerList
+    end
+    
+    subgraph "ノードB"
+        B_Listen[リスナースレッド<br/>ポート8081]
+        B_Client[クライアントスレッド<br/>→ノードAへ]
+        B_Handler[ハンドラースレッド<br/>ノードAから]
+        B_PeerList[ピアリスト]
+        
+        B_Listen --> B_Handler
+        B_Client --> B_PeerList
+        B_Handler --> B_PeerList
+    end
+    
+    subgraph "ノードC"
+        C_Listen[リスナースレッド<br/>ポート8082]
+        C_Client[クライアントスレッド<br/>→ノードAへ]
+        C_Handler[ハンドラースレッド<br/>ノードAから]
+        C_PeerList[ピアリスト]
+        
+        C_Listen --> C_Handler
+        C_Client --> C_PeerList
+        C_Handler --> C_PeerList
+    end
+    
+    A_Client1 -.->|TCP接続| B_Listen
+    A_Client2 -.->|TCP接続| C_Listen
+    B_Client -.->|TCP接続| A_Listen
+    C_Client -.->|TCP接続| A_Listen
+    
+    style A_Listen fill:#ff9999,stroke:#333,stroke-width:2px
+    style B_Listen fill:#ff9999,stroke:#333,stroke-width:2px
+    style C_Listen fill:#ff9999,stroke:#333,stroke-width:2px
+    style A_PeerList fill:#99ff99,stroke:#333,stroke-width:2px
+    style B_PeerList fill:#99ff99,stroke:#333,stroke-width:2px
+    style C_PeerList fill:#99ff99,stroke:#333,stroke-width:2px
 ```
 
 ## まとめ

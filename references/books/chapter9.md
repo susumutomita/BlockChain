@@ -32,6 +32,37 @@ EVMの命令（オペコード）は1バイト長で表現され、例えば`0x0
 
 以上がEVMの基本的な仕組みです。Ethereumクライアント（例：GethやNethermindなど）には各々EVM実装が内蔵されていますが、全てEthereumの公式仕様（イエローペーパー）に従う必要があります。このチュートリアルでは、このEVMの一部機能をZigで再現し、簡単なスマートコントラクトのバイトコードを実行してみます。
 
+```mermaid
+graph TB
+    subgraph EVMアーキテクチャ
+        PC[プログラムカウンタ<br/>PC]
+        CODE[バイトコード<br/>0x6080...]
+        
+        subgraph メモリ空間
+            STACK[スタック<br/>最大1024要素<br/>各256ビット]
+            MEM[メモリ<br/>一時的<br/>バイト配列]
+            STORAGE[ストレージ<br/>永続的<br/>key-value]
+        end
+        
+        GAS[ガスカウンタ]
+        
+        PC --> CODE
+        CODE --> STACK
+        STACK <--> MEM
+        MEM <--> STORAGE
+        CODE --> GAS
+    end
+    
+    style PC fill:#ffd,stroke:#333,stroke-width:2px
+    style STACK fill:#bbf,stroke:#333,stroke-width:2px
+    style MEM fill:#bfb,stroke:#333,stroke-width:2px
+    style STORAGE fill:#fbf,stroke:#333,stroke-width:2px
+    style GAS fill:#fbb,stroke:#333,stroke-width:2px
+```
+
+**図9-1: スタックマシンの動作原理**  
+EVMはスタックベースの仮想マシンで、全ての演算はスタック上で行われます。プログラムカウンタがバイトコードを順次読み取り、スタック・メモリ・ストレージを操作しながら実行を進めます。
+
 ## ZigでEVMを実装する準備
 
 開発環境の準備をします。
@@ -91,7 +122,62 @@ Contract JSON ABI
 - **256ビット整数型 (u256)**: EVMの基本データ型です。Zigには組み込みの256ビット整数型がないため、2つの128ビット整数（上位128ビットと下位128ビット）を組み合わせた独自の構造体として実装します。加算・減算などの演算メソッドも提供します。
 - **スタック (EvmStack)**: 固定長配列（サイズ1024）で表現し、各要素を`u256`型とします。スタックポインタ（現在のスタック高さ）を別途管理し、プッシュ/ポップ操作を提供します。
 - **メモリ (EvmMemory)**: 動的に拡張可能な`std.ArrayList(u8)`で表現します。32バイト単位でデータを読み書きするメソッドを提供し、必要に応じてサイズを拡張します。
+
+```mermaid
+graph TB
+    subgraph EVMメモリレイアウト
+        M0[0x00-0x1F<br/>32バイト]
+        M1[0x20-0x3F<br/>32バイト]
+        M2[0x40-0x5F<br/>32バイト]
+        M3[0x60-0x7F<br/>空きスペース<br/>ポインタ]
+        M4[0x80-0x9F<br/>スクラッチ<br/>スペース]
+        MX[...<br/>動的拡張領域]
+        
+        M0 --> M1
+        M1 --> M2
+        M2 --> M3
+        M3 --> M4
+        M4 --> MX
+    end
+    
+    style M0 fill:#fff,stroke:#333,stroke-width:1px
+    style M1 fill:#fff,stroke:#333,stroke-width:1px
+    style M2 fill:#fff,stroke:#333,stroke-width:1px
+    style M3 fill:#ffd,stroke:#333,stroke-width:2px
+    style M4 fill:#bbf,stroke:#333,stroke-width:2px
+    style MX fill:#eee,stroke:#333,stroke-width:1px,stroke-dasharray: 5 5
+```
+
+**図9-2: EVMメモリレイアウト図**  
+EVMのメモリは1次元のバイト配列として実装され、32バイト単位でアクセスされます。0x40-0x5Fは空きメモリポインタ、0x60-0x7Fはスクラッチスペースとして予約されています。
 - **ストレージ (EvmStorage)**: コントラクトの永続的なキー/値ストアです。シンプルな実装として、`std.AutoHashMap(u256, u256)`を使用し、キーと値の組を保持します。
+
+```mermaid
+graph LR
+    subgraph ストレージ構造
+        K1[キー: 0x0000...0001] --> V1[値: 0x0000...00FF]
+        K2[キー: 0x0000...0002] --> V2[値: 0x0000...1234]
+        K3[キー: 0x0000...0003] --> V3[値: 0x0000...5678]
+        KN[キー: ...] --> VN[値: ...]
+    end
+    
+    subgraph 特徴
+        P1[永続的]
+        P2[256ビットkey-value]
+        P3[高コスト<br/>SSTORE: 20000 gas<br/>SLOAD: 2100 gas]
+    end
+    
+    style K1 fill:#bbf,stroke:#333,stroke-width:1px
+    style K2 fill:#bbf,stroke:#333,stroke-width:1px
+    style K3 fill:#bbf,stroke:#333,stroke-width:1px
+    style V1 fill:#bfb,stroke:#333,stroke-width:1px
+    style V2 fill:#bfb,stroke:#333,stroke-width:1px
+    style V3 fill:#bfb,stroke:#333,stroke-width:1px
+    style P3 fill:#fbb,stroke:#333,stroke-width:2px
+```
+
+**図9-3: ストレージ構造図**  
+EVMのストレージは256ビットのキーと値のマッピングとして実装されます。永続的にブロックチェーンに保存されるため、読み書きには高いガスコストがかかります。
 - **実行コンテキスト (EvmContext)**: 上記のコンポーネントをまとめ、プログラムカウンタ、残りガス量、実行中のコード、呼び出しデータなどを含む実行環境を表現します。
 - **プログラムカウンタ (PC)**: 現在の命令位置を示すインデックスです。`usize`型（符号なしサイズ型）で0からバイトコード長-1まで動きます。
 - **ガス**: 残り実行可能ガスを示すカウンタです。`usize`または十分大きい整数型で扱います。処理するごとに各命令のガス消費量を差し引き、0未満になったらアウトオブガスです。
@@ -881,6 +967,29 @@ fn executeStep(context: *EvmContext) !void {
         return EVMError.OutOfGas;
     }
     context.gas -= 1;
+
+```mermaid
+graph LR
+    subgraph ADDオペコード実行例
+        S1[スタック<br/>5<br/>3<br/>...] --> OP1[0x01<br/>ADD]
+        OP1 --> S2[スタック<br/>8<br/>...]
+    end
+    
+    subgraph MULオペコード実行例
+        S3[スタック<br/>4<br/>7<br/>...] --> OP2[0x02<br/>MUL]
+        OP2 --> S4[スタック<br/>28<br/>...]
+    end
+    
+    style S1 fill:#bbf,stroke:#333,stroke-width:2px
+    style S2 fill:#bfb,stroke:#333,stroke-width:2px
+    style S3 fill:#bbf,stroke:#333,stroke-width:2px
+    style S4 fill:#bfb,stroke:#333,stroke-width:2px
+    style OP1 fill:#ffd,stroke:#333,stroke-width:2px
+    style OP2 fill:#ffd,stroke:#333,stroke-width:2px
+```
+
+**図9-4: オペコード実行の例（ADD, MUL）**  
+EVMのオペコードはスタックから必要な数の値をポップし、演算結果をプッシュします。ADDは2つの値を取り出して加算、MULは2つの値を取り出して乗算し、結果をスタックに積みます。
 
     // オペコードを解釈して実行
     switch (opcode) {

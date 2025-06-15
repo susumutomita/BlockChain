@@ -31,6 +31,22 @@ Zig公式サイトから各プラットフォーム向けのバイナリをダ�
 ### ビルドツールとエディタの準備
 
 Zigは独自のビルドシステムを備えており、`zig build`コマンドでプロジェクトのコンパイルや実行が可能です。プロジェクトを開始するには、空のディレクトリで `zig init` コマンドを実行すると、ビルド用の設定ファイルとサンプルのソースコードが生成されます。生成された`build.zig`と`src/main.zig`を使って、`zig build run`とするだけでHello Worldプログラムをビルド&実行できます。Zig製の実行ファイルはネイティブなバイナリで、特別なVMは不要です。
+
+```mermaid
+graph LR
+    A[ソースコード<br/>*.zig] --> B[Zigコンパイラ<br/>zig build]
+    B --> C[ビルドプロセス<br/>- 解析<br/>- 最適化<br/>- コード生成]
+    C --> D[実行可能バイナリ<br/>ネイティブコード]
+    
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style B fill:#bbf,stroke:#333,stroke-width:2px
+    style C fill:#bfb,stroke:#333,stroke-width:2px
+    style D fill:#ffb,stroke:#333,stroke-width:2px
+```
+
+**図2-1: Zigのビルドプロセス図**  
+Zigのコンパイラは、ソースコードを直接ネイティブバイナリに変換します。中間的なVMや実行環境は不要で、生成されたバイナリは対象プラットフォーム上で直接実行可能です。
+
 エディタはお好みのものを使用できますが、**VSCode**には公式のZig拡張機能がありシンタックスハイライトや補完が利用できます。また、Zig用の言語サーバー (Zig Language Server, *ZLS*) も提供されており、より高度なエディタ連携が可能です。主要なテキストエディタにはZigのシンタックスハイライトが用意されていますので、まずはコードが見やすい環境を整えましょう。
 
 ### プロジェクトの作成
@@ -156,6 +172,37 @@ services:
 Composeを使ってこの構成を起動すれば、`node1`, `node2`, `node3`のコンテナが立ち上がり、前述のように相互にホスト名で発見しあえるネットワークに接続されます。例えば`node1`コンテナ内から`node2:3000`（コンテナ名`node2`のポート3000）にリクエストを送ることで、ノード2との通信が可能です。
 
 複数のノードをこのようにコンテナで再現することで、1台の開発マシン上でも疑似的な分散環境を構築できます。各ノードは独立したプロセス（コンテナ）として動作するため、ノード間通信やネットワークの挙動を検証しやすくなります。
+
+```mermaid
+graph TB
+    subgraph ホストマシン
+        subgraph "Docker環境"
+            subgraph "Dockerネットワーク"
+                N1[node1<br/>ポート:3001]
+                N2[node2<br/>ポート:3002]
+                N3[node3<br/>ポート:3003]
+                
+                N1 -.-> N2
+                N2 -.-> N3
+                N3 -.-> N1
+            end
+        end
+        
+        DC[Docker Compose<br/>docker-compose.yml]
+        
+        DC --> N1
+        DC --> N2
+        DC --> N3
+    end
+    
+    style N1 fill:#6f6,stroke:#333,stroke-width:2px
+    style N2 fill:#6f6,stroke:#333,stroke-width:2px
+    style N3 fill:#6f6,stroke:#333,stroke-width:2px
+    style DC fill:#bbf,stroke:#333,stroke-width:2px
+```
+
+**図2-2: Docker環境の構成図**  
+Docker Composeを使用して、1台のホストマシン上に3つのブロックチェインノードを構築します。各ノードは独立したコンテナとして動作し、共通のDockerネットワーク上でサービス名を使って相互通信が可能です。
 
 ## Docker Composeで複数ノードを動作させる
 

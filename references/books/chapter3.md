@@ -25,6 +25,28 @@ free: true
 
 **改ざん耐性**: ブロックに含まれるハッシュ値のおかげで、もし過去のブロックのデータが少しでも書き換えられるとそのブロックのハッシュ値が変わります。すると後続のブロックに保存された「前のブロックのハッシュ」と一致しなくなるため、チェイン全体の整合性が崩れてしまいます。この仕組みにより、1つのブロックを改ざんするにはそのブロック以降のすべてのブロックを書き換えなければならず、改ざんは非常に困難になります。
 
+```mermaid
+graph LR
+    subgraph ブロック構造
+        B[ブロック]
+        B --> I[index: ブロック番号]
+        B --> T[timestamp: タイムスタンプ]
+        B --> P[prev_hash: 前ハッシュ]
+        B --> D[data: データ]
+        B --> H[hash: ハッシュ値]
+    end
+    
+    style B fill:#bbf,stroke:#333,stroke-width:3px
+    style I fill:#fff,stroke:#333,stroke-width:1px
+    style T fill:#fff,stroke:#333,stroke-width:1px
+    style P fill:#fff,stroke:#333,stroke-width:1px
+    style D fill:#fff,stroke:#333,stroke-width:1px
+    style H fill:#ffd,stroke:#333,stroke-width:2px
+```
+
+**図3-1: Block構造体の図解**  
+ブロックは5つの主要なフィールドから構成されます。`hash`フィールドは他のすべてのフィールドの内容から計算される「指紋」のような役割を果たし、データの改ざんを検出可能にします。
+
 ### ステップ1: ブロック構造体だけを定義し、単一ブロックを作成する
 
 上記の概念を踏まえて、Zigでブロックを表現する構造体を作ってみましょう。ブロックに含める主な情報は以下の通りです。
@@ -125,6 +147,25 @@ node2 exited with code 0
 
 ブロックチェインの肝は**ハッシュの計算**です。ブロックの`hash`フィールドは、ブロック内容全体(index, タイムスタンプ, prev_hash, dataなど)から計算されるハッシュ値です。Zigの標準ライブラリにはSHA-256などのハッシュ関数実装が含まれているので、それを利用してハッシュ計算をします。
 
+```mermaid
+graph LR
+    subgraph SHA-256処理フロー
+        A[入力データ<br/>- index<br/>- timestamp<br/>- prev_hash<br/>- data]
+        B[SHA-256<br/>ハッシュ関数]
+        C[256ビット<br/>ハッシュ値<br/>（32バイト）]
+        
+        A --> B
+        B --> C
+    end
+    
+    style A fill:#bbf,stroke:#333,stroke-width:2px
+    style B fill:#fbb,stroke:#333,stroke-width:3px
+    style C fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+**図3-3: SHA-256の処理フロー（簡略版）**  
+SHA-256ハッシュ関数は、任意の長さの入力データを受け取り、常に256ビット（32バイト）の固定長ハッシュ値を出力します。入力が1ビットでも変わると、出力は全く異なる値になります。
+
 ZigでSHA-256を使うには、`std.crypto.hash.sha2`名前空間の`Sha256`型を利用します。以下にブロックのハッシュ値を計算する関数の例を示します。
 
 ```zig
@@ -198,6 +239,35 @@ Zigでは、**整数型をそのまま「バイト列 (slice of bytes)」とし�
 バージョンの異なるZigや将来的な変更を考えると、こうした**独自のbitCastラッパ**を作っておくのは柔軟な対応策となります。
 
 **ハッシュ計算のポイント**: ブロックの`hash`値は **ブロック内のすべての重要データから計算** されます。この例では `index, timestamp, prev_hash, data` を含めていますが、後で追加するトランザクションやnonceといった要素も含める必要があります。一度ハッシュを計算して`block.hash`に保存した後で、ブロックの中身(例えば`data`)が変われば当然ハッシュ値も変わります。つまり、`hash`はブロック内容の一種の指紋となっており、内容が変われば指紋も一致しなくなるため改ざんを検出できます。
+
+```mermaid
+graph TB
+    subgraph ハッシュチェーンの仕組み
+        B1[ブロック#0<br/>データ: Genesis<br/>前ハッシュ: 0x0000...]
+        B2[ブロック#1<br/>データ: TX1<br/>前ハッシュ: 0xabc1...]
+        B3[ブロック#2<br/>データ: TX2<br/>前ハッシュ: 0xdef2...]
+        
+        H1[ハッシュ: 0xabc1...]
+        H2[ハッシュ: 0xdef2...]
+        H3[ハッシュ: 0x1234...]
+        
+        B1 --> H1
+        H1 --> B2
+        B2 --> H2
+        H2 --> B3
+        B3 --> H3
+    end
+    
+    style B1 fill:#f9f,stroke:#333,stroke-width:2px
+    style B2 fill:#bbf,stroke:#333,stroke-width:2px
+    style B3 fill:#bbf,stroke:#333,stroke-width:2px
+    style H1 fill:#ffd,stroke:#333,stroke-width:2px
+    style H2 fill:#ffd,stroke:#333,stroke-width:2px
+    style H3 fill:#ffd,stroke:#333,stroke-width:2px
+```
+
+**図3-2: ハッシュチェーンの仕組み**  
+各ブロックは前のブロックのハッシュ値を保持することで連結されます。ブロック#1のデータが改ざんされると、そのハッシュ値が変わり、ブロック#2の「前ハッシュ」と一致しなくなるため、改ざんが検出されます。
 
 コード全体は次のようになります。
 
@@ -325,6 +395,32 @@ node1 exited with code 0
 ### トランザクション用の構造体を定義する
 
 まずは、取引を表すデータ構造 `Transaction` を作ります。実際の暗号通貨では「送信者の署名」「入力と出力のリスト」など複雑な形を取ります。ここでは最低限として「送信者(sender)」「受信者(receiver)」「金額(amount)」だけを持つシンプルな構造にします。
+
+```mermaid
+graph TB
+    subgraph トランザクション構造
+        T[トランザクション]
+        T --> S[sender: 送信者]
+        T --> R[receiver: 受信者]
+        T --> A[amount: 送金額]
+    end
+    
+    subgraph ブロック内のトランザクション
+        B[ブロック]
+        B --> TX1[トランザクション1<br/>Alice→Bob: 100]
+        B --> TX2[トランザクション2<br/>Charlie→Dave: 50]
+        B --> TX3[トランザクション3<br/>Eve→Frank: 75]
+    end
+    
+    style T fill:#bbf,stroke:#333,stroke-width:2px
+    style B fill:#f9f,stroke:#333,stroke-width:3px
+    style TX1 fill:#bfb,stroke:#333,stroke-width:1px
+    style TX2 fill:#bfb,stroke:#333,stroke-width:1px
+    style TX3 fill:#bfb,stroke:#333,stroke-width:1px
+```
+
+**図3-4: トランザクション構造図**  
+トランザクションは送信者、受信者、送金額の3つの要素から構成されます。1つのブロックには複数のトランザクションをまとめて格納でき、これらすべてがブロックのハッシュ計算に含まれます。
 
 ```bash
 /// トランザクション構造体

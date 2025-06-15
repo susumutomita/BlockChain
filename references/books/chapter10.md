@@ -26,10 +26,65 @@ Zig側で、コンパイルして得たバイトコードと、関数呼び出�
 
 今回の`add(uint256,uint256)`関数の場合、関数セレクタは`"add(uint256,uint256)"`という文字列のKeccak-256ハッシュの先頭4バイトで決まります。計算すると`0x771602f7`という値になります。続いて、例えば引数`a = 10`、`b = 32`を与えたい場合、それぞれ32バイトにパディングされた表現を付加します。10は16進で`0x0a`、32は`0x20`ですので、32バイト表現ではそれぞれ`0x000...00a`（最後の1バイトが0×0a）と`0x000...020`になります。つまり、呼び出しデータ全体を16進で表すと次のようになります。
 
+```mermaid
+graph LR
+    subgraph コントラクト実行フロー
+        SOL[Solidityコード<br/>add(a,b)]
+        BC[バイトコード<br/>0x6080...]
+        CD[Calldata<br/>0x771602f7...]
+        EVM[EVM実行<br/>スタック操作]
+        RET[Return Data<br/>0x000...2a]
+        
+        SOL -->|コンパイル| BC
+        BC -->|デプロイ| EVM
+        CD -->|関数呼出| EVM
+        EVM -->|実行結果| RET
+    end
+    
+    style SOL fill:#bbf,stroke:#333,stroke-width:2px
+    style BC fill:#ffd,stroke:#333,stroke-width:2px
+    style CD fill:#fbf,stroke:#333,stroke-width:2px
+    style EVM fill:#bfb,stroke:#333,stroke-width:2px
+    style RET fill:#ffb,stroke:#333,stroke-width:2px
+```
+
+**図10-1: コントラクト実行フロー**  
+Solidityコードはコンパイルされてバイトコードになり、EVMにデプロイされます。関数呼び出し時にはCalldataとして関数セレクタと引数が渡され、EVMが実行して結果を返します。
+
 ```bash
 0x771602f7 000000000000000000000000000000000000000000000000000000000000000a
 0000000000000000000000000000000000000000000000000000000000000020
 ```
+
+```mermaid
+graph TB
+    subgraph Calldata構造
+        SEL[関数セレクタ<br/>0x771602f7<br/>4バイト]
+        ARG1[第1引数 a=10<br/>0x000...00a<br/>32バイト]
+        ARG2[第2引数 b=32<br/>0x000...020<br/>32バイト]
+        
+        SEL --> ARG1
+        ARG1 --> ARG2
+    end
+    
+    subgraph セレクタ計算
+        FN[add(uint256,uint256)]
+        HASH[Keccak-256<br/>ハッシュ]
+        SEL2[先頭4バイト<br/>0x771602f7]
+        
+        FN --> HASH
+        HASH --> SEL2
+    end
+    
+    style SEL fill:#ffd,stroke:#333,stroke-width:2px
+    style ARG1 fill:#bbf,stroke:#333,stroke-width:2px
+    style ARG2 fill:#bbf,stroke:#333,stroke-width:2px
+    style FN fill:#fbf,stroke:#333,stroke-width:2px
+    style SEL2 fill:#ffd,stroke:#333,stroke-width:2px
+```
+
+**図10-2: Calldata構造**  
+関数呼び出しのCalldataは、関数セレクタ（4バイト）に続いて各引数を32バイトにパディングしたデータが連結されます。関数セレクタは関数シグネチャのKeccak-256ハッシュの先頭4バイトです。
 
 （スペースは見やすさのため。実際には詰めて68バイトのデータ）。このデータを我々の`run`関数に渡せば、関数`add(10,32)`を実行したのと同じ効果が得られるはずです。
 
