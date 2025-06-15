@@ -15,6 +15,26 @@ free: true
 
 それでは、ブロックチェインのコアである「ブロック」の構造を実装していきます。まずはブロックチェインの基本を簡単におさらいしましょう。
 
+```mermaid
+graph TD
+    subgraph "ブロックの内部構造"
+        B[Block]
+        B --> Index[Index: ブロック番号]
+        B --> Timestamp[Timestamp: 作成時刻]
+        B --> PrevHash[Previous Hash: 前ブロックのハッシュ]
+        B --> Data[Data/Transactions: データ]
+        B --> Hash[Hash: このブロックのハッシュ]
+    end
+
+    subgraph "ハッシュ計算"
+        Index2[Index] --> SHA[SHA-256]
+        Timestamp2[Timestamp] --> SHA
+        PrevHash2[Previous Hash] --> SHA
+        Data2[Data] --> SHA
+        SHA --> Hash2[Hash値生成]
+    end
+```
+
 ### なぜブロックという単位か
 
 ブロックチェインでは、膨大な取引情報をそのまま連続的に記録すると、改ざん検出や管理が非常に困難になる。そこで「ブロック」という単位に複数の取引や関連情報(タイムスタンプ、前ブロックのハッシュ値など)をまとめることで、各ブロックごとに一意の「指紋」を生成する仕組みになっています。
@@ -97,6 +117,8 @@ Block index: 1
 Timestamp  : 1672531200
 Data       : Hello, Zig Blockchain!
 ```
+
+💡 **教育ポイント**：この段階では、まだハッシュ計算やマイニングは実装していません。まずはデータ構造を理解することが重要です。
 
 もしくはdocker composeで実行できます。
 

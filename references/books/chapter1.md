@@ -7,10 +7,44 @@ free: true
 
 ### ブロックチェインとは何か
 
-ブロックチェインとは、取引記録をブロックという単位にまとめて鎖状（チェイン）に連結し、ネットワーク上の多数のコンピュータで共有・管理する分散型の台帳技術です。データは一定ごとに**ブロック**と呼ばれる単位にまとめられ、各ブロックには前のブロックのハッシュ値（電子的な指紋）が含まれるため、ブロックが鎖（チェイン）のようにつながっています。全ノードがこのチェインのコピーを保持し、新しいブロックが提案されるとネットワーク全体で正当性を検証してから追加します（この合意形成プロセスを**コンセンサスアルゴリズム**と呼びます）。
+ブロックチェインとは、取引記録をブロックという単位にまとめて鎖状（チェイン）に連結し、ネットワーク上の多数のコンピュータで共有・管理する分散型の台帳技術です。データは一定ごとに**ブロック**と呼ばれる単位にまとめられ、各ブロックには前のブロックのハッシュ値（電子的な指紋）が含まれるため、ブロックが鎖（チェイン）のようにつながっています。
+
+```mermaid
+graph LR
+    A[Block 0<br/>Genesis<br/>Hash: 0x000...] -->|Previous Hash| B[Block 1<br/>Transactions<br/>Hash: 0xA3F...]
+    B -->|Previous Hash| C[Block 2<br/>Transactions<br/>Hash: 0x8B2...]
+    C -->|Previous Hash| D[Block 3<br/>Transactions<br/>Hash: 0x5C9...]
+
+    style A fill:#f9f,stroke:#333,stroke-width:4px
+    style B fill:#bbf,stroke:#333,stroke-width:2px
+    style C fill:#bbf,stroke:#333,stroke-width:2px
+    style D fill:#bbf,stroke:#333,stroke-width:2px
+```
+
+全ノードがこのチェインのコピーを保持し、新しいブロックが提案されるとネットワーク全体で正当性を検証してから追加します（この合意形成プロセスを**コンセンサスアルゴリズム**と呼びます）。
 こうした構造により、一度記録されたデータを改ざんすることは極めて困難です。仮に一部のブロックを書き換えても、その変更は他の多数のノードが持つ台帳と食い違うため承認されません ([Peer to Peer Network in Blockchain in Detail](https://blocktpoint.com/blockchain/blockchain-peer-to-peer-network#:~:text=4,Blockchain%20transactions%20are%20unchangeable))。中央管理者がおらず参加者間でデータを共有・検証するため、ブロックチェインは高い**耐改ざん性**と**可用性**（単一障害点がないこと）を備えています。また、取引履歴が公開されたネットワーク上に分散保存されることで透明性も確保されます。
 
 ### ブロックチェインの主な特徴
+
+```mermaid
+graph TB
+    subgraph "中央集権型システム"
+        Central[中央サーバー]
+        User1[ユーザー1] --> Central
+        User2[ユーザー2] --> Central
+        User3[ユーザー3] --> Central
+        User4[ユーザー4] --> Central
+    end
+
+    subgraph "分散型システム（ブロックチェーン）"
+        Node1[ノード1] <--> Node2[ノード2]
+        Node2 <--> Node3[ノード3]
+        Node3 <--> Node4[ノード4]
+        Node4 <--> Node1
+        Node1 <--> Node3
+        Node2 <--> Node4
+    end
+```
 
 - **分散管理**: データの記録が特定のサーバではなく多数のノードによって行われます。これにより一部ノードが停止してもシステム全体は影響を受けにくく、単一の管理者に依存しません ([Peer to Peer Network in Blockchain in Detail](https://blocktpoint.com/blockchain/blockchain-peer-to-peer-network#:~:text=Peer,peer))。
 - **改ざん耐性**: 各ブロックが前のブロックと暗号学的に結合されているため、過去のデータを書き換えるには全ての後続ブロックも変更し多数のノードを同時に改ざんする必要があります。現実的にこれは非常に困難で、記録が事実上不変であることを保証します。

@@ -14,6 +14,11 @@ const debug_logging = false;
 /// debugLog:
 /// デバッグログを出力するためのヘルパー関数です。
 /// ※ debug_logging が true の場合のみ std.debug.print を呼び出します。
+///
+/// 💡 教育ポイント：comptimeキーワード
+/// Zigの「comptime」は、コンパイル時に評価される式を示します。
+/// この例では、debug_loggingがfalseの場合、debugLog関数の中身は
+/// 実行ファイルに含まれません（デッドコード除去）。
 fn debugLog(comptime format: []const u8, args: anytype) void {
     if (comptime debug_logging) {
         std.debug.print(format, args);
@@ -24,19 +29,33 @@ fn debugLog(comptime format: []const u8, args: anytype) void {
 // データ構造定義
 //------------------------------------------------------------------------------
 
-// Transaction 構造体
-// ブロックチェーン上の「取引」を表現します。
-// 送信者、受信者、取引金額の３要素のみ保持します。
+/// Transaction 構造体
+/// ブロックチェーン上の「取引」を表現します。
+///
+/// 💡 教育ポイント：なぜstructを使うのか？
+/// 関連するデータをまとめて1つの型として扱えるため、
+/// コードの可読性と保守性が向上します。
+///
+/// 🚨 簡略化のポイント：
+/// 実際のブロックチェーンでは、送信者の署名やnonceなども必要ですが、
+/// ここでは基本概念の理解のため、最小限の要素のみ含めています。
 const Transaction = struct {
     sender: []const u8, // 送信者のアドレスまたは識別子(文字列)
     receiver: []const u8, // 受信者のアドレスまたは識別子(文字列)
     amount: u64, // 取引金額(符号なし64ビット整数)
 };
 
-// Block 構造体
-// ブロックチェーン上の「ブロック」を表現します。
-// ブロック番号、生成時刻、前ブロックのハッシュ、取引リスト、PoW用の nonce、
-// 追加データ、そして最終的なブロックハッシュを保持します。
+/// Block 構造体
+/// ブロックチェーン上の「ブロック」を表現します。
+///
+/// 🔍 ブロックの役割：
+/// 1. 複数のトランザクションをまとめる「コンテナ」
+/// 2. 前のブロックとハッシュで「チェーン」を形成
+/// 3. nonceを使って「作業証明」を実現
+///
+/// 💡 教育ポイント：なぜ[32]u8なのか？
+/// SHA-256は256ビット（= 32バイト）のハッシュ値を生成するため、
+/// 固定長配列[32]u8で表現します。これにより型安全性が保証されます。
 const Block = struct {
     index: u32, // ブロック番号(0から始まる連番)
     timestamp: u64, // ブロック生成時のUNIXタイムスタンプ
@@ -124,6 +143,14 @@ fn toBytes(comptime T: type, value: T) []const u8 {
 /// calculateHash:
 /// 指定されたブロックの各フィールドをバイト列に変換し、
 /// その連結結果から SHA-256 ハッシュを計算して返す関数。
+///
+/// 🔍 ハッシュ計算の重要性：
+/// ブロックの内容が1ビットでも変わると、全く異なるハッシュ値になります。
+/// これにより、ブロックの改ざんを検出できます。
+///
+/// 💡 教育ポイント：ハッシュに含める順序
+/// ハッシュ計算では、データを追加する順序が重要です。
+/// 順序が変わるとハッシュ値も変わるため、全ノードで同じ順序を守る必要があります。
 fn calculateHash(block: *const Block) [32]u8 {
     var hasher = Sha256.init(.{});
 
@@ -137,26 +164,31 @@ fn calculateHash(block: *const Block) [32]u8 {
         std.debug.print("\n", .{});
     }
 
-    // ブロック番号 (u32) をバイト列に変換して追加
+    // === ハッシュ計算のステップ ===
+    // 1. ブロック番号 (u32) をバイト列に変換して追加
     hasher.update(toBytes(u32, block.index));
-    // タイムスタンプ (u64) をバイト列に変換して追加
+
+    // 2. タイムスタンプ (u64) をバイト列に変換して追加
     hasher.update(toBytes(u64, block.timestamp));
-    // nonce のバイト列を追加
+
+    // 3. nonce のバイト列を追加（PoWで変化する部分）
     hasher.update(nonce_bytes[0..]);
-    // 前ブロックのハッシュ(32バイト)を追加
+
+    // 4. 前ブロックのハッシュ(32バイト)を追加（チェーンの連続性）
     hasher.update(&block.prev_hash);
 
-    // すべてのトランザクションについて、各フィールドを追加
+    // 5. すべてのトランザクションについて、各フィールドを追加
     for (block.transactions.items) |tx| {
         hasher.update(tx.sender);
         hasher.update(tx.receiver);
         const amount_bytes = toBytesU64(tx.amount);
         hasher.update(&amount_bytes);
     }
-    // 追加データをハッシュに追加
+
+    // 6. 追加データをハッシュに追加
     hasher.update(block.data);
 
-    // 最終的なハッシュ値を計算
+    // 最終的なハッシュ値を計算（SHA-256の実行）
     const hash = hasher.finalResult();
     debugLog("nonce: {d}, hash: {x}\n", .{ block.nonce, hash });
     return hash;
@@ -176,6 +208,16 @@ fn meetsDifficulty(hash: [32]u8, difficulty: u8) bool {
 /// mineBlock:
 /// 指定された難易度を満たすハッシュが得られるまで、
 /// nonce の値を増やしながらハッシュ計算を繰り返す関数。
+///
+/// 🔍 マイニングの仕組み：
+/// 1. nonceを0から開始
+/// 2. ハッシュを計算
+/// 3. 難易度条件を満たすかチェック
+/// 4. 満たさなければnonce++して再計算
+///
+/// ⚡ パフォーマンスポイント：
+/// 難易度が1上がるごとに、平均的な計算回数は256倍（2^8）になります。
+/// 例：難易度2なら平均65,536回、難易度3なら平均16,777,216回の計算が必要。
 fn mineBlock(block: *Block, difficulty: u8) void {
     while (true) {
         const new_hash = calculateHash(block);
@@ -386,4 +428,3 @@ test "ブロック改ざん検出テスト" {
     // 改ざん前後のハッシュが異なることを期待
     try std.testing.expect(!std.mem.eql(u8, originalHash[0..], tamperedHash[0..]));
 }
-
