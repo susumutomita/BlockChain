@@ -27,13 +27,13 @@ graph TD
         Storage[ストレージ<br/>永続的な領域]
         Gas[ガスカウンタ]
     end
-    
+
     Code -->|命令読み込み| PC
     PC -->|オペコード実行| Stack
     Stack <--> Memory
     Stack <--> Storage
     PC --> Gas
-    
+
     style Stack fill:#f9f,stroke:#333,stroke-width:2px
     style Storage fill:#9ff,stroke:#333,stroke-width:2px
 ```
@@ -58,10 +58,10 @@ EVMの命令（オペコード）は1バイト長で表現され、例えば`0x0
 
 EVMで使用される主要なオペコードをいくつか見てみましょう：
 
-```
+```table
 オペコード | 値   | 説明                          | スタック変化
 ---------|------|-------------------------------|----------------
-STOP     | 0x00 | 実行を停止                      | 
+STOP     | 0x00 | 実行を停止                      |
 ADD      | 0x01 | 2つの値を加算                   | a, b → (a+b)
 MUL      | 0x02 | 2つの値を乗算                   | a, b → (a*b)
 PUSH1    | 0x60 | 1バイトをスタックにプッシュ      | → value
@@ -484,7 +484,7 @@ pub fn execute(allocator: std.mem.Allocator, code: []const u8, calldata: []const
 
     while (ctx.pc < ctx.code.len and !ctx.stopped) {
         const opcode = ctx.code[ctx.pc];
-        
+
         // ガス消費
         const gas_cost = getGasCost(opcode);
         ctx.gas -= gas_cost;
@@ -492,7 +492,7 @@ pub fn execute(allocator: std.mem.Allocator, code: []const u8, calldata: []const
 
         // オペコード実行
         try executeOpcode(&ctx, opcode);
-        
+
         // JUMP系命令以外はPCを進める
         if (opcode != Opcode.JUMP and opcode != Opcode.JUMPI) {
             ctx.pc += 1;
@@ -511,99 +511,99 @@ fn executeOpcode(ctx: *EvmContext, opcode: u8) !void {
         Opcode.STOP => {
             ctx.stopped = true;
         },
-        
+
         Opcode.ADD => {
             const b = try ctx.stack.pop();
             const a = try ctx.stack.pop();
             try ctx.stack.push(a.add(b));
         },
-        
+
         Opcode.MUL => {
             const b = try ctx.stack.pop();
             const a = try ctx.stack.pop();
             try ctx.stack.push(a.mul(b));
         },
-        
+
         Opcode.PUSH1...0x7F => {
             const push_size = opcode - 0x5F;
             if (ctx.pc + push_size >= ctx.code.len) return EVMError.OutOfBounds;
-            
+
             const value_bytes = ctx.code[ctx.pc + 1..ctx.pc + 1 + push_size];
             const value = EVMu256.fromBytes(value_bytes);
             try ctx.stack.push(value);
-            
+
             ctx.pc += push_size;
         },
-        
+
         Opcode.DUP1...Opcode.DUP1 + 15 => {
             const n = opcode - Opcode.DUP1 + 1;
             if (ctx.stack.depth() < n) return EVMError.StackUnderflow;
-            
+
             const value = ctx.stack.data[ctx.stack.top - n];
             try ctx.stack.push(value);
         },
-        
+
         Opcode.SWAP1...Opcode.SWAP1 + 15 => {
             const n = opcode - Opcode.SWAP1 + 1;
             if (ctx.stack.depth() <= n) return EVMError.StackUnderflow;
-            
+
             const temp = ctx.stack.data[ctx.stack.top - 1];
             ctx.stack.data[ctx.stack.top - 1] = ctx.stack.data[ctx.stack.top - n - 1];
             ctx.stack.data[ctx.stack.top - n - 1] = temp;
         },
-        
+
         Opcode.MLOAD => {
             const offset = try ctx.stack.pop();
             const value = try ctx.memory.load32(@intCast(offset.lo));
             try ctx.stack.push(value);
         },
-        
+
         Opcode.MSTORE => {
             const offset = try ctx.stack.pop();
             const value = try ctx.stack.pop();
             try ctx.memory.store32(@intCast(offset.lo), value);
         },
-        
+
         Opcode.SLOAD => {
             const key = try ctx.stack.pop();
             const value = ctx.storage.load(key);
             try ctx.stack.push(value);
         },
-        
+
         Opcode.SSTORE => {
             const key = try ctx.stack.pop();
             const value = try ctx.stack.pop();
             try ctx.storage.store(key, value);
         },
-        
+
         Opcode.RETURN => {
             const offset = try ctx.stack.pop();
             const length = try ctx.stack.pop();
-            
+
             const offset_usize = @as(usize, @intCast(offset.lo));
             const length_usize = @as(usize, @intCast(length.lo));
-            
+
             try ctx.memory.ensureSize(offset_usize + length_usize);
-            
+
             ctx.returndata = try ctx.allocator.alloc(u8, length_usize);
             @memcpy(ctx.returndata, ctx.memory.data.items[offset_usize..offset_usize + length_usize]);
-            
+
             ctx.stopped = true;
         },
-        
+
         Opcode.CALLDATALOAD => {
             const offset = try ctx.stack.pop();
             const offset_usize = @as(usize, @intCast(offset.lo));
-            
+
             var value = EVMu256.zero();
             if (offset_usize < ctx.calldata.len) {
                 const available = @min(32, ctx.calldata.len - offset_usize);
                 value = EVMu256.fromBytes(ctx.calldata[offset_usize..offset_usize + available]);
             }
-            
+
             try ctx.stack.push(value);
         },
-        
+
         else => {
             logger.warn("Unimplemented opcode: 0x{x:0>2}", .{opcode});
             return EVMError.InvalidOpcode;
@@ -636,7 +636,7 @@ test "Simple EVM execution - Addition" {
 
     // 結果の確認
     try std.testing.expectEqual(@as(usize, 32), result.len);
-    
+
     // 結果は8（5+3）になっているはず
     const value = EVMu256.fromBytes(result);
     try std.testing.expectEqual(@as(u128, 0), value.hi);
@@ -666,7 +666,7 @@ pub fn main() !void {
 
     // SimpleAdderのランタイムバイトコード（デプロイ後のコード）
     // 実際のバイトコードはsolcの出力から取得
-    const runtime_bytecode = try std.fmt.hexToBytes(allocator, 
+    const runtime_bytecode = try std.fmt.hexToBytes(allocator,
         "608060405234801561000f575f80fd5b5060043610610029575f3560e01c8063771602f71461002d575b5f80fd5b610047600480360381019061004291906100a9565b61005d565b60405161005491906100f6565b60405180910390f35b5f818361006a919061013c565b905092915050565b5f80fd5b5f819050919050565b61008881610076565b8114610092575f80fd5b50565b5f813590506100a38161007f565b92915050565b5f80604083850312156100bf576100be610072565b5b5f6100cc85828601610095565b92505060206100dd85828601610095565b9150509250929050565b6100f081610076565b82525050565b5f6020820190506101095f8301846100e7565b92915050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52601160045260245ffd5b5f61014682610076565b915061015183610076565b92508282019050808211156101695761016861010f565b5b9291505056fea2646970667358221220e478f9e62b837b6d95fa3abbc3c7eb6c02d17eb28b14607d07eb892ef9992db964736f6c63430008180033"
     );
     defer allocator.free(runtime_bytecode);
@@ -677,14 +677,14 @@ pub fn main() !void {
     // 引数2: 32 (uint256)
     var calldata = std.ArrayList(u8).init(allocator);
     defer calldata.deinit();
-    
+
     // 関数セレクタ
     try calldata.appendSlice(&[_]u8{0x77, 0x16, 0x02, 0xf7});
-    
+
     // 引数1: 10を32バイトでパディング
     const arg1 = EVMu256.fromU64(10);
     try calldata.appendSlice(&arg1.toBytes());
-    
+
     // 引数2: 32を32バイトでパディング
     const arg2 = EVMu256.fromU64(32);
     try calldata.appendSlice(&arg2.toBytes());
@@ -696,11 +696,11 @@ pub fn main() !void {
     // 結果を表示
     const stdout = std.io.getStdOut().writer();
     try stdout.print("実行結果: ", .{});
-    
+
     if (result.len >= 32) {
         const result_value = EVMu256.fromBytes(result[0..32]);
         try stdout.print("{d}\n", .{result_value.lo});
-        
+
         // 10 + 32 = 42 になっているはず
         std.debug.assert(result_value.lo == 42);
     } else {

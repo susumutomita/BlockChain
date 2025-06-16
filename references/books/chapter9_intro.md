@@ -44,7 +44,7 @@ graph LR
     subgraph "従来のブロックチェーン"
         A[Aさん] -->|10コイン送金| B[Bさん]
     end
-    
+
     subgraph "スマートコントラクト対応"
         C[ユーザー] -->|関数呼び出し| D[コントラクト]
         D -->|条件に応じて実行| E[複雑なロジック]
@@ -67,13 +67,13 @@ graph TD
         Storage[ストレージ<br/>永続的な領域]
         Gas[ガスカウンタ]
     end
-    
+
     Code -->|命令読み込み| PC
     PC -->|オペコード実行| Stack
     Stack <--> Memory
     Stack <--> Storage
     PC --> Gas
-    
+
     style Stack fill:#f9f,stroke:#333,stroke-width:2px
     style Storage fill:#9ff,stroke:#333,stroke-width:2px
 ```

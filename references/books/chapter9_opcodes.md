@@ -14,7 +14,7 @@ EVMのオペコードは1バイト（8ビット）で表現される命令です
 ```
 オペコード | 値   | 説明                          | スタック変化
 ---------|------|-------------------------------|----------------
-STOP     | 0x00 | 実行を停止                      | 
+STOP     | 0x00 | 実行を停止                      |
 ADD      | 0x01 | 2つの値を加算                   | a, b → (a+b)
 MUL      | 0x02 | 2つの値を乗算                   | a, b → (a*b)
 PUSH1    | 0x60 | 1バイトをスタックにプッシュ      | → value
@@ -87,7 +87,7 @@ Opcode.PUSH1 => {
     if (ctx.pc >= ctx.code.len) {
         return error.OutOfBounds;
     }
-    
+
     const value = EVMu256.fromU64(ctx.code[ctx.pc]);
     try ctx.stack.push(value);
 },
@@ -102,14 +102,14 @@ Opcode.PUSH1 => {
 pub fn execute(ctx: *EvmContext) !void {
     while (ctx.pc < ctx.code.len and !ctx.stopped) {
         const opcode = ctx.code[ctx.pc];
-        
+
         // ガス消費
         const gas_cost = getGasCost(opcode);
         try consumeGas(ctx, gas_cost);
 
         // オペコード実行
         try executeOpcode(ctx, opcode);
-        
+
         // プログラムカウンタを進める
         ctx.pc += 1;
     }
@@ -151,15 +151,15 @@ pub fn execute(ctx: *EvmContext) !void {
 ```zig
 test "EVM basic operations" {
     const allocator = std.testing.allocator;
-    
+
     // PUSH1 0x05, PUSH1 0x03, ADD というバイトコード
     const code = [_]u8{ 0x60, 0x05, 0x60, 0x03, 0x01 };
-    
+
     var ctx = EvmContext.init(allocator, &code, 1000000);
     defer ctx.deinit();
-    
+
     try execute(&ctx);
-    
+
     // スタックトップが8（5+3）であることを確認
     const result = try ctx.stack.pop();
     try std.testing.expectEqual(@as(u128, 8), result.lo);
