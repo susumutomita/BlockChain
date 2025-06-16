@@ -20,7 +20,7 @@ graph LR
     subgraph "従来のブロックチェーン"
         A[Aさん] -->|10コイン送金| B[Bさん]
     end
-    
+
     subgraph "スマートコントラクト対応"
         C[ユーザー] -->|関数呼び出し| D[コントラクト]
         D -->|条件に応じて実行| E[複雑なロジック]
@@ -53,12 +53,12 @@ graph TD
         Storage[ストレージ<br/>永続的なデータ]
         Gas[ガス<br/>実行コスト]
     end
-    
+
     Code -->|命令読み込み| PC
     PC -->|命令実行| Stack
     Stack <--> Memory
     Stack <--> Storage
-    
+
     style Stack fill:#f9f,stroke:#333,stroke-width:2px
     style Storage fill:#9ff,stroke:#333,stroke-width:2px
 ```
@@ -115,7 +115,7 @@ pub const EVMu256 = struct {
         const carry = if (result_lo < self.lo) 1 else 0;
         // 上位128ビットの加算（キャリーを含む）
         const result_hi = self.hi +% other.hi +% carry;
-        
+
         return EVMu256{ .hi = result_hi, .lo = result_lo };
     }
 
@@ -127,7 +127,7 @@ pub const EVMu256 = struct {
         const borrow = if (self.lo < other.lo) 1 else 0;
         // 上位128ビットの減算（ボローを含む）
         const result_hi = self.hi -% other.hi -% borrow;
-        
+
         return EVMu256{ .hi = result_hi, .lo = result_lo };
     }
 
@@ -144,19 +144,19 @@ pub const EVMu256 = struct {
     /// バイト配列への変換（ビッグエンディアン）
     pub fn toBytes(self: EVMu256) [32]u8 {
         var bytes: [32]u8 = undefined;
-        
+
         // 上位128ビットをバイト配列に変換
         for (0..16) |i| {
             const shift = @as(u7, @intCast((15 - i) * 8));
             bytes[i] = @truncate(self.hi >> shift);
         }
-        
+
         // 下位128ビットをバイト配列に変換
         for (0..16) |i| {
             const shift = @as(u7, @intCast((15 - i) * 8));
             bytes[i + 16] = @truncate(self.lo >> shift);
         }
-        
+
         return bytes;
     }
 
@@ -233,7 +233,7 @@ pub const EvmStack = struct {
         if (self.top >= 1024) {
             return error.StackOverflow;
         }
-        
+
         const value = self.data[self.top - n];
         self.data[self.top] = value;
         self.top += 1;
@@ -244,7 +244,7 @@ pub const EvmStack = struct {
         if (self.top < n + 1) {
             return error.StackUnderflow;
         }
-        
+
         const temp = self.data[self.top - 1];
         self.data[self.top - 1] = self.data[self.top - n - 1];
         self.data[self.top - n - 1] = temp;
@@ -276,7 +276,7 @@ pub const EvmMemory = struct {
     /// 32バイトのデータを保存
     pub fn store(self: *EvmMemory, offset: usize, value: EVMu256) !void {
         const end_offset = offset + 32;
-        
+
         // メモリを必要に応じて拡張
         if (end_offset > self.data.items.len) {
             try self.data.resize(end_offset);
@@ -294,7 +294,7 @@ pub const EvmMemory = struct {
     /// 32バイトのデータを読み込み
     pub fn load(self: *const EvmMemory, offset: usize) EVMu256 {
         const end_offset = offset + 32;
-        
+
         if (end_offset <= self.data.items.len) {
             return EVMu256.fromBytes(self.data.items[offset..end_offset]);
         } else {
@@ -306,11 +306,11 @@ pub const EvmMemory = struct {
     /// 任意のバイト列を書き込み
     pub fn writeBytes(self: *EvmMemory, offset: usize, data: []const u8) !void {
         const end_offset = offset + data.len;
-        
+
         if (end_offset > self.data.items.len) {
             try self.data.resize(end_offset);
         }
-        
+
         @memcpy(self.data.items[offset..end_offset], data);
     }
 
@@ -436,22 +436,22 @@ test "EVMu256 arithmetic" {
     const a = evm_types.EVMu256.fromU64(100);
     const b = evm_types.EVMu256.fromU64(200);
     const c = a.add(b);
-    
+
     try std.testing.expect(c.lo == 300);
     try std.testing.expect(c.hi == 0);
 }
 
 test "Stack operations" {
     var stack = evm_types.EvmStack.init();
-    
+
     // プッシュ
     try stack.push(evm_types.EVMu256.fromU64(10));
     try stack.push(evm_types.EVMu256.fromU64(20));
-    
+
     // ポップ
     const b = try stack.pop();
     const a = try stack.pop();
-    
+
     try std.testing.expect(a.lo == 10);
     try std.testing.expect(b.lo == 20);
 }
@@ -460,11 +460,11 @@ test "Memory operations" {
     const allocator = std.testing.allocator;
     var memory = evm_types.EvmMemory.init(allocator);
     defer memory.deinit();
-    
+
     // 書き込み
     const value = evm_types.EVMu256.fromU64(0x1234);
     try memory.store(0, value);
-    
+
     // 読み込み
     const loaded = memory.load(0);
     try std.testing.expect(loaded.eq(value));
@@ -474,12 +474,12 @@ test "Storage operations" {
     const allocator = std.testing.allocator;
     var storage = evm_types.EvmStorage.init(allocator);
     defer storage.deinit();
-    
+
     // 保存
     const key = evm_types.EVMu256.fromU64(1);
     const value = evm_types.EVMu256.fromU64(100);
     try storage.store(key, value);
-    
+
     // 読み込み
     const loaded = storage.load(key);
     try std.testing.expect(loaded.eq(value));

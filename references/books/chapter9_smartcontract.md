@@ -17,7 +17,7 @@ free: true
 Opcode.JUMP => {
     const dest = try ctx.stack.pop();
     const jump_pc = @as(usize, @intCast(dest.lo));
-    
+
     // ジャンプ先の検証
     if (jump_pc >= ctx.code.len) {
         return error.InvalidJumpDestination;
@@ -25,7 +25,7 @@ Opcode.JUMP => {
     if (ctx.code[jump_pc] != Opcode.JUMPDEST) {
         return error.InvalidJumpDestination;
     }
-    
+
     ctx.pc = jump_pc;
 },
 
@@ -40,18 +40,18 @@ Opcode.JUMPDEST => {
 Opcode.JUMPI => {
     const dest = try ctx.stack.pop();
     const condition = try ctx.stack.pop();
-    
+
     // 条件が真（非ゼロ）の場合のみジャンプ
     if (condition.hi != 0 or condition.lo != 0) {
         const jump_pc = @as(usize, @intCast(dest.lo));
-        
+
         if (jump_pc >= ctx.code.len) {
             return error.InvalidJumpDestination;
         }
         if (ctx.code[jump_pc] != Opcode.JUMPDEST) {
             return error.InvalidJumpDestination;
         }
-        
+
         ctx.pc = jump_pc;
     } else {
         ctx.pc += 1;
@@ -67,17 +67,17 @@ Opcode.JUMPI => {
 Opcode.CALLDATALOAD => {
     const offset = try ctx.stack.pop();
     const offset_usize = @as(usize, @intCast(offset.lo));
-    
+
     var bytes: [32]u8 = [_]u8{0} ** 32;
-    const available = if (offset_usize < ctx.calldata.len) 
-        @min(32, ctx.calldata.len - offset_usize) 
-    else 
+    const available = if (offset_usize < ctx.calldata.len)
+        @min(32, ctx.calldata.len - offset_usize)
+    else
         0;
-    
+
     if (available > 0) {
         @memcpy(bytes[0..available], ctx.calldata[offset_usize..offset_usize + available]);
     }
-    
+
     try ctx.stack.push(EVMu256.fromBytes(&bytes));
 },
 ```
@@ -88,14 +88,14 @@ Opcode.CALLDATALOAD => {
 Opcode.RETURN => {
     const offset = try ctx.stack.pop();
     const length = try ctx.stack.pop();
-    
+
     const mem_offset = @as(usize, @intCast(offset.lo));
     const mem_length = @as(usize, @intCast(length.lo));
-    
+
     if (mem_offset + mem_length <= ctx.memory.data.items.len) {
         ctx.return_data = ctx.memory.data.items[mem_offset..mem_offset + mem_length];
     }
-    
+
     ctx.stopped = true;
 },
 ```
@@ -152,13 +152,13 @@ solc --bin --abi SimpleAdder.sol
 ```zig
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
-    
+
     // SimpleAdderのランタイムバイトコード（一部抜粋）
-    const runtime_code = try std.fmt.hexToBytes(allocator, 
+    const runtime_code = try std.fmt.hexToBytes(allocator,
         "608060405234801561000f575f80fd5b5060043610610029..."
     );
     defer allocator.free(runtime_code);
-    
+
     // add(5, 3)を呼び出すためのcalldata
     // 0x771602f7 = add関数のセレクタ
     // その後に引数5と3が続く
@@ -168,13 +168,13 @@ pub fn main() !void {
         "0000000000000000000000000000000000000000000000000000000000000003"
     );
     defer allocator.free(calldata);
-    
+
     // EVM実行
     var ctx = EvmContext.init(allocator, runtime_code, calldata, 3000000);
     defer ctx.deinit();
-    
+
     try execute(&ctx);
-    
+
     // 結果の確認
     if (ctx.return_data) |data| {
         const result = EVMu256.fromBytes(data);
@@ -193,11 +193,11 @@ pragma solidity ^0.8.0;
 
 contract Counter {
     uint256 public count;
-    
+
     function increment() public {
         count += 1;
     }
-    
+
     function getCount() public view returns (uint256) {
         return count;
     }
@@ -240,17 +240,17 @@ pub fn callContract(
     // 1. コンテキストを初期化
     var ctx = EvmContext.init(allocator, code, calldata, gas_limit);
     defer ctx.deinit();
-    
+
     // 2. バイトコードを実行
     try execute(&ctx);
-    
+
     // 3. 結果を返す
     if (ctx.return_data) |data| {
         const result = try allocator.alloc(u8, data.len);
         @memcpy(result, data);
         return result;
     }
-    
+
     return &[_]u8{};
 }
 ```
@@ -296,13 +296,13 @@ execute(&ctx) catch |err| {
 // 有効なジャンプ先を事前に計算
 pub fn analyzeJumpDests(code: []const u8) !std.AutoHashMap(usize, void) {
     var valid_dests = std.AutoHashMap(usize, void).init(allocator);
-    
+
     for (code, 0..) |opcode, i| {
         if (opcode == Opcode.JUMPDEST) {
             try valid_dests.put(i, {});
         }
     }
-    
+
     return valid_dests;
 }
 ```
