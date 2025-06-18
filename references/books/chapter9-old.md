@@ -134,7 +134,228 @@ Contract JSON ABI
 では、これらを踏まえてZigコードを書いていきます。
 まずEVMデータ構造の基本定義です。
 
+## Zigで256ビット整数を実装する
+
+EVMの特徴の一つは、256ビット整数を基本データ型として使うことです。Zigには標準で256ビット整数型がないため、独自に実装します。
+
+### なぜ256ビットなのか
+
+EVMが256ビット整数を採用した理由：
+
+1. **暗号学的な要件**
+   - Ethereumのアドレスは160ビット（20バイト）
+   - Keccak-256ハッシュ値は256ビット（32バイト）
+   - これらを1つの整数型で扱える
+
+2. **金融計算の精度**
+   - 10^77まで表現可能（2^256 ≈ 1.15 × 10^77）
+   - Wei単位（10^-18 ETH）でも十分な精度を確保
+   - オーバーフローのリスクを最小化
+
+3. **効率的な実装**
+   - 32バイト = 256ビットはメモリアライメントに適している
+   - 多くのCPUが64ビット演算をサポート → 4回の演算で処理可能
+
+### なぜ128ビット×2で実装するのか
+
+256ビット整数を実装する方法：
+
+1. **u64×4**: 最も汎用的だが、キャリー処理が複雑
+2. **u128×2**: Zigがu128をサポートしているため効率的
+3. **単一のu256**: Zigには存在しない
+
+```text
+256ビット整数の構造：
+┌─────────────────────┬─────────────────────┐
+│    上位128ビット    │    下位128ビット    │
+│      (hi)           │      (lo)           │
+└─────────────────────┴─────────────────────┘
+```
+
 evm_types.zigを新規に作成し、以下のように記述します。
+
+### EVMu256型の実装
+
+```zig
+const std = @import("std");
+
+/// EVM用の256ビット整数型
+/// 上位128ビットと下位128ビットに分けて管理
+pub const EVMu256 = struct {
+    hi: u128, // 上位128ビット
+    lo: u128, // 下位128ビット
+
+    /// ゼロ値を作成
+    pub fn zero() EVMu256 {
+        return EVMu256{ .hi = 0, .lo = 0 };
+    }
+
+    /// 1を作成
+    pub fn one() EVMu256 {
+        return EVMu256{ .hi = 0, .lo = 1 };
+    }
+
+    /// u64から変換
+    pub fn fromU64(value: u64) EVMu256 {
+        return EVMu256{ .hi = 0, .lo = value };
+    }
+
+    /// 加算（オーバーフローはラップアラウンド）
+    pub fn add(self: EVMu256, other: EVMu256) EVMu256 {
+        // 下位128ビットの加算
+        const result_lo = self.lo +% other.lo;
+        // キャリー（桁上がり）の計算
+        const carry = if (result_lo < self.lo) 1 else 0;
+        // 上位128ビットの加算（キャリーを含む）
+        const result_hi = self.hi +% other.hi +% carry;
+
+        return EVMu256{ .hi = result_hi, .lo = result_lo };
+    }
+
+    /// 減算（アンダーフローはラップアラウンド）
+    pub fn sub(self: EVMu256, other: EVMu256) EVMu256 {
+        // 下位128ビットの減算
+        const result_lo = self.lo -% other.lo;
+        // ボロー（桁借り）の計算
+        const borrow = if (self.lo < other.lo) 1 else 0;
+        // 上位128ビットの減算（ボローを含む）
+        const result_hi = self.hi -% other.hi -% borrow;
+
+        return EVMu256{ .hi = result_hi, .lo = result_lo };
+    }
+
+    /// 等価比較
+    pub fn eq(self: EVMu256, other: EVMu256) bool {
+        return self.hi == other.hi and self.lo == other.lo;
+    }
+
+    /// ゼロかどうかの判定
+    pub fn isZero(self: EVMu256) bool {
+        return self.hi == 0 and self.lo == 0;
+    }
+
+    /// バイト配列への変換（ビッグエンディアン）
+    pub fn toBytes(self: EVMu256) [32]u8 {
+        var bytes: [32]u8 = undefined;
+
+        // 上位128ビットをバイト配列に変換
+        for (0..16) |i| {
+            const shift = @as(u7, @intCast((15 - i) * 8));
+            bytes[i] = @truncate(self.hi >> shift);
+        }
+
+        // 下位128ビットをバイト配列に変換
+        for (0..16) |i| {
+            const shift = @as(u7, @intCast((15 - i) * 8));
+            bytes[i + 16] = @truncate(self.lo >> shift);
+        }
+
+        return bytes;
+    }
+
+    /// バイト配列からの変換（ビッグエンディアン）
+    pub fn fromBytes(bytes: []const u8) EVMu256 {
+        var hi: u128 = 0;
+        var lo: u128 = 0;
+
+        const len = @min(bytes.len, 32);
+        const offset = if (len < 32) 32 - len else 0;
+
+        for (bytes, 0..) |byte, i| {
+            const pos = offset + i;
+            if (pos < 16) {
+                const shift = @as(u7, @intCast((15 - pos) * 8));
+                hi |= @as(u128, byte) << shift;
+            } else if (pos < 32) {
+                const shift = @as(u7, @intCast((31 - pos) * 8));
+                lo |= @as(u128, byte) << shift;
+            }
+        }
+
+        return EVMu256{ .hi = hi, .lo = lo };
+    }
+};
+```
+
+## スタックの実装
+
+EVMのスタックは最大1024要素を格納できるLIFO（Last In First Out）構造です。
+
+### エラーハンドリングについて
+
+EVMのスタック操作では、以下の2つのエラーが発生する可能性があります：
+
+1. **StackOverflow**: スタックに1024個を超える要素をプッシュしようとした場合
+2. **StackUnderflow**: 空のスタックからポップしようとした場合
+
+これらのエラーは、スマートコントラクトの実行を即座に停止させ、トランザクション全体を失敗させます。
+Zigのエラーハンドリング機構（`!`と`error`）を使って、これらを適切に処理します。
+
+```zig
+/// EVMスタック
+pub const EvmStack = struct {
+    data: [1024]EVMu256,  // 固定サイズ配列
+    top: usize,           // スタックトップの位置
+
+    /// 新しいスタックを作成
+    pub fn init() EvmStack {
+        return EvmStack{
+            .data = undefined,  // 初期化は不要
+            .top = 0,
+        };
+    }
+
+    /// 値をプッシュ
+    pub fn push(self: *EvmStack, value: EVMu256) !void {
+        if (self.top >= 1024) {
+            return error.StackOverflow;
+        }
+        self.data[self.top] = value;
+        self.top += 1;
+    }
+
+    /// 値をポップ
+    pub fn pop(self: *EvmStack) !EVMu256 {
+        if (self.top == 0) {
+            return error.StackUnderflow;
+        }
+        self.top -= 1;
+        return self.data[self.top];
+    }
+
+    /// スタックの深さを取得
+    pub fn depth(self: *const EvmStack) usize {
+        return self.top;
+    }
+
+    /// n番目の要素を複製（DUP命令用）
+    pub fn dup(self: *EvmStack, n: usize) !void {
+        if (self.top < n) {
+            return error.StackUnderflow;
+        }
+        if (self.top >= 1024) {
+            return error.StackOverflow;
+        }
+
+        const value = self.data[self.top - n];
+        self.data[self.top] = value;
+        self.top += 1;
+    }
+
+    /// n番目の要素と交換（SWAP命令用）
+    pub fn swap(self: *EvmStack, n: usize) !void {
+        if (self.top < n + 1) {
+            return error.StackUnderflow;
+        }
+
+        const temp = self.data[self.top - 1];
+        self.data[self.top - 1] = self.data[self.top - n - 1];
+        self.data[self.top - n - 1] = temp;
+    }
+};
+```
+
+コード全体は次のようになります。
 
 ```evm_types.zig
 //! EVMデータ構造定義
