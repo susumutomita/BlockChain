@@ -15,7 +15,7 @@ graph TD
     Check -->|No| Increment[nonce += 1]
     Increment --> Calc
     Check -->|Yes| Success[マイニング成功!<br/>ブロック確定]
-    
+
     style Start fill:#f9f,stroke:#333,stroke-width:2px
     style Success fill:#9f9,stroke:#333,stroke-width:2px
     style Check fill:#ff9,stroke:#333,stroke-width:2px
