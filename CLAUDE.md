@@ -76,7 +76,6 @@ zig build run -- --listen 8003 --connect 127.0.0.1:8001 --call 0x123456 771602f7
 - `docker-compose.yml`を使用してコンテナ化された環境を構築可能。
 - テストやビルドもDocker内で実行可能。
 
-
 # Claude Code Spec-Driven Development
 
 This project implements Kiro-style Spec-Driven Development for Claude Code using hooks and slash commands.
