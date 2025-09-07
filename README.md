@@ -1,204 +1,180 @@
-# 🔗 Zigで学ぶブロックチェーン実装入門
-
-<p align="center">
-  <img src="https://img.shields.io/badge/価格-500円-success?style=for-the-badge" alt="価格">
-  <img src="https://img.shields.io/badge/対象-初中級エンジニア-blue?style=for-the-badge" alt="対象">
-  <img src="https://img.shields.io/badge/ページ数-約300-orange?style=for-the-badge" alt="ページ数">
-</p>
-
+<!-- textlint-enable ja-technical-writing/sentence-length -->
 ![GitHub last commit (by committer)](https://img.shields.io/github/last-commit/susumutomita/BlockChain)
 ![GitHub top language](https://img.shields.io/github/languages/top/susumutomita/BlockChain)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/susumutomita/BlockChain)
+![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/susumutomita/BlockChain)
+![GitHub repo size](https://img.shields.io/github/repo-size/susumutomita/BlockChain)
 [![Zig CI](https://github.com/susumutomita/BlockChain/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/susumutomita/BlockChain/actions/workflows/ci.yml)
+<!-- textlint-enable ja-technical-writing/sentence-length -->
 
-## ⚠️ 重要：教育用コンテンツです
+# Zig Simple Blockchain
 
-**本プロジェクトは学習目的専用です。実際の暗号通貨や商用システムでの使用は絶対に避けてください。**
+シンプルなブロックチェーンの Zig 言語による実装です。
+ブロックチェーンの基本的な概念を学ぶためのプロジェクトです。
 
-- ✅ ブロックチェーンの仕組みを理解するための教材
-- ✅ Zig言語の実践的な学習
-- ❌ 本番環境での使用
-- ❌ 実際の資産を扱うシステム
+## 機能
 
-## 📚 この本で学べること
+- ブロック生成
+- トランザクション管理
+- SHA-256 ハッシュ計算
+- Proof of Work (PoW) マイニング
+- デバッグログ機能
 
-### 🎯 到達目標
-ブロックチェーンの仕組みを**実装レベル**で理解し、簡易的なEVMまで自作できるようになります。
+## 主要なコンポーネント
 
-### 📊 学習の流れ
+### ブロック (Block)
 
-```mermaid
-graph LR
-    A[基礎概念] --> B[ブロック構造]
-    B --> C[ハッシュチェーン]
-    C --> D[マイニング/PoW]
-    D --> E[P2Pネットワーク]
-    E --> F[簡易EVM]
-    F --> G[スマートコントラクト]
-```
+- インデックス番号
+- タイムスタンプ
+- 前ブロックのハッシュ
+- トランザクションリスト
+- Nonce値（マイニング用）
+- データ
+- 自身のハッシュ値
 
-## 📖 章構成と内容
+### トランザクション (Transaction)
 
-### 第1章：はじめに - ブロックチェーンとは何か
-- ブロックチェーンの基本概念
-- 中央集権vs分散型の違い
-- なぜZig言語を使うのか
+- 送信者 (sender)
+- 受信者 (receiver)
+- 取引金額 (amount)
 
-### 第2章：開発環境のセットアップ
-- Zigのインストール
-- プロジェクト構成
-- Hello, Blockchain!
-
-### 第3章：最初のブロックを作ろう
-- Block構造体の実装
-- SHA-256ハッシュ計算
-- ブロックの連鎖
-
-```zig
-// ブロックの基本構造
-const Block = struct {
-    index: u32,              // ブロック番号
-    timestamp: u64,          // タイムスタンプ
-    prev_hash: [32]u8,       // 前ブロックのハッシュ
-    transactions: ArrayList, // トランザクション
-    hash: [32]u8,           // このブロックのハッシュ
-};
-```
-
-### 第4章：Proof of Work - マイニングの実装
-- nonceとは何か
-- 難易度の概念
-- マイニングアルゴリズム
-
-### 第5章：コードのリファクタリング
-- モジュール分割
-- エラーハンドリング
-- テスト駆動開発
-
-### 第6章：P2P通信の基礎
-- TCP/IPソケット通信
-- サーバー/クライアントモデル
-- メッセージプロトコル
-
-### 第7章：P2Pブロックチェーンネットワーク
-- ノード間のブロック共有
-- ゴシッププロトコル
-- チェーンの同期
-
-### 第8章：ネットワークの完全同期
-- 最長チェーンルール
-- フォーク処理
-- 状態管理
-
-### 第9章：簡易EVM実装
-- スタックマシンの基礎
-- 基本的なオペコード
-- ガス計算の概念
-
-### 第10章：トランザクション署名の基礎（簡易版）
-- 公開鍵暗号の概念
-- アドレス生成の仕組み
-- 署名検証の基本
-
-## 🚀 クイックスタート
-
-### 必要な環境
-- Zig 0.11.0以上
-- Git
-- テキストエディタ（VSCode推奨）
-
-### 基本的な実行方法
+## ビルドと実行方法
 
 ```bash
-# リポジトリのクローン
-git clone https://github.com/susumutomita/BlockChain.git
-cd BlockChain
-
-# ビルド
+# プロジェクトのビルド
 zig build
 
-# 実行
-zig build run
+# （P2Pノードとして起動する例）
+zig build run -- --listen 9000
+```
 
-# テスト
+## デバッグモード
+
+`src/main.zig` の先頭にある `debug_logging` 定数を変更することで、
+デバッグ情報の出力を制御できます：
+
+```zig
+const debug_logging = true;  // デバッグ情報を出力
+const debug_logging = false; // デバッグ情報を出力しない
+```
+
+## 学習ポイント
+
+このプロジェクトでは以下の概念を学ぶことができます：
+
+1. **ブロックチェーンの基本構造**
+   - ブロックの連鎖
+   - ハッシュによる連携
+   - トランザクションの管理
+
+2. **暗号技術の基礎**
+   - SHA-256ハッシュ関数
+   - Proof of Work (PoW)
+
+3. **Zigプログラミング**
+   - 構造体の定義と使用
+   - メモリ管理
+   - ジェネリックプログラミング
+   - コンパイル時の最適化
+
+## 今後の拡張案
+
+- [ ] ブロックチェーンの永続化
+- [ ] P2Pネットワーク機能
+- [ ] 高度な暗号化機能
+- [ ] WebAPI インターフェース
+- [ ] ウォレット機能
+
+## テスト実行
+
+### 基本的なテスト実行
+
+```bash
+# テストを実行する
 zig build test
 ```
 
-### P2Pネットワークの起動
+## ライセンス
 
+MIT License
+
+## 貢献
+
+プルリクエストや問題報告は歓迎します。
+以下の手順で貢献できます：
+
+1. このリポジトリをフォーク
+2. 新しいブランチを作成
+3. 変更をコミット
+4. プルリクエストを送信
+
+## EVM の使い方（SimpleAdder をデプロイ＆呼び出し）
+
+以下は `references/chapter9/contract/SimpleAdder.sol`（Adder）を使った最短手順です。
+
+### 前提
+- Zig が入っている
+- solc が入っている（`solc --version` で確認）
+- このリポジトリ直下で実行
+
+### 1) ビルド
 ```bash
-# ノード1（ポート8000）
-zig build run -- --listen 8000
-
-# ノード2（ノード1に接続）
-zig build run -- --listen 8001 --connect 127.0.0.1:8000
+zig build
 ```
 
-## 🎓 学習のポイント
-
-### なぜZig言語？
-- **明示的なメモリ管理**：ブロックチェーンの仕組みを深く理解
-- **低レベル制御**：ハッシュ計算やバイト操作を直接実装
-- **シンプルな言語仕様**：余計な抽象化がなく、本質に集中
-
-### このプロジェクトの特徴
-1. **段階的な実装**：各章で少しずつ機能を追加
-2. **動くコード**：すべての章にサンプルコード付き
-3. **実践的な内容**：実際のブロックチェーンの仕組みを簡略化して実装
-
-## 📊 コードの規模
-
-```
-総行数: 約3,000行
-ファイル数: 15個
-テストカバレッジ: 基本機能のみ
+### 2) コントラクトのバイトコード生成（creation bytecode）
+```bash
+mkdir -p /tmp/out
+solc --bin references/chapter9/contract/SimpleAdder.sol -o /tmp/out --overwrite
+# 生成物: /tmp/out/Adder.bin
 ```
 
-## ⚡ 主な機能と制限
+### 3) 関数セレクタと引数エンコード（add(uint256,uint256) の例: 2 + 3）
+```bash
+SEL=$(solc --hashes references/chapter9/contract/SimpleAdder.sol | awk '/add\(uint256,uint256\)/{print $1}' | sed 's/://')
+A=$(printf "%064x" 2)
+B=$(printf "%064x" 3)
+DATA=0x${SEL}${A}${B}
+echo "$DATA"  # 先頭0xで、4+64+64=132桁のHEX
+```
 
-### ✅ 実装済み機能
-- ブロックの生成とハッシュ計算
-- Proof of Work（難易度調整可能）
-- P2Pネットワーク（TCP/IP）
-- 簡易EVM（20オペコード）
-- ブロックチェーンの同期
+### 4-A) 1プロセスでデプロイ→コールを実行（簡単）
+```bash
+zig build run -- \
+  --listen 9000 \
+  --deploy $(cat /tmp/out/Adder.bin) 0x000000000000000000000000000000000000abcd \
+  --call   0x000000000000000000000000000000000000abcd "$DATA" \
+  --gas 3000000 \
+  --sender 0x000000000000000000000000000000000000dead
+```
+注: 現状 `--gas` は単一値のため、最後に指定した値が両方（deploy/call）に適用されます。困らないよう十分大きめにしてください（例: 3000000）。
 
-### ❌ 未実装/簡略化
-- トランザクション署名（概念のみ）
-- 永続化（メモリのみ）
-- 本格的なセキュリティ
-- スケーラビリティ対策
+### 4-B) 2プロセスで接続して実行（deploy と call のガスを分けたい場合）
+ターミナル1（デプロイ側）:
+```bash
+zig build run -- \
+  --listen 9000 \
+  --deploy $(cat /tmp/out/Adder.bin) 0x000000000000000000000000000000000000abcd \
+  --gas 3000000 \
+  --sender 0x000000000000000000000000000000000000dead
+```
 
-## 🤝 想定読者
+ターミナル2（コール側）:
+```bash
+zig build run -- \
+  --listen 9001 --connect 127.0.0.1:9000 \
+  --call 0x000000000000000000000000000000000000abcd "$DATA" \
+  --gas 100000 \
+  --sender 0x000000000000000000000000000000000000dead
+```
 
-- ブロックチェーンの仕組みを**コードで**理解したい方
-- Zig言語に興味がある方
-- 低レベルプログラミングを学びたい方
-- 「動かしながら学ぶ」スタイルが好きな方
+### 5) 期待される結果
+- ログに `実行結果(hex): 0x...0005` と表示（u256=5）
 
-## 📝 ライセンスと利用規約
+### トラブルシューティング
+- hexToBytes の `InvalidCharacter` エラー: `--call` 直後の入力データHEXが空です。`echo "$DATA"` で値を確認してください。
+- `コントラクトがローカルに見つかりません` と出る: 別プロセスで動かしている場合は `--connect` でピア接続して同期するか、4-A のように1プロセスで実行してください。
 
-MIT License - 教育目的での利用を推奨
+## 注意事項
 
-**再度警告：本実装は教育目的のみ。実運用での使用は危険です。**
-
-## 🌟 今後の学習ステップ
-
-本書を終えた後の推奨学習パス：
-
-1. **より実践的な実装へ**
-   - Substrate（Rust）
-   - go-ethereum（Go）
-   
-2. **理論の深堀り**
-   - 暗号理論
-   - 分散システム論
-   
-3. **実用的なdApp開発**
-   - Solidity
-   - Web3開発
-
----
-
-<p align="center">
-  <strong>🎯 ブロックチェーンを「作って」理解する、新しい学習体験を！</strong>
-</p>
+これは学習用のプロジェクトです。実運用は想定していません。

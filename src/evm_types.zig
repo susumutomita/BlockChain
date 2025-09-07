@@ -296,11 +296,13 @@ pub const EvmMemory = struct {
     /// メモリを必要に応じて拡張
     pub fn ensureSize(self: *EvmMemory, size: usize) !void {
         if (size > self.data.items.len) {
+            // 拡張前の長さを保持
+            const old_len = self.data.items.len;
             // サイズを32バイト単位に切り上げて拡張
             const new_size = ((size + 31) / 32) * 32;
             try self.data.resize(new_size);
-            // 拡張部分を0で初期化
-            var i = self.data.items.len;
+            // 新しく確保した部分を0で初期化
+            var i: usize = old_len;
             while (i < new_size) : (i += 1) {
                 self.data.items[i] = 0;
             }
