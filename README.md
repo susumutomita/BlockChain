@@ -171,6 +171,32 @@ zig build run -- \
 ### 5) 期待される結果
 - ログに `実行結果(hex): 0x...0005` と表示（u256=5）
 
+### 四則演算の呼び出し例（Adder.sol）
+- add(10,11): 上の作り方で `A=10, B=11` にして `--call` 実行
+- sub(10,3):
+  ```bash
+  SEL=$(solc --hashes references/chapter9/contract/SimpleAdder.sol | awk '/sub\(uint256,uint256\)/{print $1}' | sed 's/://')
+  A=$(printf "%064x" 10); B=$(printf "%064x" 3); DATA=0x${SEL}${A}${B}
+  zig build run -- --listen 9001 --connect 127.0.0.1:9000 --call 0x000000000000000000000000000000000000abcd "$DATA" --gas 100000 --sender 0x000000000000000000000000000000000000dead
+  # 期待: 結果=7
+  ```
+- mul(6,7):
+  ```bash
+  SEL=$(solc --hashes references/chapter9/contract/SimpleAdder.sol | awk '/mul\(uint256,uint256\)/{print $1}' | sed 's/://')
+  A=$(printf "%064x" 6); B=$(printf "%064x" 7); DATA=0x${SEL}${A}${B}
+  zig build run -- --listen 9001 --connect 127.0.0.1:9000 --call 0x000000000000000000000000000000000000abcd "$DATA" --gas 100000 --sender 0x000000000000000000000000000000000000dead
+  # 期待: 結果=42
+  ```
+- div(100,4):
+  ```bash
+  SEL=$(solc --hashes references/chapter9/contract/SimpleAdder.sol | awk '/div\(uint256,uint256\)/{print $1}' | sed 's/://')
+  A=$(printf "%064x" 100); B=$(printf "%064x" 4); DATA=0x${SEL}${A}${B}
+  zig build run -- --listen 9001 --connect 127.0.0.1:9000 --call 0x000000000000000000000000000000000000abcd "$DATA" --gas 100000 --sender 0x000000000000000000000000000000000000dead
+  # 期待: 結果=25
+  ```
+
+注意: `sub` は `b <= a` を前提に `require` でアンダーフローを防ぎ、`div` は 0 除算を `require` で拒否します。条件を満たさない場合は REVERT になります。
+
 ### トラブルシューティング
 - hexToBytes の `InvalidCharacter` エラー: `--call` 直後の入力データHEXが空です。`echo "$DATA"` で値を確認してください。
 - `コントラクトがローカルに見つかりません` と出る: 別プロセスで動かしている場合は `--connect` でピア接続して同期するか、4-A のように1プロセスで実行してください。
