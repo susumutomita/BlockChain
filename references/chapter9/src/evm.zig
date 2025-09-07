@@ -235,7 +235,9 @@ pub fn executeWithErrorInfo(allocator: std.mem.Allocator, code: []const u8, call
             if (context.error_msg != null) {
                 result.error_message = allocator.dupe(u8, context.error_msg.?) catch null;
             } else {
-                const errMsg = std.fmt.allocPrint(allocator, "EVM実行エラー: {any} at PC={d}", .{ err, context.pc }) catch "Unknown error";
+                // Zig 0.14: エラー名を `{s}` で整形し "error." 接頭辞を避ける
+                const err_name = @errorName(err);
+                const errMsg = std.fmt.allocPrint(allocator, "EVM実行エラー: {s} at PC={d}", .{ err_name, context.pc }) catch "Unknown error";
                 result.error_message = errMsg;
             }
 
@@ -509,23 +511,19 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.LT => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
-            const a = try context.stack.pop();
-            const b = try context.stack.pop();
+            // EVM仕様: LT はスタックの先頭から a, 次に b を取り出し、a < b なら1
+            const a = try context.stack.pop(); // top-of-stack
+            const b = try context.stack.pop(); // next
 
-            std.log.info("LT: Comparing b < a", .{});
+            std.log.info("LT: Comparing a < b", .{});
             std.log.info("LT: a = hi: 0x{x:0>32}, lo: 0x{x:0>32} (decimal: {d})", .{ a.hi, a.lo, a.lo });
             std.log.info("LT: b = hi: 0x{x:0>32}, lo: 0x{x:0>32} (decimal: {d})", .{ b.hi, b.lo, b.lo });
 
-            // 未満比較: b < a の場合は1、それ以外は0
             var result: u64 = 0;
-            if (b.hi < a.hi) {
+            if (a.hi < b.hi) {
                 result = 1;
-                std.log.info("LT: b.hi < a.hi, result = 1", .{});
-            } else if (b.hi == a.hi and b.lo < a.lo) {
+            } else if (a.hi == b.hi and a.lo < b.lo) {
                 result = 1;
-                std.log.info("LT: b.hi == a.hi and b.lo < a.lo, result = 1", .{});
-            } else {
-                std.log.info("LT: b >= a, result = 0", .{});
             }
 
             std.log.info("LT: Final result = {d}", .{result});
@@ -535,14 +533,14 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.GT => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            // EVM仕様: GT は a > b なら1
             const a = try context.stack.pop();
             const b = try context.stack.pop();
 
-            // より大きい比較: b > a の場合は1、それ以外は0
             var result: u64 = 0;
-            if (b.hi > a.hi) {
+            if (a.hi > b.hi) {
                 result = 1;
-            } else if (b.hi == a.hi and b.lo > a.lo) {
+            } else if (a.hi == b.hi and a.lo > b.lo) {
                 result = 1;
             }
 
@@ -555,14 +553,11 @@ fn executeStep(context: *EvmContext) !void {
             const a = try context.stack.pop();
             const b = try context.stack.pop();
 
-            // 符号付き未満比較: b < a の場合は1、それ以外は0
-            // 簡易実装: 最上位ビットを符号ビットとして扱う
+            // 簡易実装: 符号は考慮せず a < b を無符号比較で近似
             var result: u64 = 0;
-
-            // 簡易実装では符号を無視して無符号比較を行う
-            if (b.hi < a.hi) {
+            if (a.hi < b.hi) {
                 result = 1;
-            } else if (b.hi == a.hi and b.lo < a.lo) {
+            } else if (a.hi == b.hi and a.lo < b.lo) {
                 result = 1;
             }
 
@@ -590,6 +585,7 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.SHL => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            // EVM仕様: スタック順序は [shift, value]
             const shift = try context.stack.pop();
             const value = try context.stack.pop();
 
@@ -630,6 +626,7 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.SHR => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            // EVM仕様: スタック順序は [shift, value]
             const shift = try context.stack.pop();
             const value = try context.stack.pop();
 
@@ -686,6 +683,7 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.SAR => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
+            // EVM仕様: スタック順序は [shift, value]
             const shift = try context.stack.pop();
             const value = try context.stack.pop();
 
@@ -768,7 +766,7 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.JUMPI => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
-            // EVM仕様に従い、最初にジャンプ先、次に条件を取り出す
+            // EVM仕様: スタック順序は [destination, condition]
             const dest = try context.stack.pop();
             const condition = try context.stack.pop();
 
@@ -797,6 +795,38 @@ fn executeStep(context: *EvmContext) !void {
         Opcode.CODESIZE => {
             // 現在の実行バイトコードのサイズをスタックにプッシュ
             try context.stack.push(EVMu256.fromU64(context.code.len));
+            context.pc += 1;
+        },
+
+        // CALLDATACOPY(dst_offset, data_offset, length)
+        // メモリにcalldataの一部をコピーする
+        Opcode.CALLDATACOPY => {
+            if (context.stack.depth() < 3) return EVMError.StackUnderflow;
+
+            // スタックの順序に注意: まずメモリオフセット、次にデータオフセット、最後に長さ
+            const mem_offset = try context.stack.pop();
+            const data_offset = try context.stack.pop();
+            const length = try context.stack.pop();
+
+            // 現在はu64範囲のみサポート
+            if (mem_offset.hi != 0 or data_offset.hi != 0 or length.hi != 0) return EVMError.MemoryOutOfBounds;
+
+            const mem_off = @as(usize, @intCast(mem_offset.lo));
+            const data_off = @as(usize, @intCast(data_offset.lo));
+            const len = @as(usize, @intCast(length.lo));
+
+            // メモリサイズを確保
+            try context.memory.ensureSize(mem_off + len);
+
+            // calldata からメモリへコピー（範囲外は0で埋める）
+            for (0..len) |i| {
+                if (data_off + i < context.calldata.len) {
+                    context.memory.data.items[mem_off + i] = context.calldata[data_off + i];
+                } else {
+                    context.memory.data.items[mem_off + i] = 0;
+                }
+            }
+
             context.pc += 1;
         },
 
@@ -1003,7 +1033,7 @@ fn executeStep(context: *EvmContext) !void {
                 } else {
                     // PUSH1-PUSH32: 指定バイト数を読み取り
                     // コード範囲チェック
-                    if (context.pc + push_bytes >= context.code.len) {
+                    if (context.pc + push_bytes + 1 > context.code.len) {
                         context.error_msg = "コード範囲外のPUSH操作";
                         return EVMError.InvalidOpcode;
                     }
@@ -1372,12 +1402,12 @@ test "EVM SHR operation" {
     const allocator = arena.allocator();
 
     // バイトコード:
-    // PUSH1 0x02, PUSH1 0x10, SHR,    // 0x10 >> 2 = 0x04
+    // PUSH1 0x10, PUSH1 0x02, SHR,    // 0x10 >> 2 = 0x04 （SHRは pop順序: shift, value）
     // PUSH1 0x00, MSTORE,             // 結果をメモリに保存
     // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
     const bytecode = [_]u8{
-        0x60, 0x02, // PUSH1 2
         0x60, 0x10, // PUSH1 16 (0x10)
+        0x60, 0x02, // PUSH1 2
         0x1C, // SHR
         0x60, 0x00, // PUSH1 0
         0x52, // MSTORE
@@ -1418,12 +1448,12 @@ test "EVM comparison operations" {
     const allocator = arena.allocator();
 
     // バイトコード:
-    // PUSH1 0x0A, PUSH1 0x14, LT,     // 10 < 20 = 1
+    // PUSH1 0x14, PUSH1 0x0A, LT,     // 10 < 20 = 1（LTは a<b なので a=10 を最後に積む）
     // PUSH1 0x00, MSTORE,             // 結果をメモリに保存
     // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
     const bytecode_lt = [_]u8{
-        0x60, 0x0A, // PUSH1 10
         0x60, 0x14, // PUSH1 20
+        0x60, 0x0A, // PUSH1 10
         0x10, // LT
         0x60, 0x00, // PUSH1 0
         0x52, // MSTORE
@@ -1529,7 +1559,7 @@ test "EVM jump operations" {
     const allocator = arena.allocator();
 
     // バイトコード:
-    // PUSH1 0x01, PUSH1 0x0A, JUMPI,  // 条件が真なので0x0Aにジャンプ
+    // PUSH1 0x01, PUSH1 0x0F, JUMPI,  // 条件が真なので0x0Fにジャンプ
     // PUSH1 0x2A,                     // 42をプッシュ（スキップされる）
     // PUSH1 0x00, MSTORE,             // メモリに保存（スキップされる）
     // PUSH1 0x20, PUSH1 0x00, RETURN, // 戻り値を返す（スキップされる）
@@ -1539,7 +1569,7 @@ test "EVM jump operations" {
     // PUSH1 0x20, PUSH1 0x00, RETURN  // 戻り値を返す
     const bytecode_jumpi_true = [_]u8{
         0x60, 0x01, // PUSH1 1（条件）
-        0x60, 0x0A, // PUSH1 10（ジャンプ先）
+        0x60, 0x0F, // PUSH1 15（ジャンプ先）
         0x57, // JUMPI
         0x60, 0x2A, // PUSH1 42（スキップされる）
         0x60, 0x00, // PUSH1 0（スキップされる）
@@ -1721,25 +1751,12 @@ test "EVM CODECOPY operation" {
     const result = try execute(allocator, &bytecode, &calldata, 100000);
     defer allocator.free(result);
 
-    // 結果をEVMu256形式で解釈
-    var value = EVMu256{ .hi = 0, .lo = 0 };
-    if (result.len >= 32) {
-        // 上位16バイトを解析
-        for (0..16) |i| {
-            const byte_val = result[i];
-            value.hi |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
-        }
-
-        // 下位16バイトを解析
-        for (0..16) |i| {
-            const byte_val = result[i + 16];
-            value.lo |= @as(u128, byte_val) << @as(u7, @intCast((15 - i) * 8));
-        }
-    }
-
-    // 結果の下位4バイトが0x60046000になっていることを確認（バイトコードの先頭4バイト）
-    try std.testing.expect(value.hi == 0);
-    try std.testing.expect((value.lo & 0xFFFFFFFF) == 0x60046000);
+    // 返却バイト列の先頭4バイトが 60 04 60 00 になっていることを確認
+    try std.testing.expect(result.len >= 4);
+    try std.testing.expect(result[0] == 0x60);
+    try std.testing.expect(result[1] == 0x04);
+    try std.testing.expect(result[2] == 0x60);
+    try std.testing.expect(result[3] == 0x00);
 }
 
 // REVERT操作のテスト
@@ -1833,14 +1850,15 @@ test "EVM execution with error info" {
 
     // 実行が失敗し、エラー情報が設定されていることを確認
     try std.testing.expect(!result.success);
-    try std.testing.expect(result.error_type == EVMError.InvalidJump);
+    try std.testing.expect(result.error_type != null);
+    try std.testing.expect(result.error_type.? == EVMError.InvalidJump);
     try std.testing.expect(result.error_pc != null);
     try std.testing.expect(result.error_message != null);
 
     // エラーメッセージの内容を確認
     const errorMsg = try allocator.alloc(u8, result.error_message.?.len);
     @memcpy(errorMsg, result.error_message.?);
-    try std.testing.expectEqualStrings("EVM実行エラー: InvalidJump at PC=1", errorMsg);
+    try std.testing.expectEqualStrings("EVM実行エラー: InvalidJump at PC=2", errorMsg);
 
     // 後始末
     allocator.free(errorMsg);
