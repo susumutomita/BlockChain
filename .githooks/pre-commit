@@ -1,0 +1,16 @@
+#!/bin/sh
+# Enforce Zig formatting before commit
+
+if ! command -v zig >/dev/null 2>&1; then
+  echo "[pre-commit] zig not found. Install Zig to run formatting check." >&2
+  exit 1
+fi
+
+echo "[pre-commit] Running: zig fmt --check ."
+zig fmt --check . || {
+  echo "\n[pre-commit] Formatting check failed. Please run: zig fmt ." >&2
+  exit 1
+}
+
+exit 0
+

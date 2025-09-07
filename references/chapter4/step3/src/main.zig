@@ -386,4 +386,3 @@ test "ブロック改ざん検出テスト" {
     // 改ざん前後のハッシュが異なることを期待
     try std.testing.expect(!std.mem.eql(u8, originalHash[0..], tamperedHash[0..]));
 }
-

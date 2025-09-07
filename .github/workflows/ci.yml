@@ -19,5 +19,8 @@ jobs:
           version: 0.14.0
           cache: false
 
+      - name: Check formatting
+        run: zig fmt --check .
+
       - name: Run tests
         run: zig build test

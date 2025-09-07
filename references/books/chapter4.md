@@ -8,6 +8,19 @@ free: true
 
 次に、ブロックチェインの**Proof of Work (PoW)** をシンプルに再現してみます。PoWはブロックチェイン(特にビットコイン)で採用されている**合意形成アルゴリズム**で、不正防止のために計算作業(=仕事, Work)を課す仕組みです。
 
+```mermaid
+graph TD
+    Start[開始: nonce = 0] --> Calc[ハッシュ計算]
+    Calc --> Check{難易度を満たす?<br/>例: 先頭が0000...}
+    Check -->|No| Increment[nonce += 1]
+    Increment --> Calc
+    Check -->|Yes| Success[マイニング成功!<br/>ブロック確定]
+
+    style Start fill:#f9f,stroke:#333,stroke-width:2px
+    style Success fill:#9f9,stroke:#333,stroke-width:2px
+    style Check fill:#ff9,stroke:#333,stroke-width:2px
+```
+
 **PoWの仕組み**: ブロックにナンス値(`nonce`)と呼ばれる余分な数値を付加し、その`nonce`を色々変えながらブロック全体のハッシュ値を計算します。
 ナンスはNumber Used Onceの略で、一度しか使わない数値という意味です。
 
