@@ -44,8 +44,8 @@
 # プロジェクトのビルド
 zig build
 
-# プロジェクトの実行
-zig run src/main.zig
+# （P2Pノードとして起動する例）
+zig build run -- --listen 9000
 ```
 
 ## デバッグモード
@@ -85,7 +85,7 @@ const debug_logging = false; // デバッグ情報を出力しない
 - [ ] WebAPI インターフェース
 - [ ] ウォレット機能
 
-## テスト実行とカバレッジ測定
+## テスト実行
 
 ### 基本的なテスト実行
 
@@ -108,7 +108,73 @@ MIT License
 3. 変更をコミット
 4. プルリクエストを送信
 
+## EVM の使い方（SimpleAdder をデプロイ＆呼び出し）
+
+以下は `references/chapter9/contract/SimpleAdder.sol`（Adder）を使った最短手順です。
+
+### 前提
+- Zig が入っている
+- solc が入っている（`solc --version` で確認）
+- このリポジトリ直下で実行
+
+### 1) ビルド
+```bash
+zig build
+```
+
+### 2) コントラクトのバイトコード生成（creation bytecode）
+```bash
+mkdir -p /tmp/out
+solc --bin references/chapter9/contract/SimpleAdder.sol -o /tmp/out --overwrite
+# 生成物: /tmp/out/Adder.bin
+```
+
+### 3) 関数セレクタと引数エンコード（add(uint256,uint256) の例: 2 + 3）
+```bash
+SEL=$(solc --hashes references/chapter9/contract/SimpleAdder.sol | awk '/add\(uint256,uint256\)/{print $1}' | sed 's/://')
+A=$(printf "%064x" 2)
+B=$(printf "%064x" 3)
+DATA=0x${SEL}${A}${B}
+echo "$DATA"  # 先頭0xで、4+64+64=132桁のHEX
+```
+
+### 4-A) 1プロセスでデプロイ→コールを実行（簡単）
+```bash
+zig build run -- \
+  --listen 9000 \
+  --deploy $(cat /tmp/out/Adder.bin) 0x000000000000000000000000000000000000abcd \
+  --call   0x000000000000000000000000000000000000abcd "$DATA" \
+  --gas 3000000 \
+  --sender 0x000000000000000000000000000000000000dead
+```
+注: 現状 `--gas` は単一値のため、最後に指定した値が両方（deploy/call）に適用されます。困らないよう十分大きめにしてください（例: 3000000）。
+
+### 4-B) 2プロセスで接続して実行（deploy と call のガスを分けたい場合）
+ターミナル1（デプロイ側）:
+```bash
+zig build run -- \
+  --listen 9000 \
+  --deploy $(cat /tmp/out/Adder.bin) 0x000000000000000000000000000000000000abcd \
+  --gas 3000000 \
+  --sender 0x000000000000000000000000000000000000dead
+```
+
+ターミナル2（コール側）:
+```bash
+zig build run -- \
+  --listen 9001 --connect 127.0.0.1:9000 \
+  --call 0x000000000000000000000000000000000000abcd "$DATA" \
+  --gas 100000 \
+  --sender 0x000000000000000000000000000000000000dead
+```
+
+### 5) 期待される結果
+- ログに `実行結果(hex): 0x...0005` と表示（u256=5）
+
+### トラブルシューティング
+- hexToBytes の `InvalidCharacter` エラー: `--call` 直後の入力データHEXが空です。`echo "$DATA"` で値を確認してください。
+- `コントラクトがローカルに見つかりません` と出る: 別プロセスで動かしている場合は `--connect` でピア接続して同期するか、4-A のように1プロセスで実行してください。
+
 ## 注意事項
 
-これは学習用のプロジェクトです。
-実際の運用環境での使用は想定していません。
+これは学習用のプロジェクトです。実運用は想定していません。
