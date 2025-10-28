@@ -39,7 +39,7 @@ graph LR
 - 上位128ビット（`hi`）: 値の大きい側の半分
 - 下位128ビット（`lo`）: 値の小さい側の半分
 
-```
+```text
 256ビット整数 = [上位128ビット (hi)] [下位128ビット (lo)]
                 ←――――――――― 256ビット ――――――――→
 ```
@@ -48,14 +48,14 @@ graph LR
 
 例えば、数値`1`を256ビット整数で表現すると：
 
-```
+```text
 hi = 0x0000000000000000000000000000000 (128ビット)
 lo = 0x0000000000000000000000000000001 (128ビット)
 ```
 
 大きな数値、例えば`2^128`（128ビット目が1）の場合：
 
-```
+```text
 hi = 0x0000000000000000000000000000001 (128ビット)
 lo = 0x0000000000000000000000000000000 (128ビット)
 ```
@@ -63,6 +63,7 @@ lo = 0x0000000000000000000000000000000 (128ビット)
 ## Zigでの実装
 
 それでは、ZigでEVM用の256ビット整数型`EVMu256`を実装してみましょう。
+evm_types.zigを新規に作成します。
 
 ### 基本構造体の定義
 
@@ -107,14 +108,15 @@ pub fn add(self: EVMu256, other: EVMu256) EVMu256 {
 }
 ```
 
-重要なポイント：
+重要なポイント。
+
 - `+%`演算子：Zigのラッピング加算（オーバーフロー時に折り返す）
 - キャリー検出：`result_lo < self.lo`でオーバーフロー判定
 - 上位ビットへのキャリー伝播
 
 ### 加算の動作例
 
-```
+```text
 例1: 小さな数の加算（キャリーなし）
   self:  hi=0, lo=10
   other: hi=0, lo=20
@@ -177,8 +179,6 @@ pub fn mul(self: EVMu256, other: EVMu256) EVMu256 {
 }
 ```
 
-注意： この実装は教育目的の簡易版です。実際のEVM実装では、完全な多倍長乗算アルゴリズム（Karatsubaアルゴリズムなど）が必要になります。
-
 ## バイト配列との変換
 
 EVMでは、メモリやストレージとの間でデータをやり取りする際、256ビット整数を32バイトのバイト配列として扱います。
@@ -204,7 +204,8 @@ pub fn toBytes(self: EVMu256) [32]u8 {
 }
 ```
 
-ビッグエンディアン形式：
+ビッグエンディアン形式。
+
 - 最も大きい桁（上位バイト）が配列の先頭に来る
 - EVMの標準的なバイト順序
 
@@ -261,6 +262,124 @@ pub fn gt(self: EVMu256, other: EVMu256) bool {
 }
 ```
 
+## 最終的に出来上がったもの
+
+```evm_types.zig
+//! EVMデータ構造定義
+//!
+//! このモジュールはEthereum Virtual Machine (EVM)の実行に必要な
+//! データ構造を定義します。スマートコントラクト実行環境に
+//! 必要なスタック、メモリ、ストレージなどの構造体を含みます。
+
+const std = @import("std");
+
+/// 256ビット整数型（EVMの基本データ型）
+/// 現在はu128の2つの要素で256ビットを表現
+pub const EVMu256 = struct {
+    // 256ビットを2つのu128値で表現（上位ビットと下位ビット）
+    hi: u128, // 上位128ビット
+    lo: u128, // 下位128ビット
+
+    /// ゼロ値の作成
+    pub fn zero() EVMu256 {
+        return EVMu256{ .hi = 0, .lo = 0 };
+    }
+
+    /// u64値からEVMu256を作成
+    pub fn fromU64(value: u64) EVMu256 {
+        return EVMu256{ .hi = 0, .lo = value };
+    }
+
+    /// 加算演算
+    pub fn add(self: EVMu256, other: EVMu256) EVMu256 {
+        var result = EVMu256{ .hi = self.hi, .lo = self.lo };
+        // 修正: Zigの最新バージョンに合わせて@addWithOverflow呼び出しを変更
+        var overflow: u1 = 0;
+        result.lo, overflow = @addWithOverflow(result.lo, other.lo);
+        // オーバーフローした場合は上位ビットに1を加算
+        result.hi = result.hi + other.hi + overflow;
+        return result;
+    }
+
+    /// 減算演算
+    pub fn sub(self: EVMu256, other: EVMu256) EVMu256 {
+        var result = EVMu256{ .hi = self.hi, .lo = self.lo };
+        // 修正: Zigの最新バージョンに合わせて@subWithOverflow呼び出しを変更
+        var underflow: u1 = 0;
+        result.lo, underflow = @subWithOverflow(result.lo, other.lo);
+        // アンダーフローした場合は上位ビットから1を引く
+        result.hi = result.hi - other.hi - underflow;
+        return result;
+    }
+
+    /// 乗算演算（シンプル実装 - 実際には最適化が必要）
+    pub fn mul(self: EVMu256, other: EVMu256) EVMu256 {
+        // 簡易実装: 下位ビットのみの乗算
+        // 注：完全な256ビット乗算は複雑なため、ここでは省略
+        if (self.hi == 0 and other.hi == 0) {
+            const result_lo = self.lo * other.lo;
+            // シフト演算で上位ビットを取得
+            // 128ビットシフトを避けるために、別の方法で計算
+            // 注: u128に入らない上位ビットは無視される
+            const result_hi = @as(u128, 0); // 簡略化した実装では上位ビットは0として扱う
+            return EVMu256{ .hi = result_hi, .lo = result_lo };
+        } else {
+            // 簡易実装のため、上位ビットがある場合は詳細計算を省略
+            return EVMu256{ .hi = 0, .lo = 0 };
+        }
+    }
+
+    /// 等価比較
+    pub fn eql(self: EVMu256, other: EVMu256) bool {
+        return self.hi == other.hi and self.lo == other.lo;
+    }
+
+    /// フォーマット出力用メソッド
+    /// std.fmt.Formatインターフェースに準拠
+    pub fn format(
+        self: EVMu256,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        // options is used in some format cases below
+
+        if (fmt.len == 0 or fmt[0] == 'd') {
+            // 10進数表示
+            if (self.hi == 0) {
+                // 上位ビットが0の場合は単純に下位ビットを表示
+                try std.fmt.formatInt(self.lo, 10, .lower, options, writer);
+            } else {
+                // 本来は256ビット数値を正確に10進変換する必要があるが、簡易表示
+                try writer.writeAll("0x");
+                try std.fmt.formatInt(self.hi, 16, .lower, .{}, writer);
+                try writer.writeByte('_');
+                try std.fmt.formatInt(self.lo, 16, .lower, .{}, writer);
+            }
+        } else if (fmt[0] == 'x' or fmt[0] == 'X') {
+            // 16進数表示
+            const case: std.fmt.Case = if (fmt[0] == 'X') .upper else .lower;
+            try writer.writeAll("0x");
+
+            // 上位ビットが0でなければ表示
+            if (self.hi != 0) {
+                try std.fmt.formatInt(self.hi, 16, case, .{ .fill = '0', .width = 32 }, writer);
+            }
+
+            try std.fmt.formatInt(self.lo, 16, case, .{ .fill = '0', .width = 32 }, writer);
+        } else {
+            // 不明なフォーマット指定子の場合はデフォルトで16進表示
+            try writer.writeAll("0x");
+            if (self.hi != 0) {
+                try std.fmt.formatInt(self.hi, 16, .lower, .{}, writer);
+                try writer.writeByte('_');
+            }
+            try std.fmt.formatInt(self.lo, 16, .lower, .{}, writer);
+        }
+    }
+};
+```
+
 ## テストコードの例
 
 実装した256ビット整数が正しく動作するか確認しましょう：
@@ -292,7 +411,8 @@ test "EVMu256 basic operations" {
 
 本章では、EVMの基盤となる256ビット整数型`EVMu256`を実装しました。
 
-実装したポイント：
+実装したポイント。
+
 - 2つの128ビット整数による内部表現
 - キャリー/ボローを考慮した加算・減算
 - 簡易版の乗算
@@ -300,7 +420,3 @@ test "EVMu256 basic operations" {
 - 比較演算
 
 次章では、この`EVMu256`型を使用して、EVMの主要データ構造（スタック、メモリ、ストレージ）を実装します。
-
----
-
-[← 第9章-1: EVMの基本概念](./chapter9_basics.md) | [第9章-3: データ構造の実装 →](./chapter9_datastructures.md)
