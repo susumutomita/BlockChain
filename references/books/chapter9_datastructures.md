@@ -747,7 +747,3 @@ pub const EvmContext = struct {
 - EVMコンテキスト: 実行環境を統合管理
 
 次章では、これらのデータ構造を使って実際のEVMオペコード（ADD、MUL、PUSH、POPなど）を実装し、簡単な計算プログラムを実行できるようにします。
-
----
-
-[← 第9章-2: 256ビット整数の実装](./chapter9_u256.md) | [第9章-4: オペコードの実装 →](./chapter9_opcodes.md)
