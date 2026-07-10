@@ -1,0 +1,3 @@
+[tools]
+# CI (.github/workflows/ci.yml) が使う Zig バージョンに合わせる
+zig = "0.14.0"
