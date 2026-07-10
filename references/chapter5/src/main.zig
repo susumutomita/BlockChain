@@ -56,7 +56,7 @@ pub fn main() !void {
     }
     try stdout.print("Hash       : ", .{});
     for (genesis_block.hash) |byte| {
-        try stdout.print("{x}", .{byte});
+        try stdout.print("{x:0>2}", .{byte});
     }
     try stdout.print("\n", .{});
 }

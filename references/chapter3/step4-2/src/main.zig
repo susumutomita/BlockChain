@@ -230,7 +230,7 @@ pub fn main() !void {
     // ブロックの初期ハッシュを計算
     genesis_block.hash = calculateHash(&genesis_block);
     // 難易度 1(先頭1バイトが 0)になるまで nonce を探索する
-    mineBlock(&genesis_block, 1);
+    mineBlock(&genesis_block, 2);
 
     // 結果を標準出力に表示
     try stdout.print("Block index: {d}\n", .{genesis_block.index});
@@ -243,7 +243,7 @@ pub fn main() !void {
     }
     try stdout.print("Hash       : ", .{});
     for (genesis_block.hash) |byte| {
-        try stdout.print("{x}", .{byte});
+        try stdout.print("{x:0>2}", .{byte});
     }
     try stdout.print("\n", .{});
 }
