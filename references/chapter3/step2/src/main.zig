@@ -70,7 +70,7 @@ pub fn main() !void {
     try stdout.print("Hash       : ", .{});
     // 32バイトのハッシュを1バイトずつ16進数（小文字）で出力する
     for (genesis_block.hash) |byte| {
-        try stdout.print("{x}", .{byte});
+        try stdout.print("{x:0>2}", .{byte});
     }
     try stdout.print("\n", .{});
 }
