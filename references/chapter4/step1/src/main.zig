@@ -111,7 +111,7 @@ pub fn main() !void {
     try stdout.print("Hash       : ", .{}); // ← ここはプレースホルダなし、引数なし
     // 32バイトのハッシュを1バイトずつ16進数で出力
     for (genesis_block.hash) |byte| {
-        try stdout.print("{x}", .{byte});
+        try stdout.print("{x:0>2}", .{byte});
     }
     try stdout.print("\n", .{});
 }
