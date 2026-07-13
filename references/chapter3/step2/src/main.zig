@@ -16,13 +16,9 @@ const Block = struct {
     hash: [32]u8,
 };
 
-/// toBytes関数は、任意の型Tの値をそのメモリ表現に基づく固定長のバイト配列に再解釈し、
-/// その全要素を含むスライス([]const u8)として返します。
-fn toBytes(comptime T: type, value: T) []const u8 {
-    // 左辺で返り値の型を [@sizeOf(T)]u8 として指定する
-    const bytes: [@sizeOf(T)]u8 = @bitCast(value);
-    // 固定長配列を全体スライスとして返す
-    return bytes[0..@sizeOf(T)];
+/// 値のバイト表現を呼び出し側が所有できる固定長配列として返します。
+fn toBytes(comptime T: type, value: T) [@sizeOf(T)]u8 {
+    return @bitCast(value);
 }
 
 /// calculateHash関数は、ブロックの各フィールドからバイト列を生成し、
@@ -32,10 +28,12 @@ fn calculateHash(block: *const Block) [32]u8 {
     var hasher = Sha256.init(.{});
 
     // ブロックのindex (u32) をバイト列に変換してハッシュに追加
-    hasher.update(toBytes(u32, block.index));
+    const index_bytes = toBytes(u32, block.index);
+    hasher.update(&index_bytes);
 
     // ブロックのtimestamp (u64) をバイト列に変換してハッシュに追加
-    hasher.update(toBytes(u64, block.timestamp));
+    const timestamp_bytes = toBytes(u64, block.timestamp);
+    hasher.update(&timestamp_bytes);
 
     // 前ブロックのハッシュ（固定長配列）は既にスライスになっているのでそのまま追加
     hasher.update(block.prev_hash[0..]);

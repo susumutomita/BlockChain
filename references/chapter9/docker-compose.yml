@@ -1,49 +1,20 @@
-# Docker Compose構成ファイル - ブロックチェーンノードネットワーク
+# Docker Compose構成ファイル - 第9章 EVMu256デモ
 #
 # 使い方:
-# 1. 起動: docker compose up -d
-# 2. コンテナでコマンド実行: docker exec -it <container_name> <command>
-#    例: docker compose exec -it node2 sh -c "./zig-out/bin/chapter8 --listen 3000 --connect node1:3000"
-#
-# 注意: 新しいコンテナを起動するには docker compose run ではなく docker exec を使用してください
+#   docker compose run --rm demo
 
 # 共通設定
 x-common-config: &common-config
-  platform: linux/amd64
   volumes:
     - ./:/app
   build: .
 
 services:
-  node1:
+  demo:
     <<: *common-config
-    container_name: node1
-    ports:
-      - "3001:3000"
-    environment:
-      - NODE_ID=1
-    command: ./zig-out/bin/chapter8 --listen 3000
-
-  node2:
-    <<: *common-config
-    container_name: node2
-    ports:
-      - "3002:3000"
-    environment:
-      - NODE_ID=2
-    tty: true
-    stdin_open: true
-    # 長時間実行するコマンドを追加してコンテナを停止させない
-    command: sh -c "tail -f /dev/null"
-
-  node3:
-    <<: *common-config
-    container_name: node3
-    ports:
-      - "3003:3000"
-    environment:
-      - NODE_ID=3
-    tty: true
-    stdin_open: true
-    # 長時間実行するコマンドを追加してコンテナを停止させない
-    command: sh -c "tail -f /dev/null"
+    command: >-
+      sh -c "zig build
+      --cache-dir /tmp/zig-cache
+      --global-cache-dir /tmp/zig-global-cache
+      --prefix /tmp/zig-out
+      && /tmp/zig-out/bin/chapter9"

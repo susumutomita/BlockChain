@@ -31,9 +31,11 @@ pub fn calculateHash(block: *const types.Block) [32]u8 {
     }
 
     // ブロック番号 (u32) をバイト列に変換して追加
-    hasher.update(utils.toBytes(u32, block.index));
+    const index_bytes = utils.toBytes(u32, block.index);
+    hasher.update(&index_bytes);
     // タイムスタンプ (u64) をバイト列に変換して追加
-    hasher.update(utils.toBytes(u64, block.timestamp));
+    const timestamp_bytes = utils.toBytes(u64, block.timestamp);
+    hasher.update(&timestamp_bytes);
     // nonce のバイト列を追加
     hasher.update(nonce_bytes[0..]);
     // 前ブロックのハッシュ(32バイト)を追加

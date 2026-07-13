@@ -1,0 +1,10 @@
+.git
+.codewiki
+.zig-cache
+zig-cache
+zig-out
+references/**/.zig-cache
+references/**/zig-cache
+references/**/zig-out
+.zig-book-out
+.tmp-e2e

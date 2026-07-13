@@ -40,16 +40,16 @@ pub fn build(b: *std.Build) void {
     });
 
     // Modules can depend on one another using the `std.Build.Module.addImport` function.
-    // This is what allows Zig source code to use `@import("foo")` where 'foo' is not a
+    // This is what allows Zig source code to use `@import("blockchain_lib")` where it is not a
     // file path. In this case, we set up `exe_mod` to import `lib_mod`.
-    exe_mod.addImport("foo_lib", lib_mod);
+    exe_mod.addImport("blockchain_lib", lib_mod);
 
     // Now, we will create a static library based on the module we created above.
     // This creates a `std.Build.Step.Compile`, which is the build step responsible
     // for actually invoking the compiler.
     const lib = b.addLibrary(.{
         .linkage = .static,
-        .name = "foo",
+        .name = "blockchain",
         .root_module = lib_mod,
     });
 
@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) void {
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
     const exe = b.addExecutable(.{
-        .name = "foo",
+        .name = "blockchain",
         .root_module = exe_mod,
     });
 
@@ -93,24 +93,41 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    // Creates a step for unit testing. This only builds the test executable
-    // but does not run it.
-    const lib_unit_tests = b.addTest(.{
-        .root_module = lib_mod,
-    });
-
-    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
-
-    const exe_unit_tests = b.addTest(.{
-        .root_module = exe_mod,
-    });
-
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-
-    // Similar to creating the run step earlier, this exposes a `test` step to
-    // the `zig build --help` menu, providing a way for the user to request
-    // running the unit tests.
+    // Zig only discovers tests reachable from the selected root module. Test
+    // each source file as a root so inline module tests cannot silently drop
+    // out of `zig build test`.
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_lib_unit_tests.step);
-    test_step.dependOn(&run_exe_unit_tests.step);
+
+    const test_modules = [_]struct {
+        name: []const u8,
+        path: []const u8,
+    }{
+        .{ .name = "root", .path = "src/root.zig" },
+        .{ .name = "main", .path = "src/main.zig" },
+        .{ .name = "blockchain", .path = "src/blockchain.zig" },
+        .{ .name = "errors", .path = "src/errors.zig" },
+        .{ .name = "evm", .path = "src/evm.zig" },
+        .{ .name = "evm-debug", .path = "src/evm_debug.zig" },
+        .{ .name = "evm-types", .path = "src/evm_types.zig" },
+        .{ .name = "logger", .path = "src/logger.zig" },
+        .{ .name = "p2p", .path = "src/p2p.zig" },
+        .{ .name = "p2p-debug", .path = "src/p2p_debug.zig" },
+        .{ .name = "parser", .path = "src/parser.zig" },
+        .{ .name = "types", .path = "src/types.zig" },
+        .{ .name = "utils", .path = "src/utils.zig" },
+    };
+
+    for (test_modules) |test_module| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(test_module.path),
+            .target = target,
+            .optimize = optimize,
+        });
+        const unit_tests = b.addTest(.{
+            .name = b.fmt("test-{s}", .{test_module.name}),
+            .root_module = module,
+        });
+        const run_unit_tests = b.addRunArtifact(unit_tests);
+        test_step.dependOn(&run_unit_tests.step);
+    }
 }

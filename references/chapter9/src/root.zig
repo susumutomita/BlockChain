@@ -1,15 +1,28 @@
-//! ブロックチェーンプロジェクト: ルートモジュール
+//! 第9章のライブラリ入口。
 //!
-//! このファイルはブロックチェーンライブラリのルートソースファイルです。
-//! テスト用のエントリーポイントを提供し、ブロックチェーン実装に必要な
-//! 依存関係をインポートします。規約上、ライブラリを作成する際の
-//! ルートソースファイルはroot.zigとなります。
-//! 実行可能ファイルを作成する場合は、このファイルを削除して
-//! 代わりにmain.zigから始めるのが一般的です。
+//! このチェックポイントでは、EVM全体へ進む前に256ビット整数の表現と
+//! 基本演算、ビッグエンディアンのバイト変換だけを扱う。
 
 const std = @import("std");
 
-test "collect all decls recursively" {
-    // この1行で全ソースファイルのテストブロックをリンク
-    std.testing.refAllDeclsRecursive(@This());
+pub const EVMu256 = @import("evm_types.zig").EVMu256;
+
+test "EVMu256 addition carries into the high half" {
+    const max_low = EVMu256{ .hi = 0, .lo = std.math.maxInt(u128) };
+    const result = max_low.add(EVMu256.one());
+
+    try std.testing.expectEqual(@as(u128, 1), result.hi);
+    try std.testing.expectEqual(@as(u128, 0), result.lo);
+}
+
+test "EVMu256 byte conversion round-trips" {
+    const value = EVMu256{
+        .hi = 0x0123456789abcdef_fedcba9876543210,
+        .lo = 0x0011223344556677_8899aabbccddeeff,
+    };
+
+    const bytes = value.toBytes();
+    const decoded = EVMu256.fromBytes(&bytes);
+
+    try std.testing.expect(decoded.eq(value));
 }

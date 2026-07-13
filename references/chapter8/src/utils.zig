@@ -96,18 +96,13 @@ pub fn toBytesU64(value: u64) [8]u8 {
 ///     T: 変換する値の型（推論される）
 ///     value: バイトに変換する値
 ///
-/// 戻り値:
-///     []const u8: 値を表すバイトのスライス
-///
-/// 注意:
-///     u32とu64以外の型の場合、この関数は値をバイトに変換するために@bitCastを使用します。
-pub fn toBytes(comptime T: type, value: T) []const u8 {
+/// 戻り値: u32またはu64のリトルエンディアン固定長配列
+pub fn toBytes(comptime T: type, value: T) [@sizeOf(T)]u8 {
     if (T == u32) {
-        return toBytesU32(@as(u32, value))[0..];
+        return toBytesU32(@as(u32, value));
     } else if (T == u64) {
-        return toBytesU64(@as(u64, value))[0..];
+        return toBytesU64(@as(u64, value));
     } else {
-        const bytes: [@sizeOf(T)]u8 = @bitCast(value);
-        return bytes[0..];
+        @compileError("toBytes supports only u32 and u64");
     }
 }

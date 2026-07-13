@@ -118,16 +118,14 @@ fn toBytesU64(value: u64) [8]u8 {
 }
 
 /// toBytes:
-/// 任意の型 T の値をそのメモリ表現に基づいてバイト列(スライス)に変換する。
-/// u32, u64 の場合は専用の関数を呼び出し、それ以外は @bitCast で固定長配列に変換します。
-fn toBytes(comptime T: type, value: T) []const u8 {
+/// u32, u64 をリトルエンディアンの固定長配列に変換する。
+fn toBytes(comptime T: type, value: T) [@sizeOf(T)]u8 {
     if (T == u32) {
-        return toBytesU32(@as(u32, value))[0..];
+        return toBytesU32(@as(u32, value));
     } else if (T == u64) {
-        return toBytesU64(@as(u64, value))[0..];
+        return toBytesU64(@as(u64, value));
     } else {
-        const bytes: [@sizeOf(T)]u8 = @bitCast(value);
-        return bytes[0..];
+        @compileError("toBytes supports only u32 and u64");
     }
 }
 
@@ -166,10 +164,12 @@ fn calculateHash(block: *const Block) [32]u8 {
 
     // === ハッシュ計算のステップ ===
     // 1. ブロック番号 (u32) をバイト列に変換して追加
-    hasher.update(toBytes(u32, block.index));
+    const index_bytes = toBytes(u32, block.index);
+    hasher.update(&index_bytes);
 
     // 2. タイムスタンプ (u64) をバイト列に変換して追加
-    hasher.update(toBytes(u64, block.timestamp));
+    const timestamp_bytes = toBytes(u64, block.timestamp);
+    hasher.update(&timestamp_bytes);
 
     // 3. nonce のバイト列を追加（PoWで変化する部分）
     hasher.update(nonce_bytes[0..]);
