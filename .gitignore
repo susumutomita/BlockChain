@@ -8,6 +8,7 @@ docgen_tmp/
 .zig-book-rebuild.*/
 .chapter6-acceptance.*/
 .chapter7-acceptance.*/
+.evm-acceptance.*/
 .tmp-e2e/
 references/**/.book-cache/
 

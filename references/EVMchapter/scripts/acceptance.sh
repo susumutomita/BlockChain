@@ -19,6 +19,7 @@ SOLC_FULL_VERSION=0.8.24+commit.e11b9ed9.Linux.g++
 SOLC_IMAGE=ethereum/solc@sha256:e56ef5e376ae846f06b919d7ca4ed0c271f7fb0900daa6c660d53451f5bfd9db
 CONTRACT_ADDRESS=0x000000000000000000000000000000000000abcd
 SENDER_ADDRESS=0x000000000000000000000000000000000000dead
+DOCKER_USER=${BOOK_DOCKER_USER:-$(id -u):$(id -g)}
 
 run_id=$$
 zig_image="zig-blockchain-evm-acceptance:${ZIG_VERSION}-${run_id}"
@@ -26,7 +27,11 @@ one_node="zig-book-evm-one-${run_id}"
 deploy_node="zig-book-evm-deploy-${run_id}"
 call_node="zig-book-evm-call-${run_id}"
 network="zig-book-evm-net-${run_id}"
-scratch=$(mktemp -d)
+# Keep bind-mounted build output under the checkout by default. Docker Desktop
+# and Colima can expose the host's system temp directory as root-owned inside
+# the VM, which prevents a host-UID container from creating Zig caches there.
+SCRATCH_PARENT=${BOOK_ACCEPTANCE_TMPDIR:-$PWD}
+scratch=$(mktemp -d "$SCRATCH_PARENT/.evm-acceptance.XXXXXX")
 
 cleanup() {
   docker unpause "$deploy_node" >/dev/null 2>&1 || true
@@ -155,7 +160,7 @@ echo "SOLC_COMPILE PASS: version=$SOLC_FULL_VERSION selector=$selector creation_
 
 echo "[3/5] Running Zig formatting, all unit tests, and the ABI EVM test"
 docker run --rm \
-  --user 0:0 \
+  --user "$DOCKER_USER" \
   -v "$PWD:/work:ro" \
   -v "$scratch:/scratch" \
   -w /work \
@@ -163,7 +168,7 @@ docker run --rm \
   sh -c 'zig fmt --check build.zig src && zig build test --cache-dir /scratch/cache --global-cache-dir /scratch/global --prefix /scratch/out --summary all'
 
 docker run --rm \
-  --user 0:0 \
+  --user "$DOCKER_USER" \
   -v "$PWD:/work:ro" \
   -v "$scratch:/scratch" \
   -w /work \
@@ -176,7 +181,7 @@ docker run --rm \
 # Build once, then run this exact executable in every process below. This avoids
 # separate build races and proves that the same artifact works in both scenarios.
 docker run --rm \
-  --user 0:0 \
+  --user "$DOCKER_USER" \
   -v "$PWD:/work:ro" \
   -v "$scratch:/scratch" \
   -w /work \
@@ -186,7 +191,7 @@ docker run --rm \
   --global-cache-dir /scratch/global \
   --prefix /scratch/out
 executable=$(docker run --rm \
-  --user 0:0 \
+  --user "$DOCKER_USER" \
   -v "$scratch:/scratch:ro" \
   "$zig_image" \
   sh -ec '
@@ -203,7 +208,7 @@ echo "ZIG_EVM_TESTS PASS"
 echo "[4/5] Executing one-node deploy and add(2,3) call"
 docker run -d \
   --name "$one_node" \
-  --user 0:0 \
+  --user "$DOCKER_USER" \
   -v "$scratch:/scratch:ro" \
   "$zig_image" \
   "$executable" \
@@ -228,7 +233,7 @@ docker network create "$network" >/dev/null
 docker run -d \
   --name "$deploy_node" \
   --network "$network" \
-  --user 0:0 \
+  --user "$DOCKER_USER" \
   -v "$scratch:/scratch:ro" \
   "$zig_image" \
   "$executable" \
@@ -248,7 +253,7 @@ docker pause "$deploy_node" >/dev/null
 docker run -d \
   --name "$call_node" \
   --network "$network" \
-  --user 0:0 \
+  --user "$DOCKER_USER" \
   -v "$scratch:/scratch:ro" \
   "$zig_image" \
   "$executable" \

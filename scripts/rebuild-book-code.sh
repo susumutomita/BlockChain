@@ -5,6 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ZIG_VERSION=${ZIG_VERSION:-0.14.0}
 RUNNER=${BOOK_REBUILD_RUNNER:-auto}
 IMAGE=${BOOK_REBUILD_IMAGE:-zig-blockchain-book-rebuild:${ZIG_VERSION}}
+DOCKER_USER=${BOOK_DOCKER_USER:-$(id -u):$(id -g)}
 # Keep reconstructed trees under the checkout by default. Docker Desktop and
 # Colima both share checkout paths, while the host's system temp directory is
 # not necessarily bind-mountable into their Linux VM.
@@ -96,7 +97,7 @@ verify_zig_project() {
     )
   else
     docker run --rm \
-      --user 0:0 \
+      --user "$DOCKER_USER" \
       --mount "type=bind,src=$project,dst=/work,readonly" \
       --mount "type=bind,src=$cache,dst=/cache" \
       --mount "type=bind,src=$GLOBAL_CACHE,dst=/global-cache" \
@@ -179,9 +180,8 @@ verify_zig_project "$CHAPTER12" chapter12
 echo "[5/5] Optional reconstructed chapter 12 network acceptance"
 if [ "${BOOK_REBUILD_ACCEPTANCE:-0}" = 1 ]; then
   require_command docker
-  acceptance_tmp="$TMP_ROOT/acceptance-tmp"
-  mkdir -p "$acceptance_tmp"
-  TMPDIR="$acceptance_tmp" sh "$CHAPTER12/scripts/acceptance.sh" "$CHAPTER12"
+  BOOK_ACCEPTANCE_TMPDIR="$TMP_ROOT" \
+    sh "$CHAPTER12/scripts/acceptance.sh" "$CHAPTER12"
   echo "CHAPTER12_REBUILT_ACCEPTANCE PASS"
 else
   echo "CHAPTER12_REBUILT_ACCEPTANCE SKIP (set BOOK_REBUILD_ACCEPTANCE=1 to run)"

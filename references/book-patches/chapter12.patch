@@ -287,10 +287,10 @@ index 2dedb1df5786e57b7aa18fda1321e33b20342944..5de748b4f9873576f6124580409256ca
 +    command: sh -c "tail -f /dev/null"
 diff --git a/scripts/acceptance.sh b/scripts/acceptance.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..d6195299c141b8668866a259388bb272606c1dea
+index 0000000000000000000000000000000000000000..75209cc6b44cc253d5fefe6d1b51cabecf49f35b
 --- /dev/null
 +++ b/scripts/acceptance.sh
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,295 @@
 +#!/bin/sh
 +set -eu
 +
@@ -312,6 +312,7 @@ index 0000000000000000000000000000000000000000..d6195299c141b8668866a259388bb272
 +SOLC_IMAGE=ethereum/solc@sha256:e56ef5e376ae846f06b919d7ca4ed0c271f7fb0900daa6c660d53451f5bfd9db
 +CONTRACT_ADDRESS=0x000000000000000000000000000000000000abcd
 +SENDER_ADDRESS=0x000000000000000000000000000000000000dead
++DOCKER_USER=${BOOK_DOCKER_USER:-$(id -u):$(id -g)}
 +
 +run_id=$$
 +zig_image="zig-blockchain-evm-acceptance:${ZIG_VERSION}-${run_id}"
@@ -319,7 +320,11 @@ index 0000000000000000000000000000000000000000..d6195299c141b8668866a259388bb272
 +deploy_node="zig-book-evm-deploy-${run_id}"
 +call_node="zig-book-evm-call-${run_id}"
 +network="zig-book-evm-net-${run_id}"
-+scratch=$(mktemp -d)
++# Keep bind-mounted build output under the checkout by default. Docker Desktop
++# and Colima can expose the host's system temp directory as root-owned inside
++# the VM, which prevents a host-UID container from creating Zig caches there.
++SCRATCH_PARENT=${BOOK_ACCEPTANCE_TMPDIR:-$PWD}
++scratch=$(mktemp -d "$SCRATCH_PARENT/.evm-acceptance.XXXXXX")
 +
 +cleanup() {
 +  docker unpause "$deploy_node" >/dev/null 2>&1 || true
@@ -448,7 +453,7 @@ index 0000000000000000000000000000000000000000..d6195299c141b8668866a259388bb272
 +
 +echo "[3/5] Running Zig formatting, all unit tests, and the ABI EVM test"
 +docker run --rm \
-+  --user 0:0 \
++  --user "$DOCKER_USER" \
 +  -v "$PWD:/work:ro" \
 +  -v "$scratch:/scratch" \
 +  -w /work \
@@ -456,7 +461,7 @@ index 0000000000000000000000000000000000000000..d6195299c141b8668866a259388bb272
 +  sh -c 'zig fmt --check build.zig src && zig build test --cache-dir /scratch/cache --global-cache-dir /scratch/global --prefix /scratch/out --summary all'
 +
 +docker run --rm \
-+  --user 0:0 \
++  --user "$DOCKER_USER" \
 +  -v "$PWD:/work:ro" \
 +  -v "$scratch:/scratch" \
 +  -w /work \
@@ -469,7 +474,7 @@ index 0000000000000000000000000000000000000000..d6195299c141b8668866a259388bb272
 +# Build once, then run this exact executable in every process below. This avoids
 +# separate build races and proves that the same artifact works in both scenarios.
 +docker run --rm \
-+  --user 0:0 \
++  --user "$DOCKER_USER" \
 +  -v "$PWD:/work:ro" \
 +  -v "$scratch:/scratch" \
 +  -w /work \
@@ -479,7 +484,7 @@ index 0000000000000000000000000000000000000000..d6195299c141b8668866a259388bb272
 +  --global-cache-dir /scratch/global \
 +  --prefix /scratch/out
 +executable=$(docker run --rm \
-+  --user 0:0 \
++  --user "$DOCKER_USER" \
 +  -v "$scratch:/scratch:ro" \
 +  "$zig_image" \
 +  sh -ec '
@@ -496,7 +501,7 @@ index 0000000000000000000000000000000000000000..d6195299c141b8668866a259388bb272
 +echo "[4/5] Executing one-node deploy and add(2,3) call"
 +docker run -d \
 +  --name "$one_node" \
-+  --user 0:0 \
++  --user "$DOCKER_USER" \
 +  -v "$scratch:/scratch:ro" \
 +  "$zig_image" \
 +  "$executable" \
@@ -521,7 +526,7 @@ index 0000000000000000000000000000000000000000..d6195299c141b8668866a259388bb272
 +docker run -d \
 +  --name "$deploy_node" \
 +  --network "$network" \
-+  --user 0:0 \
++  --user "$DOCKER_USER" \
 +  -v "$scratch:/scratch:ro" \
 +  "$zig_image" \
 +  "$executable" \
@@ -541,7 +546,7 @@ index 0000000000000000000000000000000000000000..d6195299c141b8668866a259388bb272
 +docker run -d \
 +  --name "$call_node" \
 +  --network "$network" \
-+  --user 0:0 \
++  --user "$DOCKER_USER" \
 +  -v "$scratch:/scratch:ro" \
 +  "$zig_image" \
 +  "$executable" \

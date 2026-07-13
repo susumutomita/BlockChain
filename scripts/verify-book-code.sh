@@ -6,6 +6,7 @@ ZIG_VERSION=${ZIG_VERSION:-0.14.0}
 RUNNER=${BOOK_CODE_RUNNER:-auto}
 IMAGE=${BOOK_CODE_IMAGE:-zig-blockchain-book-toolchain:${ZIG_VERSION}}
 CACHE_ROOT=${BOOK_CODE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/zig-blockchain-book/verify}
+DOCKER_USER=${BOOK_DOCKER_USER:-$(id -u):$(id -g)}
 
 all_projects='.
 references/chapter2
@@ -74,7 +75,7 @@ verify_docker() {
     project=$1
     cache_key=$(printf '%s' "$project" | tr '/.' '__')
     docker run --rm \
-        --user 0:0 \
+        --user "$DOCKER_USER" \
         --mount "type=bind,src=$ROOT/$project,dst=/work,readonly" \
         --mount "type=bind,src=$CACHE_ROOT,dst=/book-cache" \
         --env "BOOK_CACHE_KEY=$cache_key" \

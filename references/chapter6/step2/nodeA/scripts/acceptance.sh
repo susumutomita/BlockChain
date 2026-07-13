@@ -7,6 +7,7 @@ STEP1_NODE_A="$REPO_ROOT/references/chapter6/step1/nodeA"
 STEP1_NODE_B="$REPO_ROOT/references/chapter6/step1/nodeB"
 ZIG_VERSION=${ZIG_VERSION:-0.14.0}
 IMAGE=${BOOK_CODE_IMAGE:-zig-blockchain-book-toolchain:${ZIG_VERSION}}
+DOCKER_USER=${BOOK_DOCKER_USER:-$(id -u):$(id -g)}
 
 run_id=$$
 network="zig-book-ch6-${run_id}"
@@ -34,7 +35,7 @@ docker build \
   "$REPO_ROOT" >/dev/null
 
 step1_output=$(docker run --rm \
-  --user 0:0 \
+  --user "$DOCKER_USER" \
   --mount "type=bind,src=$STEP1_NODE_A,dst=/nodeA,readonly" \
   --mount "type=bind,src=$STEP1_NODE_B,dst=/nodeB,readonly" \
   --mount "type=bind,src=$scratch,dst=/scratch" \
@@ -59,7 +60,7 @@ echo "CHAPTER6_STEP1_ACCEPTANCE PASS"
 
 docker network create "$network" >/dev/null
 docker run --rm \
-  --user 0:0 \
+  --user "$DOCKER_USER" \
   --mount "type=bind,src=$PROJECT_ROOT,dst=/work,readonly" \
   --mount "type=bind,src=$scratch,dst=/scratch" \
   --workdir /work \
@@ -72,7 +73,7 @@ docker run --rm \
 docker run -d \
   --name "$server" \
   --network "$network" \
-  --user 0:0 \
+  --user "$DOCKER_USER" \
   --mount "type=bind,src=$scratch,dst=/scratch,readonly" \
   "$IMAGE" \
   /scratch/out/bin/nodeA --listen 8080 >/dev/null
@@ -97,7 +98,7 @@ fi
 
 client_output=$(docker run --rm \
   --network "$network" \
-  --user 0:0 \
+  --user "$DOCKER_USER" \
   --mount "type=bind,src=$scratch,dst=/scratch,readonly" \
   "$IMAGE" \
   sh -ec "printf 'HELLO A\\n' | /scratch/out/bin/nodeA --connect $server_ip:8080" \

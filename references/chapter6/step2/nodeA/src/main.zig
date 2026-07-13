@@ -177,15 +177,37 @@ pub fn main() !void {
 
         // メインスレッドで受信ループ
         var reader = socket.reader();
-        var buf: [256]u8 = undefined;
+        var buf: [4096]u8 = undefined;
+        var buffered: usize = 0;
+
         while (true) {
-            const n = try reader.read(&buf);
+            const n = try reader.read(buf[buffered..]);
             if (n == 0) {
+                if (buffered > 0) {
+                    std.log.warn("Ignoring unterminated message from {s}:{d}", .{ host_str, port_num });
+                }
                 std.log.info("Peer {s}:{d} disconnected.", .{ host_str, port_num });
                 break;
             }
-            const msg_slice = buf[0..n];
-            std.log.info("[Received from {s}:{d}] {s}", .{ host_str, port_num, msg_slice });
+
+            buffered += n;
+            var consumed: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, buf[0..buffered], consumed, '\n')) |newline| {
+                const message = std.mem.trimRight(u8, buf[consumed..newline], "\r");
+                std.log.info("[Received from {s}:{d}] {s}", .{ host_str, port_num, message });
+                consumed = newline + 1;
+            }
+
+            if (consumed > 0) {
+                const remaining = buffered - consumed;
+                std.mem.copyForwards(u8, buf[0..remaining], buf[consumed..buffered]);
+                buffered = remaining;
+            }
+
+            if (buffered == buf.len) {
+                std.log.warn("Message too long from {s}:{d}; closing connection", .{ host_str, port_num });
+                break;
+            }
         }
     } else {
         std.log.err("Unsupported mode: {s}", .{mode});
