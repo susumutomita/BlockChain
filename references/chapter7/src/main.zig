@@ -87,8 +87,8 @@ pub fn main() !void {
             std.log.info("[Recv] {s}", .{msg_slice});
             if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
                 const json_part = msg_slice[6..];
-                const new_block = try parser.parseBlockJson(json_part);
-                blockchain.addBlock(new_block);
+                var new_block = try parser.parseBlockJson(json_part);
+                if (!blockchain.addBlock(new_block)) parser.deinitParsedBlock(&new_block);
             } else {
                 std.log.info("Unknown msg: {s}", .{msg_slice});
             }

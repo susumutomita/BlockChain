@@ -22,6 +22,17 @@ const DIFFICULTY: u8 = 2;
 /// 完全なブロックチェーンをBlock構造体の動的配列として格納します
 pub var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
 
+/// ブロック追加の判定結果。呼び出し側は`added`のときだけ再伝播します。
+pub const AddBlockResult = enum {
+    added,
+    duplicate,
+    invalid_pow,
+    invalid_link,
+    out_of_memory,
+};
+
+var chain_store_mutex = std.Thread.Mutex{};
+
 //------------------------------------------------------------------------------
 // ハッシュ計算とマイニング関数
 //------------------------------------------------------------------------------
@@ -154,16 +165,54 @@ pub fn verifyBlockPow(b: *const types.Block) bool {
 ///
 /// 注意:
 ///     この関数は成功または失敗のメッセージをログに記録します
-pub fn addBlock(new_block: types.Block) void {
-    if (!verifyBlockPow(&new_block)) {
-        std.log.err("Received block fails PoW check. Rejecting it.", .{});
-        return;
-    }
-    chain_store.append(new_block) catch {};
-    std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
+pub fn addBlock(new_block: types.Block) AddBlockResult {
+    chain_store_mutex.lock();
+    defer chain_store_mutex.unlock();
 
-    // 新しいブロックを追加した後にチェーン全体を表示
-    printChainState();
+    if (!verifyBlockPow(&new_block)) {
+        std.log.warn("BLOCK_REJECTED reason=invalid_pow index={d}", .{new_block.index});
+        return .invalid_pow;
+    }
+
+    for (chain_store.items) |known_block| {
+        if (std.mem.eql(u8, known_block.hash[0..], new_block.hash[0..])) {
+            std.log.info("BLOCK_REJECTED reason=duplicate index={d} hash={x:0>2}", .{ new_block.index, new_block.hash });
+            return .duplicate;
+        }
+    }
+
+    var expected_index: u32 = undefined;
+    var expected_prev_hash: [32]u8 = undefined;
+    if (chain_store.items.len == 0) {
+        var genesis = createTestGenesisBlock(std.heap.page_allocator) catch {
+            std.log.warn("BLOCK_REJECTED reason=genesis_allocation index={d}", .{new_block.index});
+            return .out_of_memory;
+        };
+        defer genesis.transactions.deinit();
+        expected_index = genesis.index + 1;
+        expected_prev_hash = genesis.hash;
+    } else {
+        const tip = chain_store.items[chain_store.items.len - 1];
+        expected_index = tip.index + 1;
+        expected_prev_hash = tip.hash;
+    }
+
+    if (new_block.index != expected_index or
+        !std.mem.eql(u8, new_block.prev_hash[0..], expected_prev_hash[0..]))
+    {
+        std.log.warn("BLOCK_REJECTED reason=invalid_link index={d} expected_index={d}", .{ new_block.index, expected_index });
+        return .invalid_link;
+    }
+
+    chain_store.append(new_block) catch {
+        std.log.warn("BLOCK_REJECTED reason=out_of_memory index={d}", .{new_block.index});
+        return .out_of_memory;
+    };
+    std.log.info("Added new block index={d}, nonce={d}, hash={x:0>2}", .{ new_block.index, new_block.nonce, new_block.hash });
+
+    // chain_store_mutexを保持しているため、再ロックしない内部版を使う。
+    printChainStateLocked();
+    return .added;
 }
 
 /// 前のブロックにリンクされた新しいブロックを作成する
@@ -219,8 +268,9 @@ pub fn createTestGenesisBlock(allocator: std.mem.Allocator) !types.Block {
 
 /// より長いチェーンとブロックチェーンを同期する
 ///
-/// 提供されたチェーンが現在のチェーンより長い場合、ローカルのブロックチェーンを
-/// 置き換えます。これは「最長チェーン」コンセンサスルールを実装しています。
+/// 提供されたチェーンが現在のチェーンより長い場合にローカル配列を
+/// 置き換える、第8章時点の補助関数です。P2P受信経路からは呼ばれず、
+/// 候補全体の検証やフォーク選択を行うコンセンサス実装ではありません。
 ///
 /// 引数:
 ///     blocks: ブロックチェーンを表すブロックの配列
@@ -229,9 +279,12 @@ pub fn createTestGenesisBlock(allocator: std.mem.Allocator) !types.Block {
 ///     ブロック追加時にアロケーターエラーが発生する可能性あり
 ///
 /// 注意:
-///     これはブロックチェーンのコンセンサスとP2P同期の重要な部分です
+///     実通信のGET_CHAINはBLOCKを順にaddBlockするprefix追随です
 pub fn syncChain(blocks: []types.Block) !void {
     if (blocks.len == 0) return;
+
+    chain_store_mutex.lock();
+    defer chain_store_mutex.unlock();
 
     // 受信したチェーンが現在のチェーンより長い場合のみ同期
     if (blocks.len > chain_store.items.len) {
@@ -254,6 +307,8 @@ pub fn syncChain(blocks: []types.Block) !void {
 /// 戻り値:
 ///     usize: ブロックチェーン内のブロック数
 pub fn getChainHeight() usize {
+    chain_store_mutex.lock();
+    defer chain_store_mutex.unlock();
     return chain_store.items.len;
 }
 
@@ -265,14 +320,40 @@ pub fn getChainHeight() usize {
 /// 戻り値:
 ///     ?types.Block: 要求されたブロック、見つからない場合はnull
 pub fn getBlock(index: usize) ?types.Block {
+    chain_store_mutex.lock();
+    defer chain_store_mutex.unlock();
     if (index >= chain_store.items.len) return null;
     return chain_store.items[index];
+}
+
+/// 現在のtipを値コピーで取得する。第8章では空チェーンのときnullを返し、
+/// 呼び出し側が決定的genesisを直前ブロックとして使う。
+pub fn getChainTip() ?types.Block {
+    chain_store_mutex.lock();
+    defer chain_store_mutex.unlock();
+    if (chain_store.items.len == 0) return null;
+    return chain_store.items[chain_store.items.len - 1];
+}
+
+/// P2P送信中のArrayList再確保を避けるため、Block構造体を値コピーする。
+/// accepted blockのネストしたデータは実行中immutableかつ解放されないため、
+/// shallow snapshotの参照先は有効である。呼び出し側は返却配列だけを解放する。
+pub fn copyChainSnapshot(allocator: std.mem.Allocator) ![]types.Block {
+    chain_store_mutex.lock();
+    defer chain_store_mutex.unlock();
+    return allocator.dupe(types.Block, chain_store.items);
 }
 
 /// デバッグ用に現在のブロックチェーン状態を出力する
 ///
 /// チェーンの高さと各ブロックの詳細情報を見やすい形式で表示します
 pub fn printChainState() void {
+    chain_store_mutex.lock();
+    defer chain_store_mutex.unlock();
+    printChainStateLocked();
+}
+
+fn printChainStateLocked() void {
     std.log.info("Current chain state:", .{});
     std.log.info("- Height: {d} blocks", .{chain_store.items.len});
 
@@ -318,4 +399,44 @@ fn times(comptime char: []const u8, n: usize) []const u8 {
         static.buffer[i] = char[0];
     }
     return static.buffer[0..i];
+}
+
+fn clearChainStoreForTest() void {
+    for (chain_store.items) |*block| {
+        block.transactions.deinit();
+    }
+    chain_store.clearRetainingCapacity();
+}
+
+test "addBlock rejects tampering duplicates and broken links" {
+    clearChainStoreForTest();
+    defer clearChainStoreForTest();
+
+    var genesis = try createTestGenesisBlock(std.heap.page_allocator);
+    defer genesis.transactions.deinit();
+
+    var first = createBlock("first", genesis);
+    mineBlock(&first, DIFFICULTY);
+    try std.testing.expectEqual(AddBlockResult.added, addBlock(first));
+    try std.testing.expectEqual(@as(usize, 1), getChainHeight());
+
+    try std.testing.expectEqual(AddBlockResult.duplicate, addBlock(first));
+    try std.testing.expectEqual(@as(usize, 1), getChainHeight());
+
+    var tampered = first;
+    tampered.data = "tampered";
+    try std.testing.expectEqual(AddBlockResult.invalid_pow, addBlock(tampered));
+    try std.testing.expectEqual(@as(usize, 1), getChainHeight());
+
+    var broken_link = createBlock("broken", first);
+    defer broken_link.transactions.deinit();
+    broken_link.prev_hash = [_]u8{0} ** 32;
+    mineBlock(&broken_link, DIFFICULTY);
+    try std.testing.expectEqual(AddBlockResult.invalid_link, addBlock(broken_link));
+    try std.testing.expectEqual(@as(usize, 1), getChainHeight());
+
+    var second = createBlock("second", first);
+    mineBlock(&second, DIFFICULTY);
+    try std.testing.expectEqual(AddBlockResult.added, addBlock(second));
+    try std.testing.expectEqual(@as(usize, 2), getChainHeight());
 }

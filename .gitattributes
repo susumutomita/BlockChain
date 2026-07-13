@@ -1,0 +1,2 @@
+# Unified diff context lines intentionally start with a single marker space.
+references/book-patches/*.patch -whitespace

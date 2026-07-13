@@ -15,23 +15,55 @@ var peers: [MAX_PEERS]?Peer = [_]?Peer{null ** MAX_PEERS};
 
 /// 受信を処理するスレッド関数 (スレッドに渡すためにstruct + run関数を定義)
 const ConnHandler = struct {
+    fn handleMessage(conn: std.net.Server.Connection, message: []const u8) !void {
+        if (!std.mem.startsWith(u8, message, "MSG:")) {
+            std.log.warn("Unknown message from {any}: {s}", .{ conn.address, message });
+            return;
+        }
+
+        const payload = message[4..];
+        std.log.info("[Received from {any}] {s}", .{ conn.address, payload });
+
+        var writer = conn.stream.writer();
+        try writer.writeAll("ACK:");
+        try writer.writeAll(payload);
+        try writer.writeAll("\n");
+        std.log.info("[Sent to {any}] ACK:{s}", .{ conn.address, payload });
+    }
+
     fn run(conn: std.net.Server.Connection) !void {
         defer conn.stream.close(); // 接続が終わったらクローズ
         var reader = conn.stream.reader();
 
         std.log.info("Accepted a new connection from {any}", .{conn.address});
-        var buf: [256]u8 = undefined;
+        var buf: [4096]u8 = undefined;
+        var buffered: usize = 0;
 
         while (true) {
-            // データを読み取る
-            const n = try reader.read(&buf);
+            const n = try reader.read(buf[buffered..]);
             if (n == 0) {
                 std.log.info("Peer {any} disconnected.", .{conn.address});
                 break;
             }
-            // 受信メッセージ表示
-            const msg_slice = buf[0..n];
-            std.log.info("[Received from {any}] {s}", .{ conn.address, msg_slice });
+
+            buffered += n;
+            var consumed: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, buf[0..buffered], consumed, '\n')) |newline| {
+                const message = std.mem.trimRight(u8, buf[consumed..newline], "\r");
+                try handleMessage(conn, message);
+                consumed = newline + 1;
+            }
+
+            if (consumed > 0) {
+                const remaining = buffered - consumed;
+                std.mem.copyForwards(u8, buf[0..remaining], buf[consumed..buffered]);
+                buffered = remaining;
+            }
+
+            if (buffered == buf.len) {
+                std.log.warn("Message too long from {any}; closing connection", .{conn.address});
+                break;
+            }
         }
     }
 };
@@ -40,7 +72,8 @@ const ConnHandler = struct {
 /// ユーザーがコンソールに入力した文字列を送信する
 const SendHandler = struct {
     fn run(peer: Peer) !void {
-        defer peer.stream.close();
+        // 読み取りはメインスレッドが担当するため、終了時は送信側だけを閉じる。
+        defer std.posix.shutdown(peer.stream.handle, .send) catch {};
         std.log.info("Connected to peer {any}", .{peer.address});
 
         var stdin_file = std.io.getStdIn();
@@ -58,7 +91,9 @@ const SendHandler = struct {
 
             // 書き込み(送信)
             var writer = peer.stream.writer();
+            try writer.writeAll("MSG:");
             try writer.writeAll(line_slice);
+            try writer.writeAll("\n");
             std.log.info("Message sent to {any}: {s}", .{ peer.address, line_slice });
         }
     }
@@ -129,6 +164,7 @@ pub fn main() !void {
         std.log.info("Connecting to {s}:{d}...", .{ host_str, port_num });
         const remote_addr = try std.net.Address.resolveIp(host_str, port_num);
         var socket = try std.net.tcpConnectToAddress(remote_addr);
+        defer socket.close();
         // 送信用のスレッドをspawn
         const peer = Peer{
             .address = remote_addr,

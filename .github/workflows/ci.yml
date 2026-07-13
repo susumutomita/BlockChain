@@ -29,3 +29,21 @@ jobs:
         env:
           BOOK_CODE_RUNNER: local
         run: sh scripts/verify-book-code.sh
+
+      - name: Run chapter 6 request and acknowledgment acceptance
+        run: sh references/chapter6/step2/nodeA/scripts/acceptance.sh
+
+      - name: Run chapter 7 block transfer acceptance
+        run: sh references/chapter7/scripts/acceptance.sh
+
+      - name: Run chapter 8 three-node acceptance
+        run: sh references/chapter8/scripts/acceptance.sh
+
+      - name: Rebuild chapter 11 and chapter 12 from the book checkpoints
+        env:
+          BOOK_REBUILD_RUNNER: local
+          BOOK_REBUILD_ACCEPTANCE: "1"
+        run: sh scripts/rebuild-book-code.sh
+
+      - name: Run completed node EVM acceptance
+        run: sh references/EVMchapter/scripts/acceptance.sh .

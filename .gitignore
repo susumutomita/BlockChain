@@ -5,7 +5,11 @@ build/
 build-*/
 docgen_tmp/
 .zig-book-out/
+.zig-book-rebuild.*/
+.chapter6-acceptance.*/
+.chapter7-acceptance.*/
 .tmp-e2e/
+references/**/.book-cache/
 
 .DS_Store
 .vscode/

@@ -236,12 +236,12 @@ pub fn executeWithErrorInfo(allocator: std.mem.Allocator, code: []const u8, call
             };
             result.error_pc = context.pc;
 
-            if (context.error_msg != null) {
-                result.error_message = allocator.dupe(u8, context.error_msg.?) catch null;
+            if (context.error_msg) |message| {
+                result.error_message = allocator.dupe(u8, message) catch null;
             } else {
                 // Zig 0.14: エラー名を `{s}` で整形し "error." 接頭辞を避ける
                 const err_name = @errorName(err);
-                const errMsg = std.fmt.allocPrint(allocator, "EVM実行エラー: {s} at PC={d}", .{ err_name, context.pc }) catch "Unknown error";
+                const errMsg = std.fmt.allocPrint(allocator, "EVM実行エラー: {s} at PC={d}", .{ err_name, context.pc }) catch null;
                 result.error_message = errMsg;
             }
 

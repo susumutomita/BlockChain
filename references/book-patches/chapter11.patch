@@ -1,0 +1,2393 @@
+diff --git a/build.zig b/build.zig
+index 6819c4b9847a79bcde35db856f3288db53996c05..09fe5056f1b7fac102c02c4bf2594334581c284a 100644
+--- a/build.zig
++++ b/build.zig
+@@ -1,115 +1,56 @@
+ const std = @import("std");
+ 
+-// Although this function looks imperative, note that its job is to
+-// declaratively construct a build graph that will be executed by an external
+-// runner.
+ pub fn build(b: *std.Build) void {
+-    // Standard target options allows the person running `zig build` to choose
+-    // what target to build for. Here we do not override the defaults, which
+-    // means any target is allowed, and the default is native. Other options
+-    // for restricting supported target set are available.
+     const target = b.standardTargetOptions(.{});
+-
+-    // Standard optimization options allow the person running `zig build` to select
+-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
+-    // set a preferred release mode, allowing the user to decide how to optimize.
+     const optimize = b.standardOptimizeOption(.{});
+ 
+-    // This creates a "module", which represents a collection of source files alongside
+-    // some compilation options, such as optimization mode and linked system libraries.
+-    // Every executable or library we compile will be based on one or more modules.
+     const lib_mod = b.createModule(.{
+-        // `root_source_file` is the Zig "entry point" of the module. If a module
+-        // only contains e.g. external object files, you can make this `null`.
+-        // In this case the main source file is merely a path, however, in more
+-        // complicated build scripts, this could be a generated file.
+         .root_source_file = b.path("src/root.zig"),
+         .target = target,
+         .optimize = optimize,
+     });
+-
+-    // We will also create a module for our other entry point, 'main.zig'.
+     const exe_mod = b.createModule(.{
+-        // `root_source_file` is the Zig "entry point" of the module. If a module
+-        // only contains e.g. external object files, you can make this `null`.
+-        // In this case the main source file is merely a path, however, in more
+-        // complicated build scripts, this could be a generated file.
+         .root_source_file = b.path("src/main.zig"),
+         .target = target,
+         .optimize = optimize,
+     });
++    exe_mod.addImport("evmchapter_lib", lib_mod);
+ 
+-    // Modules can depend on one another using the `std.Build.Module.addImport` function.
+-    // This is what allows Zig source code to use `@import("foo")` where 'foo' is not a
+-    // file path. In this case, we set up `exe_mod` to import `lib_mod`.
+-    exe_mod.addImport("chapter8_lib", lib_mod);
+-
+-    // Now, we will create a static library based on the module we created above.
+-    // This creates a `std.Build.Step.Compile`, which is the build step responsible
+-    // for actually invoking the compiler.
+     const lib = b.addLibrary(.{
+         .linkage = .static,
+-        .name = "chapter8",
++        .name = "evmchapter",
+         .root_module = lib_mod,
+     });
+-
+-    // This declares intent for the library to be installed into the standard
+-    // location when the user invokes the "install" step (the default step when
+-    // running `zig build`).
+     b.installArtifact(lib);
+ 
+-    // This creates another `std.Build.Step.Compile`, but this one builds an executable
+-    // rather than a static library.
+     const exe = b.addExecutable(.{
+-        .name = "chapter8",
++        .name = "evmchapter",
+         .root_module = exe_mod,
+     });
+-
+-    // This declares intent for the executable to be installed into the
+-    // standard location when the user invokes the "install" step (the default
+-    // step when running `zig build`).
+     b.installArtifact(exe);
+ 
+-    // This *creates* a Run step in the build graph, to be executed when another
+-    // step is evaluated that depends on it. The next line below will establish
+-    // such a dependency.
+     const run_cmd = b.addRunArtifact(exe);
+-
+-    // By making the run step depend on the install step, it will be run from the
+-    // installation directory rather than directly from within the cache directory.
+-    // This is not necessary, however, if the application depends on other installed
+-    // files, this ensures they will be present and in the expected location.
+     run_cmd.step.dependOn(b.getInstallStep());
+-
+-    // This allows the user to pass arguments to the application in the build
+-    // command itself, like this: `zig build run -- arg1 arg2 etc`
+-    if (b.args) |args| {
+-        run_cmd.addArgs(args);
+-    }
+-
+-    // This creates a build step. It will be visible in the `zig build --help` menu,
+-    // and can be selected like this: `zig build run`
+-    // This will evaluate the `run` step rather than the default, which is "install".
+-    const run_step = b.step("run", "Run the app");
++    if (b.args) |args| run_cmd.addArgs(args);
++    const run_step = b.step("run", "Run the chapter 11 EVM node");
+     run_step.dependOn(&run_cmd.step);
+ 
+-    // Creates a step for unit testing. This only builds the test executable
+-    // but does not run it.
+-    const lib_unit_tests = b.addTest(.{
+-        .root_module = lib_mod,
+-    });
+-
+-    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+-
+-    const exe_unit_tests = b.addTest(.{
+-        .root_module = exe_mod,
+-    });
+-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+-
+-    // Similar to creating the run step earlier, this exposes a `test` step to
+-    // the `zig build --help` menu, providing a way for the user to request
+-    // running the unit tests.
+     const test_step = b.step("test", "Run unit tests");
+-    test_step.dependOn(&run_lib_unit_tests.step);
+-    test_step.dependOn(&run_exe_unit_tests.step);
++    const test_modules = [_][]const u8{
++        "root",   "main", "blockchain", "errors", "evm",   "evm_types",
++        "logger", "p2p",  "parser",     "types",  "utils",
++    };
++    for (test_modules) |name| {
++        const module = b.createModule(.{
++            .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})),
++            .target = target,
++            .optimize = optimize,
++        });
++        const unit_tests = b.addTest(.{
++            .name = b.fmt("test-{s}", .{name}),
++            .root_module = module,
++        });
++        const run_unit_tests = b.addRunArtifact(unit_tests);
++        test_step.dependOn(&run_unit_tests.step);
++    }
+ }
+diff --git a/build.zig.zon b/build.zig.zon
+index 6256b6ffcd7a63f0b514e3e067080bb610ae0610..42c6dd0f9231740a900b6e55880e24d107c40bc0 100644
+--- a/build.zig.zon
++++ b/build.zig.zon
+@@ -6,7 +6,7 @@
+     //
+     // It is redundant to include "zig" in this name because it is already
+     // within the Zig package namespace.
+-    .name = .chapter8,
++    .name = .chapter11,
+ 
+     // This is a [Semantic Version](https://semver.org/).
+     // In a future version of Zig it will be used for package deduplication.
+@@ -24,7 +24,7 @@
+     // original project's identity. Thus it is recommended to leave the comment
+     // on the following line intact, so that it shows up in code reviews that
+     // modify the field.
+-    .fingerprint = 0x262fdb695906c817, // Changing this has security and trust implications.
++    .fingerprint = 0x6656a2d994203d47, // Changing this has security and trust implications.
+ 
+     // Tracks the earliest Zig version that the package considers to be a
+     // supported use case.
+diff --git a/contract/SimpleAdder.sol b/contract/SimpleAdder.sol
+new file mode 100644
+index 0000000000000000000000000000000000000000..246850a85bc85e68a5ef4da775e6b14449e5326a
+--- /dev/null
++++ b/contract/SimpleAdder.sol
+@@ -0,0 +1,22 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.24;
++
++contract Adder {
++    function add(uint256 a, uint256 b) public pure returns (uint256) {
++        return a + b;
++    }
++
++    function sub(uint256 a, uint256 b) public pure returns (uint256) {
++        require(b <= a, "underflow");
++        return a - b;
++    }
++
++    function mul(uint256 a, uint256 b) public pure returns (uint256) {
++        return a * b;
++    }
++
++    function div(uint256 a, uint256 b) public pure returns (uint256) {
++        require(b != 0, "division by zero");
++        return a / b;
++    }
++}
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 93905375ef2301c579936d12055d98c6cde241ed..2dedb1df5786e57b7aa18fda1321e33b20342944 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,4 +1,4 @@
+-# Docker Compose構成ファイル - ブロックチェーンノードネットワーク
++# 第8章から引き継ぐ3ノードP2P構成（第11章チェックポイント用）
+ #
+ # 使い方:
+ # 1. 起動: docker compose up -d
+@@ -27,7 +27,7 @@ services:
+       --global-cache-dir /book-cache/global
+       --prefix /book-cache/$$NODE_ID/out
+       && (sleep 4; printf 'seed\n'; sleep 60)
+-      | /book-cache/$$NODE_ID/out/bin/chapter8 --listen 3000"
++      | /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000"
+ 
+   node2:
+     <<: *common-config
+@@ -42,7 +42,7 @@ services:
+       --cache-dir /book-cache/$$NODE_ID/local
+       --global-cache-dir /book-cache/global
+       --prefix /book-cache/$$NODE_ID/out
+-      && /book-cache/$$NODE_ID/out/bin/chapter8 --listen 3000 --connect node1:3000"
++      && /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000 --connect node1:3000"
+ 
+   node3:
+     <<: *common-config
+@@ -59,5 +59,5 @@ services:
+       --prefix /book-cache/$$NODE_ID/out
+       && sleep 8
+       && (sleep 3; printf 'gossip\n'; sleep 60)
+-      | /book-cache/$$NODE_ID/out/bin/chapter8 --listen 3000
++      | /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000
+       --connect node1:3000 --connect node2:3000"
+diff --git a/scripts/acceptance.sh b/scripts/acceptance.sh
+deleted file mode 100755
+index 3cebe7e35cdffaade1147cf2806ef06ed18377b0..0000000000000000000000000000000000000000
+--- a/scripts/acceptance.sh
++++ /dev/null
+@@ -1,118 +0,0 @@
+-#!/bin/sh
+-set -eu
+-
+-cd "$(dirname "$0")/.."
+-
+-ZIG_BOOK_CACHE_DIR=${ZIG_BOOK_CACHE_DIR:-"$HOME/.cache/zig-blockchain-book/chapter8"}
+-export ZIG_BOOK_CACHE_DIR
+-mkdir -p "$ZIG_BOOK_CACHE_DIR"
+-chmod 0777 "$ZIG_BOOK_CACHE_DIR"
+-
+-tmp_dir=$(mktemp -d)
+-cleanup() {
+-  docker compose down --remove-orphans >/dev/null 2>&1 || true
+-  rm -rf "$tmp_dir"
+-}
+-trap cleanup EXIT INT TERM
+-
+-query_chain() {
+-  service=$1
+-  output=$2
+-  docker compose exec -T "$service" sh -c \
+-    "printf 'GET_CHAIN\\n' | nc -w 2 127.0.0.1 3000" \
+-    >"$output" 2>/dev/null || true
+-}
+-
+-docker compose up --build -d
+-
+-attempt=0
+-while [ "$attempt" -lt 45 ]; do
+-  query_chain node1 "$tmp_dir/node1.chain"
+-  query_chain node2 "$tmp_dir/node2.chain"
+-  query_chain node3 "$tmp_dir/node3.chain"
+-
+-  node1_blocks=$(grep -c '^BLOCK:' "$tmp_dir/node1.chain" || true)
+-  node2_blocks=$(grep -c '^BLOCK:' "$tmp_dir/node2.chain" || true)
+-  node3_blocks=$(grep -c '^BLOCK:' "$tmp_dir/node3.chain" || true)
+-
+-  if [ "$node1_blocks" -eq 2 ] &&
+-    [ "$node2_blocks" -eq 2 ] &&
+-    [ "$node3_blocks" -eq 2 ] &&
+-    cmp -s "$tmp_dir/node1.chain" "$tmp_dir/node2.chain" &&
+-    cmp -s "$tmp_dir/node1.chain" "$tmp_dir/node3.chain"; then
+-    break
+-  fi
+-
+-  attempt=$((attempt + 1))
+-  sleep 1
+-done
+-
+-if [ "$attempt" -eq 45 ]; then
+-  echo "P2P_ACCEPTANCE FAIL: three chains did not converge" >&2
+-  docker compose logs --no-color >&2
+-  exit 1
+-fi
+-
+-for service in node1 node2 node3; do
+-  added=$(docker compose logs --no-color "$service" | grep -c 'Added new block index=2' || true)
+-  if [ "$added" -ne 1 ]; then
+-    echo "P2P_ACCEPTANCE FAIL: $service added index=2 $added times" >&2
+-    docker compose logs --no-color "$service" >&2
+-    exit 1
+-  fi
+-done
+-
+-if ! docker compose logs --no-color | grep -q 'BLOCK_REJECTED reason=duplicate'; then
+-  echo "P2P_ACCEPTANCE FAIL: triangular gossip did not exercise duplicate rejection" >&2
+-  docker compose logs --no-color >&2
+-  exit 1
+-fi
+-
+-cp "$tmp_dir/node1.chain" "$tmp_dir/before-invalid.chain"
+-
+-docker compose exec -T node1 sh -ec '
+-  oversized=$(awk '\''BEGIN { for (i = 0; i < 514; i++) printf "0" }'\'')
+-  printf '\''BLOCK:{"prev_hash":"%s"}\n'\'' "$oversized" | nc -w 1 127.0.0.1 3000 || true
+-  printf '\''BLOCK:{"timestamp":-1.5}\n'\'' | nc -w 1 127.0.0.1 3000 || true
+-' >/dev/null 2>&1
+-sleep 1
+-if ! docker compose ps --status running --services | grep -Fxq node1; then
+-  echo "P2P_ACCEPTANCE FAIL: node1 exited after malformed P2P input" >&2
+-  docker compose logs --no-color node1 >&2
+-  exit 1
+-fi
+-query_chain node1 "$tmp_dir/after-malformed.chain"
+-if ! cmp -s "$tmp_dir/before-invalid.chain" "$tmp_dir/after-malformed.chain"; then
+-  echo "P2P_ACCEPTANCE FAIL: malformed P2P input changed node1 chain" >&2
+-  docker compose logs --no-color node1 >&2
+-  exit 1
+-fi
+-
+-tampered=$(tail -n 1 "$tmp_dir/node1.chain" | sed 's/"data":"gossip"/"data":"tampered"/')
+-if [ "$tampered" = "$(tail -n 1 "$tmp_dir/node1.chain")" ]; then
+-  echo "P2P_ACCEPTANCE FAIL: could not construct the tampered block" >&2
+-  exit 1
+-fi
+-
+-docker compose exec -T node1 sh -c \
+-  "printf '%s\\n' '$tampered' | nc -w 1 127.0.0.1 3000" \
+-  >/dev/null 2>&1 || true
+-sleep 1
+-query_chain node1 "$tmp_dir/after-invalid.chain"
+-
+-if ! cmp -s "$tmp_dir/before-invalid.chain" "$tmp_dir/after-invalid.chain"; then
+-  echo "P2P_ACCEPTANCE FAIL: tampered block changed node1 chain" >&2
+-  docker compose logs --no-color node1 >&2
+-  exit 1
+-fi
+-
+-if ! docker compose logs --no-color node1 | grep -q 'BLOCK_REJECTED reason=invalid_pow'; then
+-  echo "P2P_ACCEPTANCE FAIL: node1 did not report invalid PoW/hash" >&2
+-  docker compose logs --no-color node1 >&2
+-  exit 1
+-fi
+-
+-echo "P2P_ACCEPTANCE PASS"
+-echo "P2P_MALFORMED_INPUT_REJECTION PASS"
+-echo "height=2"
+-grep '^BLOCK:' "$tmp_dir/node1.chain" | sed -n 's/.*"hash":"\([0-9a-f]*\)".*/hash=\1/p'
+diff --git a/src/blockchain.zig b/src/blockchain.zig
+index 44ed1421e595872200c8d16a0a2ddee822e3c928..066001385abb5c165ef16bf31562b7a2d62286ee 100644
+--- a/src/blockchain.zig
++++ b/src/blockchain.zig
+@@ -9,9 +9,7 @@ const std = @import("std");
+ const crypto = std.crypto.hash;
+ const Sha256 = crypto.sha2.Sha256;
+ const types = @import("types.zig");
+-const logger = @import("logger.zig");
+ const utils = @import("utils.zig");
+-const chainError = @import("errors.zig").ChainError;
+ const parser = @import("parser.zig");
+ 
+ /// プルーフオブワークマイニングの難易度設定
+@@ -22,17 +20,31 @@ const DIFFICULTY: u8 = 2;
+ /// 完全なブロックチェーンをBlock構造体の動的配列として格納します
+ pub var chain_store = std.ArrayList(types.Block).init(std.heap.page_allocator);
+ 
+-/// ブロック追加の判定結果。呼び出し側は`added`のときだけ再伝播します。
++/// EVMコントラクトストレージ - アドレスからコントラクトコードへのマッピング
++pub var contract_storage = std.StringHashMap([]const u8).init(std.heap.page_allocator);
++
++/// チェーン本体とコントラクト状態は必ず同じロックで読み書きする。
++/// これにより、P2P受信・ローカル入力・同期処理が並行しても、両状態の
++/// 組み合わせが途中の状態として観測されない。
++var state_mutex: std.Thread.Mutex = .{};
++
++/// コントラクト状態を反復する呼び出し元向けの読み取り専用snapshot。
++pub const ContractSnapshotEntry = struct {
++    address: []const u8,
++    code: []const u8,
++};
++
++/// ブロック追加の判定結果。`.added` のときだけチェーンとEVM状態が更新される。
+ pub const AddBlockResult = enum {
+     added,
+     duplicate,
+     invalid_pow,
+-    invalid_link,
+-    out_of_memory,
++    invalid_index,
++    invalid_prev_hash,
++    invalid_genesis,
++    storage_error,
+ };
+ 
+-var chain_store_mutex = std.Thread.Mutex{};
+-
+ //------------------------------------------------------------------------------
+ // ハッシュ計算とマイニング関数
+ //------------------------------------------------------------------------------
+@@ -51,39 +63,118 @@ var chain_store_mutex = std.Thread.Mutex{};
+ pub fn calculateHash(block: *const types.Block) [32]u8 {
+     var hasher = Sha256.init(.{});
+ 
+-    // ノンスをバイト配列に変換し、デバッグ用にログ出力
++    // 可変長フィールドの単純連結による曖昧性を避けるため、
++    // バージョンタグ、件数、長さ、nullマーカーを含む正規形をハッシュする。
++    hasher.update("ZIG_BLOCK_V2");
++
++    // ノンスをバイト配列に変換
+     const nonce_bytes = utils.toBytesU64(block.nonce);
+-    logger.debugLog("nonce bytes: ", .{});
+-    if (comptime logger.debug_logging) {
+-        for (nonce_bytes) |byte| {
+-            std.debug.print("{x:0>2},", .{byte});
+-        }
+-        std.debug.print("\n", .{});
+-    }
+ 
+     // ハッシュ計算にブロックフィールドを順番に追加
+-    const index_bytes = utils.toBytes(u32, block.index);
+-    const timestamp_bytes = utils.toBytes(u64, block.timestamp);
++    const index_bytes = utils.toBytesU32(block.index);
++    const timestamp_bytes = utils.toBytesU64(block.timestamp);
+     hasher.update(&index_bytes);
+     hasher.update(&timestamp_bytes);
+     hasher.update(nonce_bytes[0..]);
+     hasher.update(&block.prev_hash);
+ 
+     // すべてのトランザクションデータをハッシュに追加
++    hashLength(&hasher, block.transactions.items.len);
+     for (block.transactions.items) |tx| {
+-        hasher.update(tx.sender);
+-        hasher.update(tx.receiver);
+-        const amount_bytes = utils.toBytesU64(tx.amount);
+-        hasher.update(&amount_bytes);
++        hashTransactionFields(&hasher, &tx, true);
+     }
+ 
+     // 追加のデータフィールドをハッシュに追加
+-    hasher.update(block.data);
++    hashBytes(&hasher, block.data);
++    hashContracts(&hasher, block.contracts);
+ 
+     // ハッシュを確定して返す
+-    const hash = hasher.finalResult();
+-    logger.debugLog("nonce: {d}, hash: {x}\n", .{ block.nonce, hash });
+-    return hash;
++    return hasher.finalResult();
++}
++
++/// トランザクションのハッシュを計算する
++///
++/// トランザクションの送信者、受信者、金額、タイプ、EVMデータなどを含めて
++/// SHA-256ハッシュを計算します。
++///
++/// 引数:
++///     tx: ハッシュを計算するトランザクション
++///
++/// 戻り値:
++///     [32]u8: トランザクションの32バイトのSHA-256ハッシュ
++pub fn calculateTransactionHash(tx: *const types.Transaction) [32]u8 {
++    var hasher = Sha256.init(.{});
++
++    hasher.update("ZIG_TX_V2");
++    // id はこのハッシュ自身から導出されるため対象外。それ以外は
++    // block hash 内のトランザクション符号化と同じ規則を使う。
++    hashTransactionFields(&hasher, tx, false);
++
++    return hasher.finalResult();
++}
++
++fn hashTransactionFields(hasher: *Sha256, tx: *const types.Transaction, include_id: bool) void {
++    hashBytes(hasher, tx.sender);
++    hashBytes(hasher, tx.receiver);
++
++    const amount_bytes = utils.toBytesU64(tx.amount);
++    const gas_limit_bytes = utils.toBytesU64(@intCast(tx.gas_limit));
++    const gas_price_bytes = utils.toBytesU64(tx.gas_price);
++    hasher.update(&amount_bytes);
++    hasher.update(&[_]u8{tx.tx_type});
++    hasher.update(&gas_limit_bytes);
++    hasher.update(&gas_price_bytes);
++    if (include_id) hasher.update(&tx.id);
++
++    if (tx.evm_data) |evm_data| {
++        hasher.update(&[_]u8{1});
++        hashBytes(hasher, evm_data);
++    } else {
++        hasher.update(&[_]u8{0});
++    }
++}
++
++fn hashLength(hasher: *Sha256, len: usize) void {
++    const len_bytes = utils.toBytesU64(@intCast(len));
++    hasher.update(&len_bytes);
++}
++
++fn hashBytes(hasher: *Sha256, bytes: []const u8) void {
++    hashLength(hasher, bytes.len);
++    hasher.update(bytes);
++}
++
++/// HashMapの反復順は未規定なので、毎回「直前より大きい最小キー」を選び、
++/// アドレスの辞書順でコントラクトを正規化する。学習実装では件数が少ないため、
++/// 割り当てを伴わないO(n^2)走査を選ぶ。
++fn hashContracts(hasher: *Sha256, maybe_contracts: ?std.StringHashMap([]const u8)) void {
++    const contracts = maybe_contracts orelse {
++        hasher.update(&[_]u8{0});
++        return;
++    };
++    hasher.update(&[_]u8{1});
++    hashLength(hasher, contracts.count());
++
++    var previous_key: ?[]const u8 = null;
++    var emitted: usize = 0;
++    while (emitted < contracts.count()) : (emitted += 1) {
++        var candidate: ?[]const u8 = null;
++        var it = contracts.iterator();
++        while (it.next()) |entry| {
++            const key = entry.key_ptr.*;
++            if (previous_key) |previous| {
++                if (std.mem.order(u8, previous, key) != .lt) continue;
++            }
++            if (candidate == null or std.mem.order(u8, key, candidate.?) == .lt) {
++                candidate = key;
++            }
++        }
++
++        const key = candidate orelse unreachable;
++        hashBytes(hasher, key);
++        hashBytes(hasher, contracts.get(key).?);
++        previous_key = key;
++    }
+ }
+ 
+ /// ハッシュが必要なプルーフオブワークの難易度を満たしているかチェックする
+@@ -144,6 +235,10 @@ pub fn verifyBlockPow(b: *const types.Block) bool {
+     // ハッシュを再計算し、保存されたハッシュと一致するか確認
+     const recalculated = calculateHash(b);
+     if (!std.mem.eql(u8, recalculated[0..], b.hash[0..])) {
++        std.log.warn("Block hash mismatch: stored={s}, recalculated={s}", .{
++            std.fmt.bytesToHex(b.hash, .lower),
++            std.fmt.bytesToHex(recalculated, .lower),
++        });
+         return false; // ハッシュフィールドが再計算されたハッシュと一致しない
+     }
+ 
+@@ -166,55 +261,201 @@ pub fn verifyBlockPow(b: *const types.Block) bool {
+ /// 注意:
+ ///     この関数は成功または失敗のメッセージをログに記録します
+ pub fn addBlock(new_block: types.Block) AddBlockResult {
+-    chain_store_mutex.lock();
+-    defer chain_store_mutex.unlock();
++    state_mutex.lock();
++    defer state_mutex.unlock();
+ 
++    // 内容、PoW、チェーン上の位置をすべて検証し終えるまで、
++    // contract_storage と chain_store には一切触れない。
+     if (!verifyBlockPow(&new_block)) {
+-        std.log.warn("BLOCK_REJECTED reason=invalid_pow index={d}", .{new_block.index});
++        std.log.warn("Received block fails hash/PoW check. Rejecting it.", .{});
+         return .invalid_pow;
+     }
+ 
+-    for (chain_store.items) |known_block| {
+-        if (std.mem.eql(u8, known_block.hash[0..], new_block.hash[0..])) {
+-            std.log.info("BLOCK_REJECTED reason=duplicate index={d} hash={x:0>2}", .{ new_block.index, new_block.hash });
++    for (chain_store.items) |existing_block| {
++        if (std.mem.eql(u8, &existing_block.hash, &new_block.hash)) {
++            std.log.info("Block already exists; ignoring duplicate index={d}, hash={x}", .{ new_block.index, new_block.hash });
+             return .duplicate;
+         }
+     }
+ 
+-    var expected_index: u32 = undefined;
+-    var expected_prev_hash: [32]u8 = undefined;
+     if (chain_store.items.len == 0) {
+-        var genesis = createTestGenesisBlock(std.heap.page_allocator) catch {
+-            std.log.warn("BLOCK_REJECTED reason=genesis_allocation index={d}", .{new_block.index});
+-            return .out_of_memory;
+-        };
+-        defer genesis.transactions.deinit();
+-        expected_index = genesis.index + 1;
+-        expected_prev_hash = genesis.hash;
++        if (new_block.index != 0) {
++            std.log.warn("First block must have index 0, got {d}", .{new_block.index});
++            return .invalid_index;
++        }
++        if (!isZeroHash(new_block.prev_hash)) {
++            std.log.warn("Genesis block must have an all-zero prev_hash", .{});
++            return .invalid_prev_hash;
++        }
++        if (!isDeterministicGenesis(&new_block)) {
++            std.log.warn("First block does not match the deterministic genesis policy", .{});
++            return .invalid_genesis;
++        }
+     } else {
+-        const tip = chain_store.items[chain_store.items.len - 1];
+-        expected_index = tip.index + 1;
+-        expected_prev_hash = tip.hash;
++        const tip = &chain_store.items[chain_store.items.len - 1];
++        const expected_index = tip.index + 1;
++        if (new_block.index != expected_index) {
++            std.log.warn("Unexpected block index: expected={d}, got={d}", .{ expected_index, new_block.index });
++            return .invalid_index;
++        }
++        if (!std.mem.eql(u8, &tip.hash, &new_block.prev_hash)) {
++            std.log.warn("Block prev_hash does not match the current tip", .{});
++            return .invalid_prev_hash;
++        }
+     }
+ 
+-    if (new_block.index != expected_index or
+-        !std.mem.eql(u8, new_block.prev_hash[0..], expected_prev_hash[0..]))
+-    {
+-        std.log.warn("BLOCK_REJECTED reason=invalid_link index={d} expected_index={d}", .{ new_block.index, expected_index });
+-        return .invalid_link;
+-    }
++    std.log.info("Adding block to chain: index={d}, hash={x}", .{ new_block.index, new_block.hash });
+ 
+-    chain_store.append(new_block) catch {
+-        std.log.warn("BLOCK_REJECTED reason=out_of_memory index={d}", .{new_block.index});
+-        return .out_of_memory;
++    // 追加領域を先に確保する。確保失敗時はEVM状態を変更しない。
++    chain_store.ensureUnusedCapacity(1) catch |err| {
++        std.log.err("Failed to reserve chain storage: {any}", .{err});
++        return .storage_error;
+     };
+-    std.log.info("Added new block index={d}, nonce={d}, hash={x:0>2}", .{ new_block.index, new_block.nonce, new_block.hash });
+ 
+-    // chain_store_mutexを保持しているため、再ロックしない内部版を使う。
++    // EVM状態は一時mapへ構築し、全処理が成功した場合だけ差し替える。
++    // これにより.addedはchainとEVM状態の両方が更新されたことを表す。
++    const next_contract_storage = cloneContractStorageWithBlock(&contract_storage, new_block) catch |err| {
++        std.log.warn("Failed to prepare contract state: {any}", .{err});
++        return .storage_error;
++    };
++    contract_storage.deinit();
++    contract_storage = next_contract_storage;
++    chain_store.appendAssumeCapacity(new_block);
++    std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
++
++    // state_mutexを保持したまま公開関数を呼ぶと自己deadlockするため、
++    // ロック取得済みの内部関数を使う。
+     printChainStateLocked();
+     return .added;
+ }
+ 
++fn cloneContractStorageWithBlock(
++    current: *std.StringHashMap([]const u8),
++    new_block: types.Block,
++) !std.StringHashMap([]const u8) {
++    var next = std.StringHashMap([]const u8).init(std.heap.page_allocator);
++    errdefer next.deinit();
++
++    var current_it = current.iterator();
++    while (current_it.next()) |entry| {
++        try next.put(entry.key_ptr.*, entry.value_ptr.*);
++    }
++    try applyBlockState(&next, new_block);
++    return next;
++}
++
++fn applyBlockState(
++    storage: *std.StringHashMap([]const u8),
++    new_block: types.Block,
++) !void {
++
++    // ブロックに含まれるコントラクトがあれば、コントラクトストレージに追加
++    if (new_block.contracts) |contracts| {
++        std.log.info("Block contains {d} contracts to process", .{contracts.count()});
++        var it = contracts.iterator();
++        var contract_count: usize = 0;
++        while (it.next()) |entry| {
++            const address = entry.key_ptr.*;
++            const code = entry.value_ptr.*;
++            contract_count += 1;
++
++            // 既存コードの有無にかかわらず **必ず** 上書きする
++            try storage.put(address, code);
++            std.log.info("Updated contract {s} (stored {d} bytes)", .{ address, code.len });
++        }
++        std.log.info("Processed {d} contracts from received block", .{contract_count});
++    }
++
++    // トランザクションにコントラクトデプロイが含まれているか確認
++    for (new_block.transactions.items) |tx| {
++        if (tx.tx_type == 1) { // コントラクトデプロイトランザクション
++            std.log.info("Found contract deploy transaction in block for address: {s}", .{tx.receiver});
++
++            // コントラクトがまだ保存されていないかつ、evm_dataがある場合
++            if (!storage.contains(tx.receiver) and tx.evm_data != null) {
++                // ローカルで再実行して結果を保存
++                const allocator = std.heap.page_allocator;
++                const evm_data = tx.evm_data.?;
++                const calldata = "";
++
++                const result = try @import("evm.zig").execute(allocator, evm_data, calldata, tx.gas_limit);
++                errdefer allocator.free(result);
++
++                // 結果をコントラクトストレージに保存
++                try storage.put(tx.receiver, result);
++                std.log.info("Re-executed and stored contract at address: {s}, code length: {d} bytes", .{ tx.receiver, result.len });
++            }
++        }
++    }
++}
++
++fn isZeroHash(hash: [32]u8) bool {
++    return std.mem.eql(u8, &hash, &([_]u8{0} ** 32));
++}
++
++/// 全ノードが同じジェネシスを選ぶよう、内容だけでなく
++/// nonce 0から最初に見つかるPoW解まで一致させる。
++fn isDeterministicGenesis(block: *const types.Block) bool {
++    if (block.timestamp != 1_672_531_200 or
++        !std.mem.eql(u8, block.data, "Hello, Zig Blockchain!") or
++        block.transactions.items.len != 1)
++    {
++        return false;
++    }
++
++    const tx = block.transactions.items[0];
++    if (!std.mem.eql(u8, tx.sender, "Alice") or
++        !std.mem.eql(u8, tx.receiver, "Bob") or
++        tx.amount != 100 or
++        tx.tx_type != 0 or
++        tx.evm_data != null or
++        tx.gas_limit != 1_000_000 or
++        tx.gas_price != 20_000_000_000 or
++        !isZeroHash(tx.id))
++    {
++        return false;
++    }
++    // null と空mapはhash上で別の値になるため、決定的genesisでは
++    // contractsを必ずnullに固定する。
++    if (block.contracts != null) return false;
++
++    var expected = block.*;
++    expected.nonce = 0;
++    expected.hash = [_]u8{0} ** 32;
++    mineBlock(&expected, DIFFICULTY);
++    return expected.nonce == block.nonce and std.mem.eql(u8, &expected.hash, &block.hash);
++}
++
++test "同じハッシュのブロックは重複追加しない" {
++    chain_store.clearRetainingCapacity();
++    defer chain_store.clearRetainingCapacity();
++
++    const block = try createTestGenesisBlock(std.heap.page_allocator);
++    try std.testing.expectEqual(AddBlockResult.added, addBlock(block));
++    try std.testing.expectEqual(AddBlockResult.duplicate, addBlock(block));
++
++    try std.testing.expectEqual(@as(usize, 1), chain_store.items.len);
++}
++
++test "deterministic genesis rejects a non-null empty contracts map" {
++    chain_store.clearRetainingCapacity();
++    contract_storage.clearRetainingCapacity();
++    defer chain_store.clearRetainingCapacity();
++    defer contract_storage.clearRetainingCapacity();
++
++    var block = try createTestGenesisBlock(std.testing.allocator);
++    defer block.transactions.deinit();
++    var empty_contracts = std.StringHashMap([]const u8).init(std.testing.allocator);
++    defer empty_contracts.deinit();
++    block.contracts = empty_contracts;
++    block.nonce = 0;
++    block.hash = [_]u8{0} ** 32;
++    mineBlock(&block, DIFFICULTY);
++
++    try std.testing.expectEqual(AddBlockResult.invalid_genesis, addBlock(block));
++    try std.testing.expectEqual(@as(usize, 0), chain_store.items.len);
++}
++
+ /// 前のブロックにリンクされた新しいブロックを作成する
+ ///
+ /// 新しいブロックをデフォルト値で初期化し、そのインデックスを
+@@ -268,9 +509,9 @@ pub fn createTestGenesisBlock(allocator: std.mem.Allocator) !types.Block {
+ 
+ /// より長いチェーンとブロックチェーンを同期する
+ ///
+-/// 提供されたチェーンが現在のチェーンより長い場合にローカル配列を
+-/// 置き換える、第8章時点の補助関数です。P2P受信経路からは呼ばれず、
+-/// 候補全体の検証やフォーク選択を行うコンセンサス実装ではありません。
++/// 提供されたチェーンが現在のチェーンより長く、候補全体の検証を通る場合だけ
++/// ローカル状態を原子的に置き換える補助関数です。P2P受信経路からは呼ばれず、
++/// 累積workによるフォーク選択を行うコンセンサス実装ではありません。
+ ///
+ /// 引数:
+ ///     blocks: ブロックチェーンを表すブロックの配列
+@@ -283,19 +524,17 @@ pub fn createTestGenesisBlock(allocator: std.mem.Allocator) !types.Block {
+ pub fn syncChain(blocks: []types.Block) !void {
+     if (blocks.len == 0) return;
+ 
+-    chain_store_mutex.lock();
+-    defer chain_store_mutex.unlock();
++    state_mutex.lock();
++    defer state_mutex.unlock();
+ 
+-    // 受信したチェーンが現在のチェーンより長い場合のみ同期
++    // 第11章では第8章の単純な長さ比較を保つ。置換前の全チェーン検証と
++    // EVM状態の再構築は第12章で追加する。
+     if (blocks.len > chain_store.items.len) {
+-        // 現在のチェーンをクリア
++        try chain_store.ensureTotalCapacity(blocks.len);
+         chain_store.clearRetainingCapacity();
+-
+-        // 新しいチェーンからブロックをコピー
+         for (blocks) |block| {
+-            try chain_store.append(block);
++            chain_store.appendAssumeCapacity(block);
+         }
+-
+         std.log.info("Chain synchronized with {d} blocks", .{blocks.len});
+     } else {
+         std.log.info("Received chain ({d} blocks) is not longer than current chain ({d} blocks)", .{ blocks.len, chain_store.items.len });
+@@ -307,8 +546,8 @@ pub fn syncChain(blocks: []types.Block) !void {
+ /// 戻り値:
+ ///     usize: ブロックチェーン内のブロック数
+ pub fn getChainHeight() usize {
+-    chain_store_mutex.lock();
+-    defer chain_store_mutex.unlock();
++    state_mutex.lock();
++    defer state_mutex.unlock();
+     return chain_store.items.len;
+ }
+ 
+@@ -320,36 +559,78 @@ pub fn getChainHeight() usize {
+ /// 戻り値:
+ ///     ?types.Block: 要求されたブロック、見つからない場合はnull
+ pub fn getBlock(index: usize) ?types.Block {
+-    chain_store_mutex.lock();
+-    defer chain_store_mutex.unlock();
++    state_mutex.lock();
++    defer state_mutex.unlock();
+     if (index >= chain_store.items.len) return null;
+     return chain_store.items[index];
+ }
+ 
+-/// 現在のtipを値コピーで取得する。第8章では空チェーンのときnullを返し、
+-/// 呼び出し側が決定的genesisを直前ブロックとして使う。
++/// 現在のtipを値コピーで取得する。
+ pub fn getChainTip() ?types.Block {
+-    chain_store_mutex.lock();
+-    defer chain_store_mutex.unlock();
++    state_mutex.lock();
++    defer state_mutex.unlock();
+     if (chain_store.items.len == 0) return null;
+     return chain_store.items[chain_store.items.len - 1];
+ }
+ 
+-/// P2P送信中のArrayList再確保を避けるため、Block構造体を値コピーする。
+-/// accepted blockのネストしたデータは実行中immutableかつ解放されないため、
+-/// shallow snapshotの参照先は有効である。呼び出し側は返却配列だけを解放する。
++/// 送信中にArrayListの再確保が起きても反復子が無効にならないよう、
++/// Block構造体の配列だけを呼び出し元allocatorへコピーする。
++///
++/// snapshotはshallow copyである。`.added` になったBlockのネストした
++/// transactions/data/contractsはチェーンへ所有権が移り、実行中はimmutableかつ
++/// 解放されない、という本実装の所有権規約により参照先は有効なままになる。
++/// 呼び出し元は返された配列だけを `allocator.free` する。
+ pub fn copyChainSnapshot(allocator: std.mem.Allocator) ![]types.Block {
+-    chain_store_mutex.lock();
+-    defer chain_store_mutex.unlock();
++    state_mutex.lock();
++    defer state_mutex.unlock();
+     return allocator.dupe(types.Block, chain_store.items);
+ }
+ 
++/// コントラクトコードを読み取る。返すsliceはaccepted blockが所有し、
++/// 実行中はimmutableかつ解放されない。
++pub fn getContractCode(address: []const u8) ?[]const u8 {
++    state_mutex.lock();
++    defer state_mutex.unlock();
++    return contract_storage.get(address);
++}
++
++/// P2P同期で既存ブロックから復元した、寿命の安定したコードを登録する。
++pub fn putContractCode(address: []const u8, code: []const u8) !void {
++    state_mutex.lock();
++    defer state_mutex.unlock();
++    try contract_storage.put(address, code);
++}
++
++pub fn getContractCount() usize {
++    state_mutex.lock();
++    defer state_mutex.unlock();
++    return contract_storage.count();
++}
++
++/// ロック外で安全に反復できる、読み取り専用のshallow snapshotを返す。
++/// 呼び出し元は返された配列だけを `allocator.free` する。
++pub fn copyContractSnapshot(allocator: std.mem.Allocator) ![]ContractSnapshotEntry {
++    state_mutex.lock();
++    defer state_mutex.unlock();
++
++    const snapshot = try allocator.alloc(ContractSnapshotEntry, contract_storage.count());
++    var index: usize = 0;
++    var it = contract_storage.iterator();
++    while (it.next()) |entry| : (index += 1) {
++        snapshot[index] = .{
++            .address = entry.key_ptr.*,
++            .code = entry.value_ptr.*,
++        };
++    }
++    return snapshot;
++}
++
+ /// デバッグ用に現在のブロックチェーン状態を出力する
+ ///
+ /// チェーンの高さと各ブロックの詳細情報を見やすい形式で表示します
+ pub fn printChainState() void {
+-    chain_store_mutex.lock();
+-    defer chain_store_mutex.unlock();
++    state_mutex.lock();
++    defer state_mutex.unlock();
+     printChainStateLocked();
+ }
+ 
+@@ -389,54 +670,371 @@ fn printChainStateLocked() void {
+     std.debug.print("\n{s}\n", .{"---------------------------"});
+ }
+ 
+-// ヘルパー関数: 文字列を指定回数繰り返す
+-fn times(comptime char: []const u8, n: usize) []const u8 {
+-    const static = struct {
+-        var buffer: [100]u8 = undefined;
+-    };
+-    var i: usize = 0;
+-    while (i < n and i < static.buffer.len) : (i += 1) {
+-        static.buffer[i] = char[0];
++/// EVMトランザクションを実行し、詳細なエラー情報を含めて処理する
++///
++/// 引数:
++///     tx: 処理するトランザクション
++///
++/// 戻り値:
++///     実行結果またはエラー
++pub fn processEvmTransactionWithErrorDetails(tx: *types.Transaction) ![]const u8 {
++    if (std.mem.eql(u8, &tx.id, &[_]u8{0} ** 32)) {
++        tx.id = calculateTransactionHash(tx);
+     }
+-    return static.buffer[0..i];
++
++    const evm_data = tx.evm_data orelse return error.NoEvmData;
++    const allocator = std.heap.page_allocator;
++    var result: []const u8 = "";
++    var contract_deployed = false;
++
++    switch (tx.tx_type) {
++        1 => {
++            std.log.info("スマートコントラクトをデプロイしています: 送信者={s}, ガス上限={d}", .{ tx.sender, tx.gas_limit });
++            const evm_result = @import("evm.zig").executeWithErrorInfo(allocator, evm_data, "", tx.gas_limit);
++            if (!evm_result.success) {
++                logEvmExecutionFailure(evm_result);
++                return error.EvmExecutionFailed;
++            }
++
++            result = evm_result.data;
++            contract_deployed = true;
++            std.log.info("コントラクトが正常にデプロイされました: アドレス={s}, コード長={d}バイト", .{ tx.receiver, result.len });
++        },
++        2 => {
++            std.log.info("スマートコントラクトを呼び出しています: アドレス={s}, 送信者={s}, ガス上限={d}", .{ tx.receiver, tx.sender, tx.gas_limit });
++            const contract_code = getContractCode(tx.receiver) orelse {
++                std.log.err("コントラクトが見つかりません: アドレス={s}", .{tx.receiver});
++                return error.ContractNotFound;
++            };
++
++            const evm_result = @import("evm.zig").executeWithErrorInfo(allocator, contract_code, evm_data, tx.gas_limit);
++            if (!evm_result.success) {
++                logEvmExecutionFailure(evm_result);
++                return error.EvmExecutionFailed;
++            }
++
++            result = evm_result.data;
++            std.log.info("コントラクト呼び出しが完了しました: 結果長={d}バイト", .{result.len});
++        },
++        else => return error.NotEvmTransaction,
++    }
++
++    if (contract_deployed) {
++        try recordContractDeployment(tx, result, allocator);
++    }
++    return result;
+ }
+ 
+-fn clearChainStoreForTest() void {
+-    for (chain_store.items) |*block| {
+-        block.transactions.deinit();
++fn logEvmExecutionFailure(result: @import("evm.zig").EvmExecutionResult) void {
++    if (result.error_message) |message| {
++        std.log.err("EVM_EXECUTION_FAILED message={s}", .{message});
++    }
++    if (result.error_type) |error_type| {
++        std.log.err("EVM_EXECUTION_FAILED type={any} pc={d}", .{ error_type, result.error_pc orelse 0 });
++    }
++}
++
++/// デプロイ結果を所有権の独立したブロックへ記録し、ピアへ伝播する。
++fn recordContractDeployment(tx: *const types.Transaction, runtime_code: []const u8, allocator: std.mem.Allocator) !void {
++    if (getChainHeight() == 0) {
++        const genesis = try createTestGenesisBlock(allocator);
++        switch (addBlock(genesis)) {
++            .added => @import("p2p.zig").broadcastBlock(genesis, null),
++            // 別threadが同じ決定的genesisを先に追加した場合は続行できる。
++            .duplicate => {},
++            else => return error.GenesisRejected,
++        }
+     }
++
++    const last_block = getChainTip() orelse return error.MissingGenesis;
++    var new_block = createBlock("Contract Deployment", last_block);
++
++    // CLIの入力バッファはdeployContract終了時に解放されるため、
++    // チェインが保持するトランザクションは文字列とバイト列を複製する。
++    var stored_tx = tx.*;
++    stored_tx.sender = try allocator.dupe(u8, tx.sender);
++    stored_tx.receiver = try allocator.dupe(u8, tx.receiver);
++    stored_tx.evm_data = if (tx.evm_data) |data|
++        try allocator.dupe(u8, data)
++    else
++        null;
++    try new_block.transactions.append(stored_tx);
++
++    var contracts = std.StringHashMap([]const u8).init(allocator);
++    const stored_address = try allocator.dupe(u8, tx.receiver);
++    try contracts.put(stored_address, runtime_code);
++    new_block.contracts = contracts;
++
++    mineBlock(&new_block, DIFFICULTY);
++    if (addBlock(new_block) != .added) return error.DeploymentBlockRejected;
++    @import("p2p.zig").broadcastBlock(new_block, null);
++
++    std.log.info("コントラクトデプロイブロックを作成しました: address={s}, transactions={d}, contracts={d}", .{
++        tx.receiver,
++        new_block.transactions.items.len,
++        contracts.count(),
++    });
++}
++
++test "block hash commits EVM transaction payload and gas fields" {
++    var evm_data = [_]u8{ 0x01, 0x02, 0x03 };
++    var block = types.Block{
++        .index = 1,
++        .timestamp = 1672531201,
++        .prev_hash = [_]u8{0} ** 32,
++        .transactions = std.ArrayList(types.Transaction).init(std.testing.allocator),
++        .nonce = 0,
++        .data = "EVM transaction",
++        .hash = [_]u8{0} ** 32,
++        .contracts = null,
++    };
++    defer block.transactions.deinit();
++
++    try block.transactions.append(.{
++        .sender = "0xsender",
++        .receiver = "0xreceiver",
++        .amount = 0,
++        .tx_type = 2,
++        .evm_data = evm_data[0..],
++        .gas_limit = 100_000,
++        .gas_price = 10,
++    });
++
++    const original = calculateHash(&block);
++    evm_data[0] ^= 0xff;
++    const payload_tampered = calculateHash(&block);
++    try std.testing.expect(!std.mem.eql(u8, original[0..], payload_tampered[0..]));
++
++    evm_data[0] ^= 0xff;
++    block.transactions.items[0].gas_limit += 1;
++    const gas_tampered = calculateHash(&block);
++    try std.testing.expect(!std.mem.eql(u8, original[0..], gas_tampered[0..]));
++}
++
++test "serialized EVM block preserves every hashed transaction field" {
++    const evm_data = [_]u8{ 0xaa, 0xbb, 0xcc };
++    var block = types.Block{
++        .index = 1,
++        .timestamp = 1672531202,
++        .prev_hash = [_]u8{0} ** 32,
++        .transactions = std.ArrayList(types.Transaction).init(std.testing.allocator),
++        .nonce = 0,
++        .data = "EVM round trip",
++        .hash = [_]u8{0} ** 32,
++        .contracts = null,
++    };
++    defer block.transactions.deinit();
++    try block.transactions.append(.{
++        .sender = "0xsender",
++        .receiver = "0xreceiver",
++        .amount = 7,
++        .tx_type = 2,
++        .evm_data = &evm_data,
++        .gas_limit = 123_456,
++        .gas_price = 99,
++        .id = [_]u8{0x42} ** 32,
++    });
++    mineBlock(&block, DIFFICULTY);
++
++    const json = try parser.serializeBlock(block);
++    defer std.heap.page_allocator.free(json);
++    var decoded = try parser.parseBlockJson(json);
++    defer parser.deinitParsedBlock(&decoded);
++
++    try std.testing.expect(verifyBlockPow(&decoded));
++    try std.testing.expectEqualSlices(u8, &block.transactions.items[0].id, &decoded.transactions.items[0].id);
++    try std.testing.expectEqualSlices(u8, block.transactions.items[0].evm_data.?, decoded.transactions.items[0].evm_data.?);
++    try std.testing.expectEqual(block.transactions.items[0].gas_limit, decoded.transactions.items[0].gas_limit);
++    try std.testing.expectEqual(block.transactions.items[0].gas_price, decoded.transactions.items[0].gas_price);
++}
++
++test "serialized block preserves a non-null empty contracts map" {
++    var block = types.Block{
++        .index = 1,
++        .timestamp = 1_672_531_203,
++        .prev_hash = [_]u8{0x11} ** 32,
++        .transactions = std.ArrayList(types.Transaction).init(std.testing.allocator),
++        .nonce = 0,
++        .data = "empty contracts round trip",
++        .hash = [_]u8{0} ** 32,
++        .contracts = std.StringHashMap([]const u8).init(std.testing.allocator),
++    };
++    defer block.transactions.deinit();
++    defer block.contracts.?.deinit();
++    mineBlock(&block, DIFFICULTY);
++
++    const json = try parser.serializeBlock(block);
++    defer std.heap.page_allocator.free(json);
++    var decoded = try parser.parseBlockJson(json);
++    defer parser.deinitParsedBlock(&decoded);
++
++    try std.testing.expect(decoded.contracts != null);
++    try std.testing.expectEqual(@as(usize, 0), decoded.contracts.?.count());
++    try std.testing.expect(verifyBlockPow(&decoded));
++}
++
++test "addBlock rejects wrong index and link before contract side effects" {
+     chain_store.clearRetainingCapacity();
++    contract_storage.clearRetainingCapacity();
++    defer chain_store.clearRetainingCapacity();
++    defer contract_storage.clearRetainingCapacity();
++
++    const genesis = try createTestGenesisBlock(std.heap.page_allocator);
++    try std.testing.expectEqual(AddBlockResult.added, addBlock(genesis));
++
++    var malicious_contracts = std.StringHashMap([]const u8).init(std.heap.page_allocator);
++    defer malicious_contracts.deinit();
++    try malicious_contracts.put("0xevil", "must-not-be-stored");
++
++    var wrong_index = createBlock("wrong index", genesis);
++    defer wrong_index.transactions.deinit();
++    wrong_index.index += 1;
++    wrong_index.contracts = malicious_contracts;
++    mineBlock(&wrong_index, DIFFICULTY);
++    try std.testing.expectEqual(AddBlockResult.invalid_index, addBlock(wrong_index));
++    try std.testing.expect(!contract_storage.contains("0xevil"));
++
++    var wrong_link = createBlock("wrong link", genesis);
++    defer wrong_link.transactions.deinit();
++    wrong_link.prev_hash = [_]u8{0} ** 32;
++    wrong_link.contracts = malicious_contracts;
++    mineBlock(&wrong_link, DIFFICULTY);
++    try std.testing.expectEqual(AddBlockResult.invalid_prev_hash, addBlock(wrong_link));
++    try std.testing.expect(!contract_storage.contains("0xevil"));
++    try std.testing.expectEqual(@as(usize, 1), chain_store.items.len);
+ }
+ 
+-test "addBlock rejects tampering duplicates and broken links" {
+-    clearChainStoreForTest();
+-    defer clearChainStoreForTest();
++test "addBlock leaves chain and contract state unchanged when EVM state application fails" {
++    chain_store.clearRetainingCapacity();
++    contract_storage.clearRetainingCapacity();
++    defer chain_store.clearRetainingCapacity();
++    defer contract_storage.clearRetainingCapacity();
+ 
+-    var genesis = try createTestGenesisBlock(std.heap.page_allocator);
+-    defer genesis.transactions.deinit();
++    const genesis = try createTestGenesisBlock(std.heap.page_allocator);
++    try std.testing.expectEqual(AddBlockResult.added, addBlock(genesis));
+ 
+-    var first = createBlock("first", genesis);
+-    mineBlock(&first, DIFFICULTY);
+-    try std.testing.expectEqual(AddBlockResult.added, addBlock(first));
+-    try std.testing.expectEqual(@as(usize, 1), getChainHeight());
++    var invalid_deploy = createBlock("invalid deployment", genesis);
++    defer invalid_deploy.transactions.deinit();
++    try invalid_deploy.transactions.append(.{
++        .sender = "0xsender",
++        .receiver = "0xinvalid",
++        .amount = 0,
++        .tx_type = 1,
++        // PUSH1 0, PUSH1 0, REVERT: 型付き失敗だがテストrunnerの
++        // error-log検出を発火させない。
++        .evm_data = &[_]u8{ 0x60, 0x00, 0x60, 0x00, 0xfd },
++        .gas_limit = 100_000,
++        .gas_price = 10,
++    });
++    mineBlock(&invalid_deploy, DIFFICULTY);
+ 
+-    try std.testing.expectEqual(AddBlockResult.duplicate, addBlock(first));
+-    try std.testing.expectEqual(@as(usize, 1), getChainHeight());
++    try std.testing.expectEqual(AddBlockResult.storage_error, addBlock(invalid_deploy));
++    try std.testing.expectEqual(@as(usize, 1), chain_store.items.len);
++    try std.testing.expect(!contract_storage.contains("0xinvalid"));
++}
+ 
+-    var tampered = first;
+-    tampered.data = "tampered";
+-    try std.testing.expectEqual(AddBlockResult.invalid_pow, addBlock(tampered));
+-    try std.testing.expectEqual(@as(usize, 1), getChainHeight());
++test "recordContractDeployment stores an owned transaction and runtime block" {
++    chain_store.clearRetainingCapacity();
++    contract_storage.clearRetainingCapacity();
++    defer chain_store.clearRetainingCapacity();
++    defer contract_storage.clearRetainingCapacity();
++
++    const allocator = std.testing.allocator;
++    const sender = try allocator.dupe(u8, "0xsender");
++    defer allocator.free(sender);
++    const receiver = try allocator.dupe(u8, "0xchapter11");
++    defer allocator.free(receiver);
++
++    // creation codeは末尾のSTOP 1バイトをruntime codeとして返す。
++    const creation_template = [_]u8{
++        0x60, 0x01, // PUSH1 runtime length
++        0x60, 0x0c, // PUSH1 runtime offset
++        0x60, 0x00, // PUSH1 memory offset
++        0x39, // CODECOPY
++        0x60, 0x01, // PUSH1 return length
++        0x60, 0x00, // PUSH1 return offset
++        0xf3, // RETURN
++        0x00, // runtime: STOP
++    };
++    const creation = try allocator.dupe(u8, &creation_template);
++    defer allocator.free(creation);
++
++    var tx = types.Transaction{
++        .sender = sender,
++        .receiver = receiver,
++        .amount = 0,
++        .tx_type = 1,
++        .evm_data = creation,
++        .gas_limit = 100_000,
++        .gas_price = 10,
++    };
++    const runtime = try processEvmTransactionWithErrorDetails(&tx);
++    defer std.heap.page_allocator.free(runtime);
++
++    try std.testing.expectEqualSlices(u8, &[_]u8{0x00}, runtime);
++    try std.testing.expectEqual(@as(usize, 2), chain_store.items.len);
++    const deployment = chain_store.items[1];
++    try std.testing.expectEqual(@as(usize, 1), deployment.transactions.items.len);
++    try std.testing.expectEqualStrings("0xsender", deployment.transactions.items[0].sender);
++    try std.testing.expectEqualStrings("0xchapter11", deployment.transactions.items[0].receiver);
++    try std.testing.expectEqualSlices(u8, &creation_template, deployment.transactions.items[0].evm_data.?);
++    try std.testing.expectEqualSlices(u8, &[_]u8{0x00}, contract_storage.get("0xchapter11").?);
++
++    // 呼び出し側の一時バッファを変更しても、chain内の所有データは変わらない。
++    sender[0] = 'X';
++    receiver[0] = 'Y';
++    creation[0] = 0xff;
++    try std.testing.expectEqualStrings("0xsender", deployment.transactions.items[0].sender);
++    try std.testing.expectEqualStrings("0xchapter11", deployment.transactions.items[0].receiver);
++    try std.testing.expectEqual(@as(u8, 0x60), deployment.transactions.items[0].evm_data.?[0]);
++}
++
++test "EVM payload and deployed runtime tampering invalidate block PoW" {
++    var evm_data = [_]u8{ 0x60, 0x01, 0x60, 0x02 };
++    var runtime_code = [_]u8{ 0x60, 0x03, 0x60, 0x04 };
++    var block = types.Block{
++        .index = 1,
++        .timestamp = 1_672_531_201,
++        .prev_hash = [_]u8{0x22} ** 32,
++        .transactions = std.ArrayList(types.Transaction).init(std.testing.allocator),
++        .nonce = 0,
++        .data = "Contract Deployment",
++        .hash = [_]u8{0} ** 32,
++        .contracts = std.StringHashMap([]const u8).init(std.testing.allocator),
++    };
++    defer block.transactions.deinit();
++    defer block.contracts.?.deinit();
++    try block.transactions.append(.{
++        .sender = "0xsender",
++        .receiver = "0xcontract",
++        .amount = 0,
++        .tx_type = 1,
++        .evm_data = &evm_data,
++        .gas_limit = 3_000_000,
++        .gas_price = 10,
++    });
++    try block.contracts.?.put("0xcontract", &runtime_code);
++    mineBlock(&block, DIFFICULTY);
++    try std.testing.expect(verifyBlockPow(&block));
++
++    evm_data[0] ^= 0xff;
++    try std.testing.expect(!verifyBlockPow(&block));
++    evm_data[0] ^= 0xff;
++    try std.testing.expect(verifyBlockPow(&block));
++
++    runtime_code[0] ^= 0xff;
++    try std.testing.expect(!verifyBlockPow(&block));
++}
+ 
+-    var broken_link = createBlock("broken", first);
+-    defer broken_link.transactions.deinit();
+-    broken_link.prev_hash = [_]u8{0} ** 32;
+-    mineBlock(&broken_link, DIFFICULTY);
+-    try std.testing.expectEqual(AddBlockResult.invalid_link, addBlock(broken_link));
+-    try std.testing.expectEqual(@as(usize, 1), getChainHeight());
++test "transaction hashing separates variable-length fields and null EVM data" {
++    const left = types.Transaction{ .sender = "ab", .receiver = "c", .amount = 1 };
++    const right = types.Transaction{ .sender = "a", .receiver = "bc", .amount = 1 };
++    const empty_data = [_]u8{};
++    const empty = types.Transaction{ .sender = "ab", .receiver = "c", .amount = 1, .evm_data = &empty_data };
+ 
+-    var second = createBlock("second", first);
+-    mineBlock(&second, DIFFICULTY);
+-    try std.testing.expectEqual(AddBlockResult.added, addBlock(second));
+-    try std.testing.expectEqual(@as(usize, 2), getChainHeight());
++    const left_hash = calculateTransactionHash(&left);
++    const right_hash = calculateTransactionHash(&right);
++    const empty_hash = calculateTransactionHash(&empty);
++    try std.testing.expect(!std.mem.eql(u8, &left_hash, &right_hash));
++    try std.testing.expect(!std.mem.eql(u8, &left_hash, &empty_hash));
+ }
+diff --git a/src/evm.zig b/src/evm.zig
+index 45f1a5f5d3468b0dcb59368c38f8154dbd5acb70..c38a46e71d609ea537193f3d54f5ff349078273a 100644
+--- a/src/evm.zig
++++ b/src/evm.zig
+@@ -91,6 +91,64 @@ pub fn execute(
+     return result;
+ }
+ 
++/// EVM実行の成功可否に加え、失敗した命令位置とエラー種別を返す。
++pub const EvmExecutionResult = struct {
++    success: bool,
++    data: []const u8,
++    error_message: ?[]const u8,
++    error_type: ?EVMError,
++    error_pc: ?usize,
++};
++
++pub fn executeWithErrorInfo(
++    allocator: std.mem.Allocator,
++    code: []const u8,
++    calldata: []const u8,
++    gas_limit: usize,
++) EvmExecutionResult {
++    var context = EvmContext.init(allocator, code, calldata);
++    context.gas = gas_limit;
++    defer context.deinit();
++
++    var result = EvmExecutionResult{
++        .success = false,
++        .data = &[_]u8{},
++        .error_message = null,
++        .error_type = null,
++        .error_pc = null,
++    };
++
++    while (context.pc < context.code.len and !context.stopped) {
++        executeStep(&context) catch |err| {
++            result.error_type = switch (err) {
++                EVMError.OutOfGas => EVMError.OutOfGas,
++                EVMError.StackOverflow => EVMError.StackOverflow,
++                EVMError.StackUnderflow => EVMError.StackUnderflow,
++                EVMError.InvalidJump => EVMError.InvalidJump,
++                EVMError.InvalidOpcode => EVMError.InvalidOpcode,
++                EVMError.MemoryOutOfBounds => EVMError.MemoryOutOfBounds,
++                EVMError.Revert => EVMError.Revert,
++                else => EVMError.InvalidOpcode,
++            };
++            result.error_pc = context.pc;
++            if (context.error_msg) |message| {
++                result.error_message = allocator.dupe(u8, message) catch null;
++            } else {
++                result.error_message = std.fmt.allocPrint(
++                    allocator,
++                    "EVM実行エラー: {s} at PC={d}",
++                    .{ @errorName(err), context.pc },
++                ) catch null;
++            }
++            return result;
++        };
++    }
++
++    result.data = allocator.dupe(u8, context.returndata.items) catch return result;
++    result.success = true;
++    return result;
++}
++
+ fn logicalShiftLeft(value: EVMu256, shift: EVMu256) EVMu256 {
+     if (shift.hi != 0 or shift.lo >= 256) return EVMu256.zero();
+     const amount: u8 = @intCast(shift.lo);
+@@ -597,7 +655,7 @@ test "EVM multiple operations" {
+     try std.testing.expect(EVMu256.fromBytes(result).eql(EVMu256.fromU64(31)));
+ }
+ 
+-test "EVM chapter 10 dispatcher readiness" {
++test "ABI calldataでadd関数を実行" {
+     const marker = EVMu256{ .hi = 1, .lo = 2 };
+     const high_bit = EVMu256{ .hi = @as(u128, 1) << 127, .lo = 0 };
+     try std.testing.expect(logicalShiftRight(marker, EVMu256.zero()).eql(marker));
+@@ -641,3 +699,19 @@ test "EVM chapter 10 dispatcher readiness" {
+     defer std.testing.allocator.free(rejected);
+     try std.testing.expectEqual(@as(usize, 0), rejected.len);
+ }
++
++test "EVM execution with error info" {
++    const invalid_bytecode = [_]u8{0xfe};
++    const result = executeWithErrorInfo(
++        std.testing.allocator,
++        &invalid_bytecode,
++        &.{},
++        100_000,
++    );
++    defer if (result.error_message) |message| std.testing.allocator.free(message);
++
++    try std.testing.expect(!result.success);
++    try std.testing.expectEqual(EVMError.InvalidOpcode, result.error_type.?);
++    try std.testing.expectEqual(@as(usize, 0), result.error_pc.?);
++    try std.testing.expect(result.error_message != null);
++}
+diff --git a/src/p2p.zig b/src/p2p.zig
+index 283fc6428e489d8eb57d5bb2d57598ac8c725580..26051e216af2b77ea42c4251bbfe84c4d928de44 100644
+--- a/src/p2p.zig
++++ b/src/p2p.zig
+@@ -259,9 +259,14 @@ pub fn textInputLoop() !void {
+         const maybe_line = reader.readUntilDelimiterOrEof(buf[0..], '\n') catch null;
+ 
+         if (maybe_line) |line| {
+-            // チェーンが空の場合は最新のブロックを取得するか、ジェネシスを作成
+-            const last_block = blockchain.getChainTip() orelse
+-                try blockchain.createTestGenesisBlock(std.heap.page_allocator);
++            // 第11章のaddBlockは決定的genesisも明示的に検証・保存する。
++            if (blockchain.getChainHeight() == 0) {
++                const genesis = try blockchain.createTestGenesisBlock(std.heap.page_allocator);
++                if (blockchain.addBlock(genesis) == .added) {
++                    broadcastBlock(genesis, null);
++                }
++            }
++            const last_block = blockchain.getChainTip() orelse return error.MissingGenesis;
+ 
+             // 新しいブロックを作成してマイニング
+             var new_block = try createMinedInputBlock(line, last_block);
+diff --git a/src/parser.zig b/src/parser.zig
+index d7b66de46cdc2b2e44a8379d106a316b86980b6d..620d0c57213630fb658fe95b7e422fbde90f4923 100644
+--- a/src/parser.zig
++++ b/src/parser.zig
+@@ -1,10 +1,3 @@
+-//! ブロックチェーンデータシリアル化・解析モジュール
+-//!
+-//! このモジュールはブロックチェーンデータ構造をJSONにシリアル化し、
+-//! JSONデータをブロックチェーン構造に解析する機能を提供します。
+-//! ハッシュなどのバイナリデータを16進文字列にエンコード・デコードし、
+-//! 不正な入力データに対する包括的なエラー処理を提供します。
+-
+ const std = @import("std");
+ const crypto = std.crypto.hash;
+ const Sha256 = crypto.sha2.Sha256;
+@@ -64,9 +57,6 @@ pub fn hexEncode(slice: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+ ///     chainError.InvalidHexLength: 入力の長さが偶数でない場合
+ ///     chainError.InvalidHexChar: 入力に16進文字以外が含まれる場合
+ fn hexDecode(src: []const u8, dst: *[256]u8) !usize {
+-    // 書き込みを始める前に入力全体が固定長バッファへ収まるか確認する。
+-    // P2P入力は信頼できないため、偶数長でも256バイトを超えるhexを
+-    // dstへ書くとprocessがpanicしてしまう。
+     if (src.len % 2 != 0 or src.len / 2 > dst.len) return chainError.InvalidHexLength;
+     var i: usize = 0;
+     while (i < src.len) : (i += 2) {
+@@ -77,19 +67,6 @@ fn hexDecode(src: []const u8, dst: *[256]u8) !usize {
+     return src.len / 2;
+ }
+ 
+-test "hex decoder rejects input larger than its destination" {
+-    var destination: [256]u8 = undefined;
+-    const oversized = [_]u8{'0'} ** 514;
+-    try std.testing.expectError(chainError.InvalidHexLength, hexDecode(&oversized, &destination));
+-}
+-
+-test "block parser rejects non-integer or out-of-range consensus numbers" {
+-    try std.testing.expectError(error.InvalidFormat, parseBlockJson("{\"index\":1.5}"));
+-    try std.testing.expectError(error.InvalidFormat, parseBlockJson("{\"index\":4294967296}"));
+-    try std.testing.expectError(error.InvalidFormat, parseBlockJson("{\"timestamp\":-1.5}"));
+-    try std.testing.expectError(error.InvalidFormat, parseBlockJson("{\"nonce\":1.5}"));
+-}
+-
+ /// 単一の16進数字文字を解析する
+ ///
+ /// 文字（'0'～'9'、'a'～'f'、'A'～'F'）をその数値（0～15）に変換します。
+@@ -114,13 +91,24 @@ fn parseHexDigit(c: u8) !u8 {
+ fn deinitOwnedTransaction(allocator: std.mem.Allocator, tx: *types.Transaction) void {
+     allocator.free(tx.sender);
+     allocator.free(tx.receiver);
++    if (tx.evm_data) |evm_data| allocator.free(evm_data);
+     tx.* = undefined;
+ }
+ 
++fn deinitOwnedContracts(allocator: std.mem.Allocator, contracts: *std.StringHashMap([]const u8)) void {
++    var it = contracts.iterator();
++    while (it.next()) |entry| {
++        allocator.free(entry.key_ptr.*);
++        allocator.free(entry.value_ptr.*);
++    }
++    contracts.deinit();
++}
++
+ fn deinitOwnedBlock(allocator: std.mem.Allocator, block: *types.Block) void {
+     for (block.transactions.items) |*tx| deinitOwnedTransaction(allocator, tx);
+     block.transactions.deinit();
+     allocator.free(block.data);
++    if (block.contracts) |*contracts| deinitOwnedContracts(allocator, contracts);
+     block.* = undefined;
+ }
+ 
+@@ -134,7 +122,19 @@ fn cloneOwnedTransaction(allocator: std.mem.Allocator, tx: types.Transaction) !t
+     errdefer allocator.free(sender);
+     const receiver = try allocator.dupe(u8, tx.receiver);
+     errdefer allocator.free(receiver);
+-    return .{ .sender = sender, .receiver = receiver, .amount = tx.amount };
++    const evm_data = if (tx.evm_data) |data| try allocator.dupe(u8, data) else null;
++    errdefer if (evm_data) |data| allocator.free(data);
++
++    return .{
++        .sender = sender,
++        .receiver = receiver,
++        .amount = tx.amount,
++        .tx_type = tx.tx_type,
++        .evm_data = evm_data,
++        .gas_limit = tx.gas_limit,
++        .gas_price = tx.gas_price,
++        .id = tx.id,
++    };
+ }
+ 
+ fn appendClonedTransaction(
+@@ -147,6 +147,19 @@ fn appendClonedTransaction(
+     try transactions.append(cloned);
+ }
+ 
++fn putClonedContract(
++    contracts: *std.StringHashMap([]const u8),
++    allocator: std.mem.Allocator,
++    address: []const u8,
++    code: []const u8,
++) !void {
++    const cloned_address = try allocator.dupe(u8, address);
++    errdefer allocator.free(cloned_address);
++    const cloned_code = try allocator.dupe(u8, code);
++    errdefer allocator.free(cloned_code);
++    try contracts.put(cloned_address, cloned_code);
++}
++
+ fn cloneOwnedBlock(allocator: std.mem.Allocator, block: types.Block) !types.Block {
+     var cloned = types.Block{
+         .index = block.index,
+@@ -156,11 +169,24 @@ fn cloneOwnedBlock(allocator: std.mem.Allocator, block: types.Block) !types.Bloc
+         .nonce = block.nonce,
+         .data = try allocator.dupe(u8, block.data),
+         .hash = block.hash,
++        .contracts = null,
+     };
+     errdefer deinitOwnedBlock(allocator, &cloned);
++
+     for (block.transactions.items) |tx| {
+         try appendClonedTransaction(&cloned.transactions, allocator, tx);
+     }
++
++    if (block.contracts) |source_contracts| {
++        var contracts = std.StringHashMap([]const u8).init(allocator);
++        errdefer deinitOwnedContracts(allocator, &contracts);
++        var it = source_contracts.iterator();
++        while (it.next()) |entry| {
++            try putClonedContract(&contracts, allocator, entry.key_ptr.*, entry.value_ptr.*);
++        }
++        cloned.contracts = contracts;
++    }
++
+     return cloned;
+ }
+ 
+@@ -191,58 +217,132 @@ fn serializeTransactions(transactions: std.ArrayList(types.Transaction), allocat
+         if (i > 0) {
+             try list.appendSlice(",");
+         }
++
++        const tx_id_hex = try utils.bytesToHex(allocator, &tx.id);
++        defer allocator.free(tx_id_hex);
++
+         const sender_json = try std.json.stringifyAlloc(allocator, tx.sender, .{});
+         defer allocator.free(sender_json);
+         const receiver_json = try std.json.stringifyAlloc(allocator, tx.receiver, .{});
+         defer allocator.free(receiver_json);
+-        const tx_json = try std.fmt.allocPrintZ(allocator, "{{\"sender\":{s},\"receiver\":{s},\"amount\":{d}}}", .{ sender_json, receiver_json, tx.amount });
+-        defer allocator.free(tx_json);
+-        try list.appendSlice(tx_json);
++
++        // 基本的なトランザクション情報を含むJSONを作成
++        const tx_json_base = try std.fmt.allocPrintZ(allocator, "{{\"sender\":{s},\"receiver\":{s},\"amount\":{d},\"tx_type\":{d},\"gas_limit\":{d},\"gas_price\":{d},\"id\":\"{s}\"", .{ sender_json, receiver_json, tx.amount, tx.tx_type, tx.gas_limit, tx.gas_price, tx_id_hex });
++        defer allocator.free(tx_json_base);
++
++        // EVMデータがある場合は追加
++        if (tx.evm_data) |evm_data| {
++            // EVMデータを16進数に変換
++            const evm_data_hex = try utils.bytesToHex(allocator, evm_data);
++            defer allocator.free(evm_data_hex);
++
++            // EVMデータを含む完全なJSONを作成
++            const tx_json_full = try std.fmt.allocPrintZ(allocator, "{s},\"evm_data\":\"{s}\"}}", .{ tx_json_base, evm_data_hex });
++            defer allocator.free(tx_json_full);
++            try list.appendSlice(tx_json_full);
++        } else {
++            // EVMデータがない場合は基本情報のみ
++            const tx_json_no_evm = try std.fmt.allocPrintZ(allocator, "{s}}}", .{tx_json_base});
++            defer allocator.free(tx_json_no_evm);
++            try list.appendSlice(tx_json_no_evm);
++        }
+     }
+ 
+     try list.appendSlice("]");
+     return list.toOwnedSlice();
+ }
+ 
+-/// ブロック構造体をJSON文字列にシリアル化する
++/// ブロック構造体をJSON文字列にシリアライズする
+ ///
+-/// ブロック構造体をネットワーク送信や保存用のJSON文字列表現に変換します。
+-/// バイナリハッシュデータを16進文字列としてエンコードします。
++/// 与えられたブロック構造体からブロックチェーンのP2P通信に
++/// 使用できるJSON文字列を生成します。
+ ///
+ /// 引数:
+-///     block: シリアル化するブロック構造体
++///     block: シリアライズするブロック
+ ///
+ /// 戻り値:
+ ///     []const u8: 割り当てられたJSON文字列（呼び出し元がメモリを所有）
+ ///
+ /// エラー:
+-///     割り当てまたはエンコードエラー
++///     割り当てまたはフォーマットエラー
+ pub fn serializeBlock(block: types.Block) ![]const u8 {
++    // 文字列の構築に使用されるアロケータ
+     const allocator = std.heap.page_allocator;
+ 
+-    // バイナリハッシュを16進文字列に変換
+-    const hash_str = hexEncode(block.hash[0..], allocator) catch unreachable;
+-    const prev_hash_str = hexEncode(block.prev_hash[0..], allocator) catch unreachable;
++    // トランザクションを文字列に変換
++    const tx_json = try serializeTransactions(block.transactions, allocator);
++    defer allocator.free(tx_json);
+ 
+-    // トランザクション配列をシリアル化
+-    const tx_str = try serializeTransactions(block.transactions, allocator);
++    // コントラクト情報をシリアライズ
++    var contracts_json: []const u8 = "null";
++    defer {
++        if (!std.mem.eql(u8, contracts_json, "null")) {
++            allocator.free(contracts_json);
++        }
++    }
+ 
+-    // dataは利用者入力を含むため、引用符やバックスラッシュをJSON escapeする
+-    const data_json = try std.json.stringifyAlloc(allocator, block.data, .{});
+-    defer allocator.free(data_json);
++    if (block.contracts) |contracts| {
++        var contracts_list = std.ArrayList(u8).init(allocator);
++        errdefer contracts_list.deinit();
++
++        try contracts_list.appendSlice("{");
++
++        var it = contracts.iterator();
++        var first = true;
++        while (it.next()) |entry| {
++            if (!first) {
++                try contracts_list.appendSlice(",");
++            }
++            first = false;
++
++            const addr = entry.key_ptr.*;
++            const code = entry.value_ptr.*;
+ 
+-    // すべてのフィールドをJSONオブジェクト文字列に結合
+-    const json = try std.fmt.allocPrintZ(allocator, "{{\"index\":{d},\"timestamp\":{d},\"nonce\":{d},\"data\":{s},\"prev_hash\":\"{s}\",\"hash\":\"{s}\",\"transactions\":{s}}}", .{ block.index, block.timestamp, block.nonce, data_json, prev_hash_str, hash_str, tx_str });
++            const addr_json = try std.json.stringifyAlloc(allocator, addr, .{});
++            defer allocator.free(addr_json);
+ 
+-    // 一時的な割り当てを解放
+-    allocator.free(hash_str);
+-    allocator.free(prev_hash_str);
+-    allocator.free(tx_str);
++            // コントラクトアドレスと16進エンコードされたコードをJSON形式で出力
++            const code_hex = try utils.bytesToHex(allocator, code);
++            defer allocator.free(code_hex);
+ 
+-    return json;
++            try contracts_list.appendSlice(addr_json);
++            try contracts_list.appendSlice(":\"");
++            try contracts_list.appendSlice(code_hex);
++            try contracts_list.appendSlice("\"");
++        }
++
++        // nullと空objectはブロックhashで区別するため、空mapも{}として送る。
++        try contracts_list.appendSlice("}");
++        contracts_json = try contracts_list.toOwnedSlice();
++    }
++
++    const data_json = try std.json.stringifyAlloc(allocator, block.data, .{});
++    defer allocator.free(data_json);
++
++    const hash_str = std.fmt.bytesToHex(block.hash, .lower);
++    const prev_hash_str = std.fmt.bytesToHex(block.prev_hash, .lower);
++    return std.fmt.allocPrint(allocator, "{{" ++
++        "\"index\":{d}," ++
++        "\"timestamp\":{d}," ++
++        "\"prev_hash\":\"{s}\"," ++
++        "\"transactions\":{s}," ++
++        "\"nonce\":{d}," ++
++        "\"data\":{s}," ++
++        "\"hash\":\"{s}\"," ++
++        "\"contracts\":{s}" ++
++        "}}", .{
++        block.index,
++        block.timestamp,
++        prev_hash_str,
++        tx_json,
++        block.nonce,
++        data_json,
++        hash_str,
++        contracts_json,
++    });
+ }
+ 
+-test "block JSON round trip escapes quoted text" {
++test "block JSON round trip escapes quoted strings" {
+     var transactions = std.ArrayList(types.Transaction).init(std.testing.allocator);
+     defer transactions.deinit();
+     try transactions.append(.{
+@@ -250,14 +350,18 @@ test "block JSON round trip escapes quoted text" {
+         .receiver = "Bob\\\\B",
+         .amount = 42,
+     });
++    var contracts = std.StringHashMap([]const u8).init(std.testing.allocator);
++    defer contracts.deinit();
++    try contracts.put("0x\\\"contract", &[_]u8{ 0x60, 0x00 });
+     const block = types.Block{
+         .index = 1,
+         .timestamp = 1_672_531_201,
+         .prev_hash = [_]u8{0x11} ** 32,
+         .transactions = transactions,
+         .nonce = 7,
+-        .data = "say \\\"hello\\\" \\\\ path",
++        .data = "say \\\"hello\\\" \\\\ path\n",
+         .hash = [_]u8{0x22} ** 32,
++        .contracts = contracts,
+     };
+ 
+     const json = try serializeBlock(block);
+@@ -268,139 +372,138 @@ test "block JSON round trip escapes quoted text" {
+     try std.testing.expectEqualStrings(block.data, decoded.data);
+     try std.testing.expectEqualStrings(block.transactions.items[0].sender, decoded.transactions.items[0].sender);
+     try std.testing.expectEqualStrings(block.transactions.items[0].receiver, decoded.transactions.items[0].receiver);
++    try std.testing.expect(decoded.contracts.?.contains("0x\\\"contract"));
++}
++
++test "block parser rejects out-of-range and floating consensus numbers" {
++    const zero_hash = "0000000000000000000000000000000000000000000000000000000000000000";
++    const invalid_index = try std.fmt.allocPrint(std.testing.allocator, "{{\"index\":4294967296,\"timestamp\":0,\"prev_hash\":\"{s}\",\"transactions\":[],\"nonce\":0,\"data\":\"\",\"hash\":\"{s}\",\"contracts\":null}}", .{ zero_hash, zero_hash });
++    defer std.testing.allocator.free(invalid_index);
++    try std.testing.expectError(error.InvalidFormat, parseBlockJson(invalid_index));
++
++    const floating_amount = try std.fmt.allocPrint(std.testing.allocator, "{{\"index\":0,\"timestamp\":0,\"prev_hash\":\"{s}\",\"transactions\":[{{\"sender\":\"a\",\"receiver\":\"b\",\"amount\":1.5}}],\"nonce\":0,\"data\":\"\",\"hash\":\"{s}\",\"contracts\":null}}", .{ zero_hash, zero_hash });
++    defer std.testing.allocator.free(floating_amount);
++    try std.testing.expectError(error.InvalidFormat, parseBlockJson(floating_amount));
+ }
+ 
+-/// JSON文字列をブロック構造体に解析する
++/// JSONからブロック構造体を解析する
+ ///
+-/// ブロックのJSON文字列表現をブロック構造体に戻します。
+-/// 16進エンコードされたハッシュデータのデコードを処理し、
+-/// 入力の構造を検証します。
++/// JSON文字列からブロック構造体を作成して返します。
+ ///
+ /// 引数:
+-///     json_slice: 解析するJSON文字列
++///     json_str: 解析するJSON文字列
+ ///
+ /// 戻り値:
+ ///     types.Block: 解析されたブロック構造体
+ ///
+ /// エラー:
+-///     様々な形式および解析エラー
+-///
+-/// 注意:
+-///     この関数はブロック内の文字列フィールド用にメモリを割り当てます。
+-///     ブロックが不要になった時点で、呼び出し元が解放する必要があります。
+-pub fn parseBlockJson(json_slice: []const u8) !types.Block {
+-    std.log.debug("parseBlockJson start", .{});
++///     入力が有効なJSON形式でない場合はエラー
++pub fn parseBlockJson(json_str: []const u8) !types.Block {
+     const output_allocator = std.heap.page_allocator;
+     var arena = std.heap.ArenaAllocator.init(output_allocator);
+     defer arena.deinit();
+-    const block_allocator = arena.allocator();
++    const parse_allocator = arena.allocator();
+ 
+-    // JSON文字列を汎用JSON値に解析
+-    std.log.debug("parseBlockJson start parsed", .{});
+-    const parsed = try std.json.parseFromSlice(std.json.Value, block_allocator, json_slice, .{});
+-    std.log.debug("parseBlockJson end parsed", .{});
+-    defer parsed.deinit();
+-    const root_value = parsed.value;
++    // JSONをパース
++    var json_obj = try std.json.parseFromSlice(std.json.Value, parse_allocator, json_str, .{});
++    defer json_obj.deinit();
+ 
+-    // ルートがオブジェクトであることを確認
+-    const obj = switch (root_value) {
+-        .object => |o| o,
+-        else => return chainError.InvalidFormat,
++    // JSONオブジェクトからBlock構造体を作成
++    const b = parseBlockFromJsonObj(json_obj.value, parse_allocator) catch |err| {
++        std.log.warn("Rejected malformed block: {}", .{err});
++        return err;
+     };
+ 
+-    // デフォルト値でブロックを初期化
+-    var b = types.Block{
+-        .index = 0,
+-        .timestamp = 0,
+-        .prev_hash = [_]u8{0} ** 32,
+-        .transactions = std.ArrayList(types.Transaction).init(block_allocator),
+-        .nonce = 0,
+-        .data = "P2P Received Block",
+-        .hash = [_]u8{0} ** 32,
+-    };
++    // JSON parserのarenaとは独立した所有メモリだけを呼び出し元へ返す。
++    return cloneOwnedBlock(output_allocator, b);
++}
+ 
+-    std.log.debug("parseBlockJson start parser", .{});
++/// JSONオブジェクトからブロック構造体を解析する
++///
++/// 引数:
++///     obj: 解析するJSONオブジェクト
++///     block_allocator: ブロックデータ用のアロケータ
++///
++/// 戻り値:
++///     types.Block: 解析されたブロック構造体
++///
++/// エラー:
++///     JSONオブジェクトがブロック形式に準拠していない場合はエラー
++fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator) !types.Block {
++    std.log.debug("parseBlockFromJsonObj start", .{});
++    const array_obj = switch (obj) {
++        .object => |o| o,
++        else => return error.InvalidFormat,
++    };
+ 
+-    // indexフィールドを解析
+-    if (obj.get("index")) |idx_val| {
+-        const idx_num: i64 = switch (idx_val) {
+-            .integer => idx_val.integer,
+-            else => return error.InvalidFormat,
+-        };
+-        if (idx_num < 0 or idx_num > @as(i64, std.math.maxInt(u32))) {
+-            return error.InvalidFormat;
+-        }
+-        b.index = @intCast(idx_num);
++    // 必須フィールドの検証
++    if (!array_obj.contains("index") or
++        !array_obj.contains("timestamp") or
++        !array_obj.contains("prev_hash") or
++        !array_obj.contains("transactions") or
++        !array_obj.contains("nonce") or
++        !array_obj.contains("data") or
++        !array_obj.contains("hash"))
++    {
++        return error.MissingFields;
+     }
+ 
+-    // timestampフィールドを解析
+-    if (obj.get("timestamp")) |ts_val| {
+-        const ts_num: i64 = switch (ts_val) {
+-            .integer => if (ts_val.integer < 0) return error.InvalidFormat else ts_val.integer,
+-            else => return error.InvalidFormat,
+-        };
+-        b.timestamp = @intCast(ts_num);
+-    }
++    // インデックスを取得
++    const index = switch (array_obj.get("index").?) {
++        .integer => |i| if (i < 0 or i > std.math.maxInt(u32)) return error.InvalidFormat else @as(u32, @intCast(i)),
++        else => return error.InvalidFormat,
++    };
+ 
+-    // nonceフィールドを解析
+-    if (obj.get("nonce")) |nonce_val| {
+-        const nonce_num: i64 = switch (nonce_val) {
+-            .integer => nonce_val.integer,
+-            else => return error.InvalidFormat,
+-        };
+-        if (nonce_num < 0 or nonce_num > @as(f64, std.math.maxInt(u64))) {
+-            return error.InvalidFormat;
+-        }
+-        b.nonce = @intCast(nonce_num);
+-    }
++    // タイムスタンプを取得
++    const timestamp = switch (array_obj.get("timestamp").?) {
++        .integer => |i| if (i < 0) return error.InvalidFormat else @as(u64, @intCast(i)),
++        else => return error.InvalidFormat,
++    };
+ 
+-    // prev_hashフィールドを解析（16進エンコード）
+-    if (obj.get("prev_hash")) |ph_val| {
+-        const ph_str = switch (ph_val) {
+-            .string => ph_val.string,
+-            else => return error.InvalidFormat,
+-        };
+-        var ph_buf: [256]u8 = undefined;
+-        const ph_len = try hexDecode(ph_str, &ph_buf);
+-        if (ph_len != 32) return error.InvalidFormat;
+-        var tmp_ph: [32]u8 = undefined;
+-        var i: usize = 0;
+-        while (i < 32) : (i += 1) {
+-            tmp_ph[i] = ph_buf[i];
+-        }
+-        b.prev_hash = tmp_ph;
+-    }
++    // 前のハッシュを取得
++    const prev_hash_str = switch (array_obj.get("prev_hash").?) {
++        .string => |s| s,
++        else => return error.InvalidFormat,
++    };
++    var prev_hash: [32]u8 = undefined;
++    _ = try std.fmt.hexToBytes(&prev_hash, prev_hash_str);
+ 
+-    // hashフィールドを解析（16進エンコード）
+-    if (obj.get("hash")) |hash_val| {
+-        const hash_str = switch (hash_val) {
+-            .string => hash_val.string,
+-            else => return error.InvalidFormat,
+-        };
+-        var long_buf: [256]u8 = undefined;
+-        const actual_len = try hexDecode(hash_str, &long_buf);
+-        if (actual_len != 32) return error.InvalidFormat;
+-        var tmp_hash: [32]u8 = undefined;
+-        var i: usize = 0;
+-        while (i < 32) : (i += 1) {
+-            tmp_hash[i] = long_buf[i];
+-        }
+-        b.hash = tmp_hash;
+-    }
++    // ノンスを取得
++    const nonce = switch (array_obj.get("nonce").?) {
++        .integer => |i| if (i < 0) return error.InvalidFormat else @as(u64, @intCast(i)),
++        else => return error.InvalidFormat,
++    };
+ 
+-    // dataフィールドを解析
+-    if (obj.get("data")) |data_val| {
+-        const data_str = switch (data_val) {
+-            .string => data_val.string,
+-            else => return error.InvalidFormat,
+-        };
+-        b.data = try block_allocator.dupe(u8, data_str);
+-    }
++    // データを取得
++    const data = switch (array_obj.get("data").?) {
++        .string => |s| try block_allocator.dupe(u8, s),
++        else => return error.InvalidFormat,
++    };
+ 
+-    // transactions配列を解析
+-    if (obj.get("transactions")) |tx_val| {
++    // ハッシュを取得
++    const hash_str = switch (array_obj.get("hash").?) {
++        .string => |s| s,
++        else => return error.InvalidFormat,
++    };
++    var hash: [32]u8 = undefined;
++    _ = try std.fmt.hexToBytes(&hash, hash_str);
++
++    // ブロック構造体の初期化
++    var b = types.Block{
++        .index = index,
++        .timestamp = timestamp,
++        .prev_hash = prev_hash,
++        .transactions = std.ArrayList(types.Transaction).init(block_allocator),
++        .nonce = nonce,
++        .data = data,
++        .hash = hash,
++        .contracts = null,
++    };
++    std.log.debug("Block info: index={d}, timestamp={d}, prev_hash={any}, transactions=..., nonce={d}, data={s}, hash={any}", .{ b.index, b.timestamp, b.prev_hash, b.nonce, b.data, b.hash });
++
++    // トランザクションの解析
++    if (array_obj.get("transactions")) |tx_val| {
+         switch (tx_val) {
+-            // トランザクションが直接JSON配列の場合の処理
+             .array => {
+                 std.log.debug("Transactions field is directly an array. ", .{});
+                 const tx_items = tx_val.array.items;
+@@ -449,17 +552,90 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
+                         }) {
+                             .integer => |val| if (val < 0) return error.InvalidFormat else @intCast(val),
+                             else => {
+-                                std.log.err("Transaction element {d}: 'amount' field is not an integer.", .{idx});
++                                std.log.warn("Transaction element {d}: 'amount' field is not an integer.", .{idx});
+                                 return error.InvalidFormat;
+                             },
+                         };
+                         std.log.info("Transaction element {d}: Parsed amount = {d}", .{ idx, amount });
+ 
++                        // EVMデータの抽出（存在する場合）
++                        var evm_data: ?[]const u8 = null;
++                        var tx_type: u8 = 0;
++                        var gas_limit: usize = 1000000;
++                        var gas_price: u64 = 20000000000;
++                        var tx_id = [_]u8{0} ** 32;
++
++                        // tx_typeフィールドを解析（存在する場合）
++                        if (tx_obj.get("tx_type")) |tx_type_val| {
++                            tx_type = switch (tx_type_val) {
++                                .integer => |val| if (val < 0 or val > 255) return error.InvalidFormat else @intCast(val),
++                                else => {
++                                    std.log.err("Transaction element {d}: 'tx_type' field is not an integer.", .{idx});
++                                    return error.InvalidFormat;
++                                },
++                            };
++                        }
++
++                        // evm_dataフィールドを解析（存在する場合）
++                        if (tx_obj.get("evm_data")) |evm_data_val| {
++                            const evm_data_str = switch (evm_data_val) {
++                                .string => |s| s,
++                                else => {
++                                    std.log.err("Transaction element {d}: 'evm_data' field is not a string.", .{idx});
++                                    return error.InvalidFormat;
++                                },
++                            };
++
++                            // "0x" プレフィックスを削除して16進数をバイトに変換
++                            if (evm_data_str.len > 2 and std.mem.startsWith(u8, evm_data_str, "0x")) {
++                                evm_data = try utils.hexToBytes(block_allocator, evm_data_str[2..]);
++                            } else {
++                                evm_data = try utils.hexToBytes(block_allocator, evm_data_str);
++                            }
++                        }
++
++                        // gas_limitフィールドを解析（存在する場合）
++                        if (tx_obj.get("gas_limit")) |gas_limit_val| {
++                            gas_limit = switch (gas_limit_val) {
++                                .integer => |val| if (val < 0) return error.InvalidFormat else @intCast(val),
++                                else => {
++                                    std.log.err("Transaction element {d}: 'gas_limit' field is not an integer.", .{idx});
++                                    return error.InvalidFormat;
++                                },
++                            };
++                        }
++
++                        // gas_priceフィールドを解析（存在する場合）
++                        if (tx_obj.get("gas_price")) |gas_price_val| {
++                            gas_price = switch (gas_price_val) {
++                                .integer => |val| if (val < 0) return error.InvalidFormat else @intCast(val),
++                                else => {
++                                    std.log.err("Transaction element {d}: 'gas_price' field is not an integer.", .{idx});
++                                    return error.InvalidFormat;
++                                },
++                            };
++                        }
++
++                        if (tx_obj.get("id")) |id_val| {
++                            const id_hex = switch (id_val) {
++                                .string => |s| s,
++                                else => return error.InvalidFormat,
++                            };
++                            const id_bytes = try utils.hexToBytes(block_allocator, id_hex);
++                            if (id_bytes.len != tx_id.len) return error.InvalidFormat;
++                            @memcpy(tx_id[0..], id_bytes);
++                        }
++
+                         // トランザクションをブロックに追加
+                         try b.transactions.append(types.Transaction{
+                             .sender = sender_copy,
+                             .receiver = receiver_copy,
+                             .amount = amount,
++                            .tx_type = tx_type,
++                            .evm_data = evm_data,
++                            .gas_limit = gas_limit,
++                            .gas_price = gas_price,
++                            .id = tx_id,
+                         });
+                     }
+                     std.log.debug("Transactions field is directly an array. end", .{});
+@@ -475,7 +651,7 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
+                     .array => {
+                         const tx_items = tx_parsed.value.array.items;
+                         if (tx_items.len > 0) {
+-                            // 未実装: 文字列から配列を解析
++                            // 未実装：文字列からパースした配列の処理
+                             return error.InvalidFormat;
+                         }
+                     },
+@@ -486,7 +662,70 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
+         }
+     }
+ 
++    // コントラクト情報の解析（存在する場合）
++    if (array_obj.get("contracts")) |contracts_val| {
++        std.log.info("Contracts field found in block, type: {s}", .{@tagName(contracts_val)});
++
++        switch (contracts_val) {
++            .null => {
++                std.log.info("Contracts field is null - no contracts in this block", .{});
++                // コントラクト情報なし
++            },
++            .object => |contracts_obj| {
++                std.log.info("Processing contracts field with {d} entries", .{contracts_obj.count()});
++
++                // 新しいコントラクトストレージを作成
++                var contracts = std.StringHashMap([]const u8).init(block_allocator);
++                errdefer contracts.deinit();
++
++                // 各コントラクトを処理
++                var it = contracts_obj.iterator();
++                while (it.next()) |entry| {
++                    const original_address = entry.key_ptr.*;
++                    std.log.info("Found contract address in block: {s}", .{original_address});
++
++                    const code_hex = switch (entry.value_ptr.*) {
++                        .string => |s| s,
++                        else => {
++                            std.log.err("Contract code for address {s} is not a string", .{original_address});
++                            continue;
++                        },
++                    };
++
++                    // アドレス文字列のコピーを作成して所有権を管理
++                    const address = block_allocator.dupe(u8, original_address) catch |err| {
++                        std.log.err("Failed to duplicate address string: {any}", .{err});
++                        continue;
++                    };
++
++                    // 16進数文字列をバイトに変換
++                    const code = utils.hexToBytes(block_allocator, code_hex) catch |err| {
++                        std.log.err("Failed to parse contract bytecode for address {s}: {any}", .{ address, err });
++                        block_allocator.free(address);
++                        continue;
++                    };
++
++                    // ハッシュマップに追加
++                    contracts.put(address, code) catch |err| {
++                        std.log.err("Failed to store contract for address {s}: {any}", .{ address, err });
++                        block_allocator.free(address);
++                        block_allocator.free(code);
++                        continue;
++                    };
++
++                    std.log.info("Parsed contract at address: {s}, code length: {d} bytes", .{ address, code.len });
++                }
++
++                b.contracts = contracts;
++            },
++            else => {
++                std.log.err("Contracts field is neither null nor an object", .{});
++                // エラーは返さず、コントラクト情報なしとして扱う
++            },
++        }
++    }
++
+     std.log.debug("Block info: index={d}, timestamp={d}, prev_hash={any}, transactions={any} nonce={d}, data={s}, hash={any} ", .{ b.index, b.timestamp, b.prev_hash, b.transactions, b.nonce, b.data, b.hash });
+     std.log.debug("parseBlockJson end", .{});
+-    return cloneOwnedBlock(output_allocator, b);
++    return b;
+ }
+diff --git a/src/types.zig b/src/types.zig
+index 115f57ac0e838327acd1f5bcb94abf5c59e2952c..832474444c11f0cb4a718a0c71cfabc1a5858baf 100644
+--- a/src/types.zig
++++ b/src/types.zig
+@@ -11,24 +11,28 @@ const std = @import("std");
+ // コアブロックチェーンデータ構造
+ //------------------------------------------------------------------------------
+ 
+-/// エンティティ間の価値移転を表すトランザクション構造体
+-///
+-/// ブロックチェーン内の単一のトランザクションを表し、
+-/// あるエンティティから別のエンティティへの価値の移転を記録します。
+-///
+-/// フィールド:
+-///     sender: トランザクション送信者の識別子
+-///     receiver: トランザクション受信者の識別子
+-///     amount: 移転される価値の量
++/// トランザクション情報
++/// ブロックチェーン上の価値移転やスマートコントラクトの操作を表現します
+ pub const Transaction = struct {
+-    /// トランザクション送信者の識別子
++    /// 送信者のアドレス
+     sender: []const u8,
+-
+-    /// トランザクション受信者の識別子
++    /// 受信者のアドレス
+     receiver: []const u8,
+-
+-    /// 移転される価値の量
++    /// 送金額
+     amount: u64,
++    /// トランザクションのタイプ
++    /// 0: 通常の送金
++    /// 1: スマートコントラクトのデプロイ
++    /// 2: スマートコントラクトの呼び出し
++    tx_type: u8 = 0,
++    /// EVMバイトコード（コントラクトデプロイ時）または呼び出しデータ（コントラクト呼び出し時）
++    evm_data: ?[]const u8 = null,
++    /// ガス上限
++    gas_limit: usize = 1000000,
++    /// ガス価格（単位: wei/gas）
++    gas_price: u64 = 20000000000, // 20 Gwei
++    /// トランザクションの一意識別子
++    id: [32]u8 = [_]u8{0} ** 32,
+ };
+ 
+ /// ブロックチェーン内の単一ブロックを表すブロック構造体
+@@ -45,6 +49,7 @@ pub const Transaction = struct {
+ ///     nonce: プルーフオブワークマイニングに使用される値
+ ///     data: ブロックに格納される追加データ
+ ///     hash: このブロックの内容の暗号ハッシュ
++///     contracts: コントラクトアドレスとバイトコードのマップ（null可）
+ pub const Block = struct {
+     /// ブロックチェーン内の連続位置（ジェネシスブロックは0から開始）
+     index: u32,
+@@ -68,6 +73,11 @@ pub const Block = struct {
+     /// このブロックの内容の暗号ハッシュ（SHA-256）
+     /// 他のすべてのフィールドに基づいて計算され、難易度要件を満たす必要がある
+     hash: [32]u8,
++
++    /// コントラクトアドレスとバイトコードのマップ（null可）
++    /// 各ブロックには、そのブロックで新たにデプロイされたコントラクトのコードが含まれる
++    /// コントラクトストレージの同期に使用される
++    contracts: ?std.StringHashMap([]const u8) = null,
+ };
+ 
+ //------------------------------------------------------------------------------
+diff --git a/src/utils.zig b/src/utils.zig
+index 1bc9f2d0e5806f1ff3fdd38413021b5d1bb7b8ed..03f53ab7e4e0b03ee83fea0c172bac007d9e3dc6 100644
+--- a/src/utils.zig
++++ b/src/utils.zig
+@@ -87,22 +87,124 @@ pub fn toBytesU64(value: u64) [8]u8 {
+     return buf;
+ }
+ 
+-/// 任意の型をそのバイト表現に変換する汎用関数
++/// 16進数文字列をバイト配列に変換する
+ ///
+-/// この関数は、異なる型の値をそれらのバイト表現に変換する汎用的な方法を提供します。
+-/// 入力型に基づいて、適切な特殊化された関数にディスパッチします。
++/// 引数:
++///     allocator: メモリアロケータ
++///     hex_str: 16進数文字列（"0x"プレフィックス付きでも可）
++///
++/// 戻り値:
++///     []const u8: 変換されたバイト配列
++///     エラー: 無効な16進数文字列の場合
++pub fn hexToBytes(allocator: std.mem.Allocator, hex_str: []const u8) ![]const u8 {
++    // 16進数文字列の先頭に0xがある場合は取り除く
++    const hex = if (std.mem.startsWith(u8, hex_str, "0x"))
++        hex_str[2..]
++    else
++        hex_str;
++
++    // 奇数長の場合は先頭に0を追加して偶数長にする
++    var padded_hex: []const u8 = hex;
++    var padded_allocated = false;
++
++    if (hex.len % 2 != 0) {
++        var padded_buffer = try allocator.alloc(u8, hex.len + 1);
++        padded_buffer[0] = '0';
++        @memcpy(padded_buffer[1..], hex);
++        padded_hex = padded_buffer;
++        padded_allocated = true;
++    }
++    defer if (padded_allocated) allocator.free(padded_hex);
++
++    // 16進数文字列をバイト配列に変換
++    const result = try allocator.alloc(u8, padded_hex.len / 2);
++    errdefer allocator.free(result);
++
++    var i: usize = 0;
++    while (i < result.len) : (i += 1) {
++        const high = try std.fmt.charToDigit(padded_hex[i * 2], 16);
++        const low = try std.fmt.charToDigit(padded_hex[i * 2 + 1], 16);
++        result[i] = @as(u8, @intCast(high)) * 16 + @as(u8, @intCast(low));
++    }
++
++    return result;
++}
++
++/// バイト配列を16進数文字列に変換する
+ ///
+ /// 引数:
+-///     T: 変換する値の型（推論される）
+-///     value: バイトに変換する値
+-///
+-/// 戻り値: u32またはu64のリトルエンディアン固定長配列
+-pub fn toBytes(comptime T: type, value: T) [@sizeOf(T)]u8 {
+-    if (T == u32) {
+-        return toBytesU32(@as(u32, value));
+-    } else if (T == u64) {
+-        return toBytesU64(@as(u64, value));
+-    } else {
+-        @compileError("toBytes supports only u32 and u64");
++///     allocator: メモリアロケータ
++///     bytes: 変換するバイト配列
++///
++/// 戻り値:
++///     []const u8: 変換された16進数文字列
++pub fn bytesToHex(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
++    const hex_chars = "0123456789abcdef";
++    const hex = try allocator.alloc(u8, bytes.len * 2);
++    errdefer allocator.free(hex);
++
++    for (bytes, 0..) |b, i| {
++        hex[i * 2] = hex_chars[b >> 4];
++        hex[i * 2 + 1] = hex_chars[b & 0xF];
+     }
++
++    return hex;
++}
++
++/// "0x"プレフィックス付きの16進数文字列を生成する
++///
++/// 引数:
++///     allocator: メモリアロケータ
++///     bytes: 変換するバイト配列
++///
++/// 戻り値:
++///     []const u8: "0x"プレフィックス付きの16進数文字列
++pub fn bytesToHexWithPrefix(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
++    const hex = try bytesToHex(allocator, bytes);
++    defer allocator.free(hex);
++
++    const result = try std.mem.concat(allocator, u8, &[_][]const u8{ "0x", hex });
++    return result;
++}
++
++/// 文字列のスライスを区切り文字で連結する
++///
++/// 引数:
++///     allocator: 結果の文字列を割り当てるメモリアロケータ
++///     slices: 連結する文字列のスライス
++///     separator: 文字列間の区切り文字
++///
++/// 戻り値:
++///     割り当てられた結合された文字列
++///
++/// エラー:
++///     アロケーションエラー
++pub fn joinStrings(allocator: std.mem.Allocator, slices: []const []const u8, separator: []const u8) ![]const u8 {
++    if (slices.len == 0) return "";
++
++    // 必要なサイズを計算
++    var total_size: usize = 0;
++    for (slices) |s| {
++        total_size += s.len;
++    }
++    total_size += separator.len * (slices.len - 1);
++
++    // 結果バッファを割り当て
++    var result = try allocator.alloc(u8, total_size);
++    errdefer allocator.free(result);
++
++    // バッファに文字列を連結
++    var pos: usize = 0;
++    for (slices, 0..slices.len) |slice, i| {
++        @memcpy(result[pos .. pos + slice.len], slice);
++        pos += slice.len;
++
++        // セパレータを追加（最後の要素以外）
++        if (i < slices.len - 1) {
++            @memcpy(result[pos .. pos + separator.len], separator);
++            pos += separator.len;
++        }
++    }
++
++    return result;
+ }

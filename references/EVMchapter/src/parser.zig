@@ -57,7 +57,7 @@ pub fn hexEncode(slice: []const u8, allocator: std.mem.Allocator) ![]const u8 {
 ///     chainError.InvalidHexLength: 入力の長さが偶数でない場合
 ///     chainError.InvalidHexChar: 入力に16進文字以外が含まれる場合
 fn hexDecode(src: []const u8, dst: *[256]u8) !usize {
-    if (src.len % 2 != 0) return chainError.InvalidHexLength;
+    if (src.len % 2 != 0 or src.len / 2 > dst.len) return chainError.InvalidHexLength;
     var i: usize = 0;
     while (i < src.len) : (i += 2) {
         const hi = parseHexDigit(src[i]) catch return chainError.InvalidHexChar;
@@ -88,6 +88,113 @@ fn parseHexDigit(c: u8) !u8 {
     }
 }
 
+fn deinitOwnedTransaction(allocator: std.mem.Allocator, tx: *types.Transaction) void {
+    allocator.free(tx.sender);
+    allocator.free(tx.receiver);
+    if (tx.evm_data) |evm_data| allocator.free(evm_data);
+    tx.* = undefined;
+}
+
+/// `parseTransactionJson` が返したトランザクションの所有メモリを解放する。
+pub fn deinitParsedTransaction(tx: *types.Transaction) void {
+    deinitOwnedTransaction(std.heap.page_allocator, tx);
+}
+
+fn deinitOwnedContracts(allocator: std.mem.Allocator, contracts: *std.StringHashMap([]const u8)) void {
+    var it = contracts.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        allocator.free(entry.value_ptr.*);
+    }
+    contracts.deinit();
+}
+
+fn deinitOwnedBlock(allocator: std.mem.Allocator, block: *types.Block) void {
+    for (block.transactions.items) |*tx| deinitOwnedTransaction(allocator, tx);
+    block.transactions.deinit();
+    allocator.free(block.data);
+    if (block.contracts) |*contracts| deinitOwnedContracts(allocator, contracts);
+    block.* = undefined;
+}
+
+/// `parseBlockJson` が返したブロックをチェーンへ移譲しなかった場合に解放する。
+pub fn deinitParsedBlock(block: *types.Block) void {
+    deinitOwnedBlock(std.heap.page_allocator, block);
+}
+
+fn cloneOwnedTransaction(allocator: std.mem.Allocator, tx: types.Transaction) !types.Transaction {
+    const sender = try allocator.dupe(u8, tx.sender);
+    errdefer allocator.free(sender);
+    const receiver = try allocator.dupe(u8, tx.receiver);
+    errdefer allocator.free(receiver);
+    const evm_data = if (tx.evm_data) |data| try allocator.dupe(u8, data) else null;
+    errdefer if (evm_data) |data| allocator.free(data);
+
+    return .{
+        .sender = sender,
+        .receiver = receiver,
+        .amount = tx.amount,
+        .tx_type = tx.tx_type,
+        .evm_data = evm_data,
+        .gas_limit = tx.gas_limit,
+        .gas_price = tx.gas_price,
+        .id = tx.id,
+    };
+}
+
+fn appendClonedTransaction(
+    transactions: *std.ArrayList(types.Transaction),
+    allocator: std.mem.Allocator,
+    tx: types.Transaction,
+) !void {
+    var cloned = try cloneOwnedTransaction(allocator, tx);
+    errdefer deinitOwnedTransaction(allocator, &cloned);
+    try transactions.append(cloned);
+}
+
+fn putClonedContract(
+    contracts: *std.StringHashMap([]const u8),
+    allocator: std.mem.Allocator,
+    address: []const u8,
+    code: []const u8,
+) !void {
+    const cloned_address = try allocator.dupe(u8, address);
+    errdefer allocator.free(cloned_address);
+    const cloned_code = try allocator.dupe(u8, code);
+    errdefer allocator.free(cloned_code);
+    try contracts.put(cloned_address, cloned_code);
+}
+
+fn cloneOwnedBlock(allocator: std.mem.Allocator, block: types.Block) !types.Block {
+    var cloned = types.Block{
+        .index = block.index,
+        .timestamp = block.timestamp,
+        .prev_hash = block.prev_hash,
+        .transactions = std.ArrayList(types.Transaction).init(allocator),
+        .nonce = block.nonce,
+        .data = try allocator.dupe(u8, block.data),
+        .hash = block.hash,
+        .contracts = null,
+    };
+    errdefer deinitOwnedBlock(allocator, &cloned);
+
+    for (block.transactions.items) |tx| {
+        try appendClonedTransaction(&cloned.transactions, allocator, tx);
+    }
+
+    if (block.contracts) |source_contracts| {
+        var contracts = std.StringHashMap([]const u8).init(allocator);
+        errdefer deinitOwnedContracts(allocator, &contracts);
+        var it = source_contracts.iterator();
+        while (it.next()) |entry| {
+            try putClonedContract(&contracts, allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
+        cloned.contracts = contracts;
+    }
+
+    return cloned;
+}
+
 /// トランザクションリストをJSON配列文字列にシリアル化する
 ///
 /// トランザクション構造体のArrayListを、ネットワーク送信や保存のための
@@ -116,8 +223,16 @@ fn serializeTransactions(transactions: std.ArrayList(types.Transaction), allocat
             try list.appendSlice(",");
         }
 
+        const tx_id_hex = try utils.bytesToHex(allocator, &tx.id);
+        defer allocator.free(tx_id_hex);
+
+        const sender_json = try std.json.stringifyAlloc(allocator, tx.sender, .{});
+        defer allocator.free(sender_json);
+        const receiver_json = try std.json.stringifyAlloc(allocator, tx.receiver, .{});
+        defer allocator.free(receiver_json);
+
         // 基本的なトランザクション情報を含むJSONを作成
-        const tx_json_base = try std.fmt.allocPrintZ(allocator, "{{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d},\"tx_type\":{d},\"gas_limit\":{d},\"gas_price\":{d}", .{ tx.sender, tx.receiver, tx.amount, tx.tx_type, tx.gas_limit, tx.gas_price });
+        const tx_json_base = try std.fmt.allocPrintZ(allocator, "{{\"sender\":{s},\"receiver\":{s},\"amount\":{d},\"tx_type\":{d},\"gas_limit\":{d},\"gas_price\":{d},\"id\":\"{s}\"", .{ sender_json, receiver_json, tx.amount, tx.tx_type, tx.gas_limit, tx.gas_price, tx_id_hex });
         defer allocator.free(tx_json_base);
 
         // EVMデータがある場合は追加
@@ -172,38 +287,42 @@ pub fn serializeBlock(block: types.Block) ![]const u8 {
     }
 
     if (block.contracts) |contracts| {
-        if (contracts.count() > 0) {
-            var contracts_list = std.ArrayList(u8).init(allocator);
-            errdefer contracts_list.deinit();
+        var contracts_list = std.ArrayList(u8).init(allocator);
+        errdefer contracts_list.deinit();
 
-            try contracts_list.appendSlice("{");
+        try contracts_list.appendSlice("{");
 
-            var it = contracts.iterator();
-            var first = true;
-            while (it.next()) |entry| {
-                if (!first) {
-                    try contracts_list.appendSlice(",");
-                }
-                first = false;
-
-                const addr = entry.key_ptr.*;
-                const code = entry.value_ptr.*;
-
-                // コントラクトアドレスと16進エンコードされたコードをJSON形式で出力
-                const code_hex = try utils.bytesToHex(allocator, code);
-                defer allocator.free(code_hex);
-
-                try contracts_list.appendSlice("\"");
-                try contracts_list.appendSlice(addr);
-                try contracts_list.appendSlice("\":\"");
-                try contracts_list.appendSlice(code_hex);
-                try contracts_list.appendSlice("\"");
+        var it = contracts.iterator();
+        var first = true;
+        while (it.next()) |entry| {
+            if (!first) {
+                try contracts_list.appendSlice(",");
             }
+            first = false;
 
-            try contracts_list.appendSlice("}");
-            contracts_json = try contracts_list.toOwnedSlice();
+            const addr = entry.key_ptr.*;
+            const code = entry.value_ptr.*;
+
+            const addr_json = try std.json.stringifyAlloc(allocator, addr, .{});
+            defer allocator.free(addr_json);
+
+            // コントラクトアドレスと16進エンコードされたコードをJSON形式で出力
+            const code_hex = try utils.bytesToHex(allocator, code);
+            defer allocator.free(code_hex);
+
+            try contracts_list.appendSlice(addr_json);
+            try contracts_list.appendSlice(":\"");
+            try contracts_list.appendSlice(code_hex);
+            try contracts_list.appendSlice("\"");
         }
+
+        // nullと空objectはブロックhashで区別するため、空mapも{}として送る。
+        try contracts_list.appendSlice("}");
+        contracts_json = try contracts_list.toOwnedSlice();
     }
+
+    const data_json = try std.json.stringifyAlloc(allocator, block.data, .{});
+    defer allocator.free(data_json);
 
     const hash_str = std.fmt.bytesToHex(block.hash, .lower);
     const prev_hash_str = std.fmt.bytesToHex(block.prev_hash, .lower);
@@ -213,7 +332,7 @@ pub fn serializeBlock(block: types.Block) ![]const u8 {
         "\"prev_hash\":\"{s}\"," ++
         "\"transactions\":{s}," ++
         "\"nonce\":{d}," ++
-        "\"data\":\"{s}\"," ++
+        "\"data\":{s}," ++
         "\"hash\":\"{s}\"," ++
         "\"contracts\":{s}" ++
         "}}", .{
@@ -222,10 +341,60 @@ pub fn serializeBlock(block: types.Block) ![]const u8 {
         prev_hash_str,
         tx_json,
         block.nonce,
-        std.mem.trim(u8, block.data, "\n"),
+        data_json,
         hash_str,
         contracts_json,
     });
+}
+
+test "block JSON round trip escapes quoted strings" {
+    var transactions = std.ArrayList(types.Transaction).init(std.testing.allocator);
+    defer transactions.deinit();
+    try transactions.append(.{
+        .sender = "Alice \\\"A\\\"",
+        .receiver = "Bob\\\\B",
+        .amount = 42,
+    });
+    var contracts = std.StringHashMap([]const u8).init(std.testing.allocator);
+    defer contracts.deinit();
+    try contracts.put("0x\\\"contract", &[_]u8{ 0x60, 0x00 });
+    const block = types.Block{
+        .index = 1,
+        .timestamp = 1_672_531_201,
+        .prev_hash = [_]u8{0x11} ** 32,
+        .transactions = transactions,
+        .nonce = 7,
+        .data = "say \\\"hello\\\" \\\\ path\n",
+        .hash = [_]u8{0x22} ** 32,
+        .contracts = contracts,
+    };
+
+    const json = try serializeBlock(block);
+    defer std.heap.page_allocator.free(json);
+    var decoded = try parseBlockJson(json);
+    defer deinitParsedBlock(&decoded);
+
+    try std.testing.expectEqualStrings(block.data, decoded.data);
+    try std.testing.expectEqualStrings(block.transactions.items[0].sender, decoded.transactions.items[0].sender);
+    try std.testing.expectEqualStrings(block.transactions.items[0].receiver, decoded.transactions.items[0].receiver);
+    try std.testing.expect(decoded.contracts.?.contains("0x\\\"contract"));
+}
+
+test "block parser rejects out-of-range and floating consensus numbers" {
+    const zero_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+    const invalid_index = try std.fmt.allocPrint(std.testing.allocator, "{{\"index\":4294967296,\"timestamp\":0,\"prev_hash\":\"{s}\",\"transactions\":[],\"nonce\":0,\"data\":\"\",\"hash\":\"{s}\",\"contracts\":null}}", .{ zero_hash, zero_hash });
+    defer std.testing.allocator.free(invalid_index);
+    try std.testing.expectError(error.InvalidFormat, parseBlockJson(invalid_index));
+
+    const floating_amount = try std.fmt.allocPrint(std.testing.allocator, "{{\"index\":0,\"timestamp\":0,\"prev_hash\":\"{s}\",\"transactions\":[{{\"sender\":\"a\",\"receiver\":\"b\",\"amount\":1.5}}],\"nonce\":0,\"data\":\"\",\"hash\":\"{s}\",\"contracts\":null}}", .{ zero_hash, zero_hash });
+    defer std.testing.allocator.free(floating_amount);
+    try std.testing.expectError(error.InvalidFormat, parseBlockJson(floating_amount));
+}
+
+test "transaction parser rejects floating integer fields" {
+    try std.testing.expectError(error.InvalidFormat, parseTransactionJson("{\"sender\":\"a\",\"receiver\":\"b\",\"amount\":1.5}"));
+    try std.testing.expectError(error.InvalidFormat, parseTransactionJson("{\"sender\":\"a\",\"receiver\":\"b\",\"amount\":1,\"tx_type\":1.5}"));
+    try std.testing.expectError(error.InvalidFormat, parseTransactionJson("{\"sender\":\"a\",\"receiver\":\"b\",\"amount\":1,\"gas_limit\":1.5}"));
 }
 
 /// JSONからブロック構造体を解析する
@@ -241,19 +410,23 @@ pub fn serializeBlock(block: types.Block) ![]const u8 {
 /// エラー:
 ///     入力が有効なJSON形式でない場合はエラー
 pub fn parseBlockJson(json_str: []const u8) !types.Block {
-    const allocator = std.heap.page_allocator;
+    const output_allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(output_allocator);
+    defer arena.deinit();
+    const parse_allocator = arena.allocator();
 
     // JSONをパース
-    var json_obj = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
+    var json_obj = try std.json.parseFromSlice(std.json.Value, parse_allocator, json_str, .{});
     defer json_obj.deinit();
 
     // JSONオブジェクトからBlock構造体を作成
-    const b = parseBlockFromJsonObj(json_obj.value, allocator) catch |err| {
-        std.log.err("Failed to parse block: {}", .{err});
+    const b = parseBlockFromJsonObj(json_obj.value, parse_allocator) catch |err| {
+        std.log.warn("Rejected malformed block: {}", .{err});
         return err;
     };
 
-    return b;
+    // JSON parserのarenaとは独立した所有メモリだけを呼び出し元へ返す。
+    return cloneOwnedBlock(output_allocator, b);
 }
 
 /// JSONオブジェクトからブロック構造体を解析する
@@ -288,7 +461,7 @@ fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator
 
     // インデックスを取得
     const index = switch (array_obj.get("index").?) {
-        .integer => |i| if (i < 0) return error.InvalidFormat else @as(u32, @intCast(i)),
+        .integer => |i| if (i < 0 or i > std.math.maxInt(u32)) return error.InvalidFormat else @as(u32, @intCast(i)),
         else => return error.InvalidFormat,
     };
 
@@ -389,9 +562,8 @@ fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator
                             return error.InvalidFormat;
                         }) {
                             .integer => |val| if (val < 0) return error.InvalidFormat else @intCast(val),
-                            .float => |val| if (val < 0) return error.InvalidFormat else @intFromFloat(val),
                             else => {
-                                std.log.err("Transaction element {d}: 'amount' field is neither integer nor float.", .{idx});
+                                std.log.warn("Transaction element {d}: 'amount' field is not an integer.", .{idx});
                                 return error.InvalidFormat;
                             },
                         };
@@ -402,6 +574,7 @@ fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator
                         var tx_type: u8 = 0;
                         var gas_limit: usize = 1000000;
                         var gas_price: u64 = 20000000000;
+                        var tx_id = [_]u8{0} ** 32;
 
                         // tx_typeフィールドを解析（存在する場合）
                         if (tx_obj.get("tx_type")) |tx_type_val| {
@@ -454,6 +627,16 @@ fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator
                             };
                         }
 
+                        if (tx_obj.get("id")) |id_val| {
+                            const id_hex = switch (id_val) {
+                                .string => |s| s,
+                                else => return error.InvalidFormat,
+                            };
+                            const id_bytes = try utils.hexToBytes(block_allocator, id_hex);
+                            if (id_bytes.len != tx_id.len) return error.InvalidFormat;
+                            @memcpy(tx_id[0..], id_bytes);
+                        }
+
                         // トランザクションをブロックに追加
                         try b.transactions.append(types.Transaction{
                             .sender = sender_copy,
@@ -463,6 +646,7 @@ fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator
                             .evm_data = evm_data,
                             .gas_limit = gas_limit,
                             .gas_price = gas_price,
+                            .id = tx_id,
                         });
                     }
                     std.log.debug("Transactions field is directly an array. end", .{});
@@ -584,16 +768,18 @@ fn parseBlockFromJsonObj(obj: std.json.Value, block_allocator: std.mem.Allocator
 ///     様々な形式および解析エラー
 pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
     std.log.debug("parseTransactionJson start with: {s}", .{json_slice});
-    const allocator = std.heap.page_allocator;
+    const output_allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(output_allocator);
+    defer arena.deinit();
+    const parse_allocator = arena.allocator();
 
     // 入力文字列を前処理して有効なJSONにする
-    const valid_json = try preprocessJsonInput(allocator, json_slice);
-    defer allocator.free(valid_json);
+    const valid_json = try preprocessJsonInput(parse_allocator, json_slice);
 
     std.log.debug("After preprocessing: {s}", .{valid_json});
 
     // JSON文字列を汎用JSON値に解析
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, valid_json, .{}) catch |err| {
+    var parsed = std.json.parseFromSlice(std.json.Value, parse_allocator, valid_json, .{}) catch |err| {
         std.log.err("JSON parse error: {any}", .{err});
         return err;
     };
@@ -628,8 +814,8 @@ pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
     } else obj; // データが直接ルートにある場合
 
     // 基本フィールドを解析
-    const sender = try parseStringField(data_obj, "sender", allocator);
-    const receiver = try parseStringField(data_obj, "receiver", allocator);
+    const sender = try parseStringField(data_obj, "sender", parse_allocator);
+    const receiver = try parseStringField(data_obj, "receiver", parse_allocator);
 
     // 金額フィールドを解析
     const amount = try parseU64Field(data_obj, "amount");
@@ -669,13 +855,12 @@ pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
             evm_data_str;
 
         // 16進数文字列をバイナリデータに変換
-        evm_data = try utils.hexToBytes(allocator, hex_str);
+        evm_data = try utils.hexToBytes(parse_allocator, hex_str);
     }
 
     std.log.info("Successfully parsed transaction: sender={s}, receiver={s}, tx_type={d}, gas={d}", .{ sender, receiver, tx_type, gas_limit });
 
-    // トランザクション構造体を返す
-    return types.Transaction{
+    const parsed_tx = types.Transaction{
         .sender = sender,
         .receiver = receiver,
         .amount = amount,
@@ -684,6 +869,7 @@ pub fn parseTransactionJson(json_slice: []const u8) !types.Transaction {
         .gas_limit = gas_limit,
         .gas_price = gas_price,
     };
+    return cloneOwnedTransaction(output_allocator, parsed_tx);
 }
 
 /// JSONの文字列を前処理して有効なJSON形式に変換する
@@ -730,10 +916,6 @@ fn parseU64Field(obj: std.json.ObjectMap, field_name: []const u8) !u64 {
             if (i < 0) return error.InvalidFormat;
             return @intCast(i);
         },
-        .float => |f| {
-            if (f < 0) return error.InvalidFormat;
-            return @intFromFloat(f);
-        },
         else => return error.InvalidFormat,
     }
 }
@@ -746,10 +928,6 @@ fn parseU8Field(obj: std.json.ObjectMap, field_name: []const u8) !u8 {
             if (i < 0 or i > 255) return error.InvalidFormat;
             return @intCast(i);
         },
-        .float => |f| {
-            if (f < 0 or f > 255) return error.InvalidFormat;
-            return @intFromFloat(f);
-        },
         else => return error.InvalidFormat,
     }
 }
@@ -761,10 +939,6 @@ fn parseUsizeField(obj: std.json.ObjectMap, field_name: []const u8) !usize {
         .integer => |i| {
             if (i < 0) return error.InvalidFormat;
             return @intCast(i);
-        },
-        .float => |f| {
-            if (f < 0) return error.InvalidFormat;
-            return @intFromFloat(f);
         },
         else => return error.InvalidFormat,
     }
@@ -791,9 +965,14 @@ pub fn serializeTransaction(allocator: std.mem.Allocator, tx: types.Transaction)
 
     try json_obj.appendSlice("{");
 
+    const sender_json = try std.json.stringifyAlloc(allocator, tx.sender, .{});
+    defer allocator.free(sender_json);
+    const receiver_json = try std.json.stringifyAlloc(allocator, tx.receiver, .{});
+    defer allocator.free(receiver_json);
+
     // 基本フィールドの追加
-    try json_obj.writer().print("\"sender\":\"{s}\",", .{tx.sender});
-    try json_obj.writer().print("\"receiver\":\"{s}\",", .{tx.receiver});
+    try json_obj.writer().print("\"sender\":{s},", .{sender_json});
+    try json_obj.writer().print("\"receiver\":{s},", .{receiver_json});
     try json_obj.writer().print("\"amount\":{d},", .{tx.amount});
     try json_obj.writer().print("\"tx_type\":{d},", .{tx.tx_type});
     try json_obj.writer().print("\"gas_limit\":{d},", .{tx.gas_limit});

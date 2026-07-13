@@ -259,9 +259,14 @@ pub fn textInputLoop() !void {
         const maybe_line = reader.readUntilDelimiterOrEof(buf[0..], '\n') catch null;
 
         if (maybe_line) |line| {
-            // チェーンが空の場合は最新のブロックを取得するか、ジェネシスを作成
-            const last_block = blockchain.getChainTip() orelse
-                try blockchain.createTestGenesisBlock(std.heap.page_allocator);
+            // 第11章のaddBlockは決定的genesisも明示的に検証・保存する。
+            if (blockchain.getChainHeight() == 0) {
+                const genesis = try blockchain.createTestGenesisBlock(std.heap.page_allocator);
+                if (blockchain.addBlock(genesis) == .added) {
+                    broadcastBlock(genesis, null);
+                }
+            }
+            const last_block = blockchain.getChainTip() orelse return error.MissingGenesis;
 
             // 新しいブロックを作成してマイニング
             var new_block = try createMinedInputBlock(line, last_block);

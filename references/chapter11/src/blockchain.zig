@@ -10,7 +10,6 @@ const crypto = std.crypto.hash;
 const Sha256 = crypto.sha2.Sha256;
 const types = @import("types.zig");
 const utils = @import("utils.zig");
-const chainError = @import("errors.zig").ChainError;
 const parser = @import("parser.zig");
 
 /// プルーフオブワークマイニングの難易度設定
@@ -528,76 +527,17 @@ pub fn syncChain(blocks: []types.Block) !void {
     state_mutex.lock();
     defer state_mutex.unlock();
 
-    // 受信したチェーンが現在のチェーンより長い場合のみ同期
+    // 第11章では第8章の単純な長さ比較を保つ。置換前の全チェーン検証と
+    // EVM状態の再構築は第12章で追加する。
     if (blocks.len > chain_store.items.len) {
-        // 不正な長いチェーンでローカルのチェーンやEVM状態を壊さないよう、
-        // 置換前にチェーン全体を検証する。
-        try validateReplacementChain(blocks);
-        // 置換後のappendがOOMで途中停止しないよう、ローカル状態を消す前に
-        // 必要なチェーン領域をすべて確保する。
         try chain_store.ensureTotalCapacity(blocks.len);
-        std.log.info("Synchronizing chain with {d} blocks (current chain has {d} blocks)", .{ blocks.len, chain_store.items.len });
-
-        // コントラクトストレージの状態をログに出力（同期前）
-        var contract_count_before: usize = 0;
-        var it_before = contract_storage.iterator();
-        while (it_before.next()) |_| {
-            contract_count_before += 1;
-        }
-        std.log.info("Contract storage before sync: {d} contracts", .{contract_count_before});
-
-        // 新しいEVM状態も一時mapへ構築し、全ブロックの適用成功後だけ
-        // chain_storeと同時に差し替える。
-        var next_contract_storage = std.StringHashMap([]const u8).init(std.heap.page_allocator);
-        errdefer next_contract_storage.deinit();
-        for (blocks) |block| {
-            try applyBlockState(&next_contract_storage, block);
-        }
-
         chain_store.clearRetainingCapacity();
         for (blocks) |block| {
             chain_store.appendAssumeCapacity(block);
-            std.log.info("Added block {d} to chain during sync", .{block.index});
         }
-        contract_storage.deinit();
-        contract_storage = next_contract_storage;
-
-        // コントラクトストレージの状態をログに出力（同期後）
-        var contract_count_after: usize = 0;
-        var it_after = contract_storage.iterator();
-        while (it_after.next()) |entry| {
-            contract_count_after += 1;
-            std.log.info("Contract in storage after sync: address={s}, code_length={d}", .{ entry.key_ptr.*, entry.value_ptr.*.len });
-        }
-        std.log.info("Contract storage after sync: {d} contracts", .{contract_count_after});
-
         std.log.info("Chain synchronized with {d} blocks", .{blocks.len});
     } else {
         std.log.info("Received chain ({d} blocks) is not longer than current chain ({d} blocks)", .{ blocks.len, chain_store.items.len });
-    }
-}
-
-fn validateReplacementChain(blocks: []const types.Block) !void {
-    for (blocks, 0..) |*block, i| {
-        if (!verifyBlockPow(block)) return error.InvalidChainPow;
-
-        // 同一チェーン内のハッシュ重複を拒否する。
-        for (blocks[0..i]) |previous_block| {
-            if (std.mem.eql(u8, &previous_block.hash, &block.hash)) {
-                return error.DuplicateBlock;
-            }
-        }
-
-        if (i == 0) {
-            if (block.index != 0) return error.InvalidChainIndex;
-            if (!isZeroHash(block.prev_hash)) return error.InvalidChainLink;
-            if (!isDeterministicGenesis(block)) return error.InvalidGenesis;
-            continue;
-        }
-
-        const previous = &blocks[i - 1];
-        if (block.index != previous.index + 1) return error.InvalidChainIndex;
-        if (!std.mem.eql(u8, &block.prev_hash, &previous.hash)) return error.InvalidChainLink;
     }
 }
 
@@ -730,98 +670,6 @@ fn printChainStateLocked() void {
     std.debug.print("\n{s}\n", .{"---------------------------"});
 }
 
-/// EVMトランザクションを処理し、その結果をブロックチェーンに追加する
-///
-/// 引数:
-///     tx: 処理するトランザクション
-///
-/// 戻り値:
-///     実行結果のバイト配列またはエラー
-pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
-    // トランザクション識別子を生成（まだ設定されていない場合）
-    if (std.mem.eql(u8, &tx.id, &[_]u8{0} ** 32)) {
-        tx.id = calculateTransactionHash(tx);
-    }
-
-    // EVMデータが存在することを確認
-    const evm_data = tx.evm_data orelse return error.NoEvmData;
-
-    const allocator = std.heap.page_allocator;
-
-    var result: []const u8 = "";
-    var contract_deployed = false;
-
-    switch (tx.tx_type) {
-        // コントラクトデプロイの場合
-        1 => {
-            std.log.info("スマートコントラクトをデプロイしています: 送信者={s}, ガス上限={d}", .{ tx.sender, tx.gas_limit });
-
-            // EVMバイトコードを実行
-            const calldata = "";
-            result = try @import("evm.zig").execute(allocator, evm_data, calldata, tx.gas_limit);
-
-            contract_deployed = true;
-
-            std.log.info("コントラクトが正常にデプロイされました: アドレス={s}, コード長={d}バイト", .{ tx.receiver, result.len });
-
-            // メモリはすでに使われているため、明示的に捨てる必要はない
-        },
-
-        // コントラクト呼び出しの場合
-        2 => {
-            std.log.info("スマートコントラクトを呼び出しています: アドレス={s}, 送信者={s}, ガス上限={d}", .{ tx.receiver, tx.sender, tx.gas_limit });
-
-            // コントラクトコードを取得
-            const contract_code = getContractCode(tx.receiver) orelse {
-                std.log.err("コントラクトが見つかりません: アドレス={s}", .{tx.receiver});
-                return error.ContractNotFound;
-            };
-
-            // EVMを実行
-            result = try @import("evm.zig").execute(allocator, contract_code, evm_data, tx.gas_limit);
-
-            std.log.info("コントラクト呼び出しが完了しました: 結果長={d}バイト", .{result.len});
-        },
-
-        // その他のトランザクションタイプ（通常の送金など）
-        else => {
-            std.log.info("EVMトランザクションではありません: タイプ={d}", .{tx.tx_type});
-            return error.NotEvmTransaction;
-        },
-    }
-
-    // コントラクトがデプロイされた場合、P2P同期用のブロックを作成
-    if (contract_deployed) {
-        try recordContractDeployment(tx, result, allocator);
-    }
-
-    return result;
-}
-
-/// EVMトランザクションの実行結果をログに記録
-pub fn logEvmResult(tx: *const types.Transaction, result: []const u8) !void {
-    const allocator = std.heap.page_allocator;
-    const hex_result = try @import("utils.zig").bytesToHex(allocator, result);
-    defer allocator.free(hex_result);
-
-    std.log.info("EVM実行結果: TxID={x}, 結果=0x{s}", .{ tx.id, hex_result });
-
-    if (result.len >= 32) {
-        var value = @import("evm_types.zig").EVMu256{ .hi = 0, .lo = 0 };
-
-        for (0..16) |j| {
-            const byte_val = result[j];
-            value.hi |= @as(u128, byte_val) << @intCast((15 - j) * 8);
-        }
-        for (0..16) |j| {
-            const byte_val = result[j + 16];
-            value.lo |= @as(u128, byte_val) << @intCast((15 - j) * 8);
-        }
-
-        std.log.info("EVM実行結果(u256): {}", .{value});
-    }
-}
-
 /// EVMトランザクションを実行し、詳細なエラー情報を含めて処理する
 ///
 /// 引数:
@@ -926,18 +774,6 @@ fn recordContractDeployment(tx: *const types.Transaction, runtime_code: []const 
         new_block.transactions.items.len,
         contracts.count(),
     });
-}
-
-// ヘルパー関数: 文字列を指定回数繰り返す
-fn times(comptime char: []const u8, n: usize) []const u8 {
-    const static = struct {
-        var buffer: [100]u8 = undefined;
-    };
-    var i: usize = 0;
-    while (i < n and i < static.buffer.len) : (i += 1) {
-        static.buffer[i] = char[0];
-    }
-    return static.buffer[0..i];
 }
 
 test "block hash commits EVM transaction payload and gas fields" {
@@ -1097,6 +933,62 @@ test "addBlock leaves chain and contract state unchanged when EVM state applicat
     try std.testing.expect(!contract_storage.contains("0xinvalid"));
 }
 
+test "recordContractDeployment stores an owned transaction and runtime block" {
+    chain_store.clearRetainingCapacity();
+    contract_storage.clearRetainingCapacity();
+    defer chain_store.clearRetainingCapacity();
+    defer contract_storage.clearRetainingCapacity();
+
+    const allocator = std.testing.allocator;
+    const sender = try allocator.dupe(u8, "0xsender");
+    defer allocator.free(sender);
+    const receiver = try allocator.dupe(u8, "0xchapter11");
+    defer allocator.free(receiver);
+
+    // creation codeは末尾のSTOP 1バイトをruntime codeとして返す。
+    const creation_template = [_]u8{
+        0x60, 0x01, // PUSH1 runtime length
+        0x60, 0x0c, // PUSH1 runtime offset
+        0x60, 0x00, // PUSH1 memory offset
+        0x39, // CODECOPY
+        0x60, 0x01, // PUSH1 return length
+        0x60, 0x00, // PUSH1 return offset
+        0xf3, // RETURN
+        0x00, // runtime: STOP
+    };
+    const creation = try allocator.dupe(u8, &creation_template);
+    defer allocator.free(creation);
+
+    var tx = types.Transaction{
+        .sender = sender,
+        .receiver = receiver,
+        .amount = 0,
+        .tx_type = 1,
+        .evm_data = creation,
+        .gas_limit = 100_000,
+        .gas_price = 10,
+    };
+    const runtime = try processEvmTransactionWithErrorDetails(&tx);
+    defer std.heap.page_allocator.free(runtime);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x00}, runtime);
+    try std.testing.expectEqual(@as(usize, 2), chain_store.items.len);
+    const deployment = chain_store.items[1];
+    try std.testing.expectEqual(@as(usize, 1), deployment.transactions.items.len);
+    try std.testing.expectEqualStrings("0xsender", deployment.transactions.items[0].sender);
+    try std.testing.expectEqualStrings("0xchapter11", deployment.transactions.items[0].receiver);
+    try std.testing.expectEqualSlices(u8, &creation_template, deployment.transactions.items[0].evm_data.?);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x00}, contract_storage.get("0xchapter11").?);
+
+    // 呼び出し側の一時バッファを変更しても、chain内の所有データは変わらない。
+    sender[0] = 'X';
+    receiver[0] = 'Y';
+    creation[0] = 0xff;
+    try std.testing.expectEqualStrings("0xsender", deployment.transactions.items[0].sender);
+    try std.testing.expectEqualStrings("0xchapter11", deployment.transactions.items[0].receiver);
+    try std.testing.expectEqual(@as(u8, 0x60), deployment.transactions.items[0].evm_data.?[0]);
+}
+
 test "EVM payload and deployed runtime tampering invalidate block PoW" {
     var evm_data = [_]u8{ 0x60, 0x01, 0x60, 0x02 };
     var runtime_code = [_]u8{ 0x60, 0x03, 0x60, 0x04 };
@@ -1145,34 +1037,4 @@ test "transaction hashing separates variable-length fields and null EVM data" {
     const empty_hash = calculateTransactionHash(&empty);
     try std.testing.expect(!std.mem.eql(u8, &left_hash, &right_hash));
     try std.testing.expect(!std.mem.eql(u8, &left_hash, &empty_hash));
-}
-
-test "invalid longer chain leaves local chain and contract storage unchanged" {
-    chain_store.clearRetainingCapacity();
-    contract_storage.clearRetainingCapacity();
-    defer chain_store.clearRetainingCapacity();
-    defer contract_storage.clearRetainingCapacity();
-
-    const local_genesis = try createTestGenesisBlock(std.heap.page_allocator);
-    try std.testing.expectEqual(AddBlockResult.added, addBlock(local_genesis));
-    try contract_storage.put("0xkeep", "local-runtime");
-
-    const candidate_genesis = try createTestGenesisBlock(std.heap.page_allocator);
-    var invalid_child = createBlock("invalid longer chain", candidate_genesis);
-    defer invalid_child.transactions.deinit();
-    invalid_child.prev_hash = [_]u8{0x44} ** 32;
-
-    var malicious_contracts = std.StringHashMap([]const u8).init(std.heap.page_allocator);
-    defer malicious_contracts.deinit();
-    try malicious_contracts.put("0xevil", "remote-runtime");
-    invalid_child.contracts = malicious_contracts;
-    mineBlock(&invalid_child, DIFFICULTY);
-
-    var longer_chain = [_]types.Block{ candidate_genesis, invalid_child };
-    try std.testing.expectError(error.InvalidChainLink, syncChain(&longer_chain));
-
-    try std.testing.expectEqual(@as(usize, 1), chain_store.items.len);
-    try std.testing.expectEqualSlices(u8, &local_genesis.hash, &chain_store.items[0].hash);
-    try std.testing.expectEqualStrings("local-runtime", contract_storage.get("0xkeep").?);
-    try std.testing.expect(!contract_storage.contains("0xevil"));
 }
