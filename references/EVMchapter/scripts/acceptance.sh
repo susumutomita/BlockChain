@@ -245,9 +245,10 @@ docker run -d \
 
 wait_for_log "$deploy_node" 'コントラクトデプロイブロックを作成しました' 120
 
-# Pause the already-deployed node until the caller has queued its transaction.
-# This removes the connect-vs-call race and deterministically exercises both the
-# pending transaction path and subsequent deployment-block synchronization.
+# Pause the already-deployed node until the caller has recorded its pending call.
+# A host kernel may still complete the TCP handshake while the container's
+# userspace is paused, so the portable invariant is the missing local contract,
+# not whether the transaction was also queued by the P2P layer.
 docker pause "$deploy_node" >/dev/null
 
 docker run -d \
@@ -264,7 +265,6 @@ docker run -d \
   --sender "$SENDER_ADDRESS" \
   >/dev/null
 
-wait_for_log "$call_node" 'No peers available or sending failed for all peers. EVM_TX queued.' 30
 wait_for_log "$call_node" 'コントラクトがローカルに見つかりません。チェーン同期後に実行します' 30
 docker unpause "$deploy_node" >/dev/null
 

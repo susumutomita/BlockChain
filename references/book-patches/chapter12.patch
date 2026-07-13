@@ -283,7 +283,7 @@ index c6d9e015eb8bb2f0ed7596708c6b81b3638d259d..5de748b4f9873576f6124580409256ca
 +    command: sh -c "tail -f /dev/null"
 diff --git a/scripts/acceptance.sh b/scripts/acceptance.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..75209cc6b44cc253d5fefe6d1b51cabecf49f35b
+index 0000000000000000000000000000000000000000..303fcdd81d01892777444419da46349d31cf6608
 --- /dev/null
 +++ b/scripts/acceptance.sh
 @@ -0,0 +1,295 @@
@@ -534,9 +534,10 @@ index 0000000000000000000000000000000000000000..75209cc6b44cc253d5fefe6d1b51cabe
 +
 +wait_for_log "$deploy_node" 'コントラクトデプロイブロックを作成しました' 120
 +
-+# Pause the already-deployed node until the caller has queued its transaction.
-+# This removes the connect-vs-call race and deterministically exercises both the
-+# pending transaction path and subsequent deployment-block synchronization.
++# Pause the already-deployed node until the caller has recorded its pending call.
++# A host kernel may still complete the TCP handshake while the container's
++# userspace is paused, so the portable invariant is the missing local contract,
++# not whether the transaction was also queued by the P2P layer.
 +docker pause "$deploy_node" >/dev/null
 +
 +docker run -d \
@@ -553,7 +554,6 @@ index 0000000000000000000000000000000000000000..75209cc6b44cc253d5fefe6d1b51cabe
 +  --sender "$SENDER_ADDRESS" \
 +  >/dev/null
 +
-+wait_for_log "$call_node" 'No peers available or sending failed for all peers. EVM_TX queued.' 30
 +wait_for_log "$call_node" 'コントラクトがローカルに見つかりません。チェーン同期後に実行します' 30
 +docker unpause "$deploy_node" >/dev/null
 +
