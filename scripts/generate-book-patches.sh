@@ -12,6 +12,21 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+sync_source_tree() {
+  source_tree=$1
+  destination_tree=$2
+  mkdir -p "$destination_tree"
+  rsync -a --delete \
+    --exclude=.git \
+    --exclude=.zig-cache \
+    --exclude=zig-cache \
+    --exclude=zig-out \
+    --exclude=.book-cache \
+    --exclude=build \
+    --exclude='build-*' \
+    "$source_tree/" "$destination_tree/"
+}
+
 require_file() {
   if [ ! -f "$1" ]; then
     echo "missing required file: $1" >&2
@@ -35,7 +50,7 @@ write_patch() {
 
   # Keep the temporary repository metadata while replacing every baseline file
   # with the checked-in chapter target.
-  rsync -a --delete --exclude=.git "$target_tree/" "$work_tree/"
+  sync_source_tree "$target_tree" "$work_tree"
   git -C "$work_tree" add -A
   git -C "$work_tree" diff \
     --cached \
@@ -64,7 +79,7 @@ mkdir -p "$OUTPUT_DIR"
 
 chapter11_work="$TMP_ROOT/chapter11"
 mkdir -p "$chapter11_work"
-cp -R "$ROOT/references/chapter8/." "$chapter11_work/"
+sync_source_tree "$ROOT/references/chapter8" "$chapter11_work"
 cp "$ROOT/references/chapter10/src/evm.zig" "$chapter11_work/src/evm.zig"
 cp "$ROOT/references/chapter10/src/evm_types.zig" "$chapter11_work/src/evm_types.zig"
 init_baseline "$chapter11_work"
@@ -75,7 +90,7 @@ write_patch \
 
 chapter12_work="$TMP_ROOT/chapter12"
 mkdir -p "$chapter12_work"
-cp -R "$ROOT/references/chapter11/." "$chapter12_work/"
+sync_source_tree "$ROOT/references/chapter11" "$chapter12_work"
 init_baseline "$chapter12_work"
 write_patch \
   "$chapter12_work" \

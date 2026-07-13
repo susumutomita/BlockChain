@@ -33,6 +33,21 @@ require_command() {
   fi
 }
 
+sync_source_tree() {
+  source_tree=$1
+  destination_tree=$2
+  mkdir -p "$destination_tree"
+  rsync -a --delete \
+    --exclude=.git \
+    --exclude=.zig-cache \
+    --exclude=zig-cache \
+    --exclude=zig-out \
+    --exclude=.book-cache \
+    --exclude=build \
+    --exclude='build-*' \
+    "$source_tree/" "$destination_tree/"
+}
+
 apply_companion_patch() {
   project=$1
   patch_file=$2
@@ -56,9 +71,16 @@ assert_same_tree() {
   rebuilt=$1
   expected=$2
   label=$3
+  normalized="$TMP_ROOT/normalized-$label"
+  rebuilt_source="$normalized/rebuilt"
+  expected_source="$normalized/expected"
   report="$TMP_ROOT/${label}-tree.diff"
 
-  if ! diff -qr "$expected" "$rebuilt" >"$report"; then
+  rm -rf "$normalized"
+  sync_source_tree "$rebuilt" "$rebuilt_source"
+  sync_source_tree "$expected" "$expected_source"
+
+  if ! diff -qr "$expected_source" "$rebuilt_source" >"$report"; then
     cat "$report" >&2
     fail "$label rebuilt tree does not match $expected"
   fi
@@ -66,7 +88,7 @@ assert_same_tree() {
     --no-index \
     --no-ext-diff \
     --exit-code \
-    -- "$expected" "$rebuilt" >"$report"; then
+    -- "$expected_source" "$rebuilt_source" >"$report"; then
     cat "$report" >&2
     fail "$label rebuilt file content or modes do not match $expected"
   fi
@@ -115,6 +137,7 @@ verify_zig_project() {
 
 require_command git
 require_command diff
+require_command rsync
 
 case "$RUNNER" in
   auto)
@@ -153,7 +176,7 @@ echo "ZIG_VERSION PASS: $actual_zig_version (runner=$RUNNER)"
 
 echo "[1/5] Rebuilding chapter 11 from chapter 8 plus chapter 10 EVM files"
 mkdir -p "$CHAPTER11"
-cp -R "$ROOT/references/chapter8/." "$CHAPTER11/"
+sync_source_tree "$ROOT/references/chapter8" "$CHAPTER11"
 cp "$ROOT/references/chapter10/src/evm.zig" "$CHAPTER11/src/evm.zig"
 cp "$ROOT/references/chapter10/src/evm_types.zig" "$CHAPTER11/src/evm_types.zig"
 apply_companion_patch \
@@ -166,7 +189,7 @@ assert_same_tree "$CHAPTER11" "$ROOT/references/chapter11" chapter11
 
 echo "[3/5] Rebuilding chapter 12 from chapter 11"
 mkdir -p "$CHAPTER12"
-cp -R "$CHAPTER11/." "$CHAPTER12/"
+sync_source_tree "$CHAPTER11" "$CHAPTER12"
 apply_companion_patch \
   "$CHAPTER12" \
   "$ROOT/references/book-patches/chapter12.patch" \

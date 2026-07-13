@@ -8,6 +8,11 @@ IMAGE=${BOOK_CODE_IMAGE:-zig-blockchain-book-toolchain:${ZIG_VERSION}}
 CACHE_ROOT=${BOOK_CODE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/zig-blockchain-book/verify}
 DOCKER_USER=${BOOK_DOCKER_USER:-$(id -u):$(id -g)}
 
+case "$CACHE_ROOT" in
+    /*) ;;
+    *) CACHE_ROOT="$ROOT/$CACHE_ROOT" ;;
+esac
+
 all_projects='.
 references/chapter2
 references/chapter3/step1
@@ -46,8 +51,9 @@ if [ "$RUNNER" = auto ]; then
     fi
 fi
 
+mkdir -p "$CACHE_ROOT"
+
 if [ "$RUNNER" = docker ]; then
-    mkdir -p "$CACHE_ROOT"
     docker build \
         --build-arg "ZIG_VERSION=${ZIG_VERSION}" \
         -t "$IMAGE" \
@@ -59,14 +65,30 @@ fi
 
 verify_local() {
     project=$1
+    cache_key=$(printf '%s' "$project" | tr '/.' '__')
+    local_cache="$CACHE_ROOT/local/$cache_key"
+    out_dir="$CACHE_ROOT/out/$cache_key"
+    global_cache="$CACHE_ROOT/global"
+    mkdir -p "$local_cache" "$out_dir" "$global_cache"
     (
         cd "$ROOT/$project"
-        zig build
+        zig build \
+            --prefix "$out_dir" \
+            --cache-dir "$local_cache" \
+            --global-cache-dir "$global_cache"
         help_file="${TMPDIR:-/tmp}/zig-book-help-$$"
         trap 'rm -f "$help_file"' EXIT
-        zig build --help >"$help_file"
+        zig build \
+            --prefix "$out_dir" \
+            --cache-dir "$local_cache" \
+            --global-cache-dir "$global_cache" \
+            --help >"$help_file"
         if grep -q '^  test ' "$help_file"; then
-            zig build test
+            zig build \
+                --prefix "$out_dir" \
+                --cache-dir "$local_cache" \
+                --global-cache-dir "$global_cache" \
+                test
         fi
     )
 }
