@@ -51,8 +51,10 @@ pub fn calculateHash(block: *const types.Block) [32]u8 {
     }
 
     // ハッシュ計算にブロックフィールドを順番に追加
-    hasher.update(utils.toBytes(u32, block.index));
-    hasher.update(utils.toBytes(u64, block.timestamp));
+    const index_bytes = utils.toBytes(u32, block.index);
+    const timestamp_bytes = utils.toBytes(u64, block.timestamp);
+    hasher.update(&index_bytes);
+    hasher.update(&timestamp_bytes);
     hasher.update(nonce_bytes[0..]);
     hasher.update(&block.prev_hash);
 

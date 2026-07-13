@@ -192,17 +192,9 @@ pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
         if (send_success) sent = true;
     }
 
-    // 送信先のピアがないか、すべての送信が失敗した場合、キューに追加
-    if (available_peers == 0 or !sent) {
-        pending_blocks.append(blk) catch |err| {
-            std.log.err("Error adding block to pending queue: {any}", .{err});
-            return;
-        };
-        std.log.warn("No peers yet - queueing block index={d}", .{blk.index});
-    }
-
-    // 送信先のピアがないか、すべての送信が失敗した場合、キューに追加
-    if (available_peers == 0 or !sent) {
+    // ローカル生成ブロックだけを再送キューへ入れる。
+    // 受信ブロックを送信元以外へ中継できない場合は、同期との二重配信を避ける。
+    if (from_peer == null and (available_peers == 0 or !sent)) {
         pending_blocks.append(blk) catch |err| {
             std.log.err("Error adding block to pending queue: {any}", .{err});
             return;
@@ -547,13 +539,22 @@ pub fn textInputLoop() !void {
 ///
 /// エラー:
 ///     error.Invalid: 文字列フォーマットが無効な場合
-///     std.net.Address.resolveIpからのその他のエラー
+///     IP解析またはホスト名解決からのその他のエラー
 pub fn resolveHostPort(spec: []const u8) !std.net.Address {
     var it = std.mem.tokenizeScalar(u8, spec, ':');
     const host = it.next() orelse return error.Invalid;
     const port_s = it.next() orelse return error.Invalid;
+    if (it.next() != null) return error.Invalid;
     const port = try std.fmt.parseInt(u16, port_s, 10);
-    return std.net.Address.resolveIp(host, port);
+
+    return std.net.Address.parseIp(host, port) catch |err| {
+        if (err != error.InvalidIPAddressFormat) return err;
+
+        const list = try std.net.getAddressList(std.heap.page_allocator, host, port);
+        defer list.deinit();
+        if (list.addrs.len == 0) return error.UnknownHostName;
+        return list.addrs[0];
+    };
 }
 
 /// ピアとの通信を処理する
@@ -637,6 +638,57 @@ const MockStreamWriter = struct {
         try self.buffer.appendSlice(bytes);
     }
 };
+
+test "block broadcast queues exactly once when no peer is available" {
+    peer_list.clearRetainingCapacity();
+    pending_blocks.clearRetainingCapacity();
+    defer pending_blocks.clearRetainingCapacity();
+
+    var transactions = std.ArrayList(types.Transaction).init(std.testing.allocator);
+    defer transactions.deinit();
+
+    const block = types.Block{
+        .index = 1,
+        .timestamp = 1_672_531_200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = transactions,
+        .nonce = 0,
+        .data = "queued once",
+        .hash = [_]u8{0} ** 32,
+    };
+
+    broadcastBlock(block, null);
+
+    try std.testing.expectEqual(@as(usize, 1), pending_blocks.items.len);
+    try std.testing.expectEqual(block.index, pending_blocks.items[0].index);
+}
+
+test "relayed block is not queued when only the source peer exists" {
+    peer_list.clearRetainingCapacity();
+    pending_blocks.clearRetainingCapacity();
+    defer pending_blocks.clearRetainingCapacity();
+
+    var transactions = std.ArrayList(types.Transaction).init(std.testing.allocator);
+    defer transactions.deinit();
+
+    const block = types.Block{
+        .index = 1,
+        .timestamp = 1_672_531_200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = transactions,
+        .nonce = 0,
+        .data = "relayed",
+        .hash = [_]u8{0} ** 32,
+    };
+    const source = types.Peer{
+        .address = try std.net.Address.parseIp4("127.0.0.1", 9000),
+        .stream = undefined,
+    };
+
+    broadcastBlock(block, source);
+
+    try std.testing.expectEqual(@as(usize, 0), pending_blocks.items.len);
+}
 
 test "EVM transaction queuing and flushing" {
     const allocator = std.testing.allocator;

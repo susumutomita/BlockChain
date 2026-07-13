@@ -304,11 +304,7 @@ fn deployContract(allocator: std.mem.Allocator, bytecode_hex: []const u8, contra
         .gas_price = 10, // デフォルトのガス価格を設定
     };
 
-    // P2Pネットワーク上でトランザクションをブロードキャスト
-    try p2p.broadcastEvmTransaction(tx);
-    std.log.info("デプロイトランザクションをブロードキャストしました", .{});
-
-    // ローカルでもトランザクションを処理して即時デプロイする
+    // ローカルで実行し、完成したデプロイブロックをP2Pへ伝播する
     std.log.info("ローカルノードでコントラクトデプロイを実行しています...", .{});
     var tx_copy = tx; // トランザクションの可変コピーを作成
     const result = blockchain.processEvmTransactionWithErrorDetails(&tx_copy) catch |err| {
@@ -420,6 +416,31 @@ test "ブロックにトランザクションを追加" {
         .amount = 100,
     });
     try std.testing.expectEqual(@as(usize, 1), block.transactions.items.len);
+}
+
+test "トランザクションの変更でブロックハッシュが変わる" {
+    var block = types.Block{
+        .index = 1,
+        .timestamp = 1_672_531_200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = std.ArrayList(types.Transaction).init(std.testing.allocator),
+        .nonce = 0,
+        .data = "Hash transaction fields",
+        .hash = [_]u8{0} ** 32,
+    };
+    defer block.transactions.deinit();
+
+    try block.transactions.append(.{
+        .sender = "Alice",
+        .receiver = "Bob",
+        .amount = 100,
+    });
+    const before = blockchain.calculateHash(&block);
+
+    block.transactions.items[0].amount = 101;
+    const after = blockchain.calculateHash(&block);
+
+    try std.testing.expect(!std.mem.eql(u8, &before, &after));
 }
 
 test "マイニングが先頭1バイト0のハッシュを生成できる" {

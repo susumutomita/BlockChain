@@ -18,6 +18,8 @@
 - トランザクション管理
 - SHA-256 ハッシュ計算
 - Proof of Work (PoW) マイニング
+- TCPベースのP2Pブロック伝播とチェイン同期
+- 学習用の簡易EVMとSolidityコントラクトのデプロイ/コール
 - デバッグログ機能
 
 ## 主要なコンポーネント
@@ -50,7 +52,7 @@ zig build run -- --listen 9000
 
 ## デバッグモード
 
-`src/main.zig` の先頭にある `debug_logging` 定数を変更することで、
+`src/logger.zig` にある `debug_logging` 定数を変更することで、
 デバッグ情報の出力を制御できます：
 
 ```zig
@@ -80,7 +82,8 @@ const debug_logging = false; // デバッグ情報を出力しない
 ## 今後の拡張案
 
 - [ ] ブロックチェーンの永続化
-- [ ] P2Pネットワーク機能
+- [x] 学習用P2Pネットワーク機能
+- [ ] 認証・フォーク選択・完全なチェイン検証
 - [ ] 高度な暗号化機能
 - [ ] WebAPI インターフェース
 - [ ] ウォレット機能
@@ -92,6 +95,9 @@ const debug_logging = false; // デバッグ情報を出力しない
 ```bash
 # テストを実行する
 zig build test
+
+# 書籍の章・節チェックポイントも含めて検証する
+sh scripts/verify-book-code.sh
 ```
 
 ## ライセンス
@@ -110,10 +116,10 @@ MIT License
 
 ## EVM の使い方（SimpleAdder をデプロイ＆呼び出し）
 
-以下は `references/chapter9/contract/SimpleAdder.sol`（Adder）を使った最短手順です。
+以下は `contract/SimpleAdder.sol`（Adder）を使った最短手順です。
 
 ### 前提
-- Zig が入っている
+- Zig 0.14.0 が入っている（macOSでは後述のDocker手順も利用可能）
 - solc が入っている（`solc --version` で確認）
 - このリポジトリ直下で実行
 
@@ -125,13 +131,13 @@ zig build
 ### 2) コントラクトのバイトコード生成（creation bytecode）
 ```bash
 mkdir -p /tmp/out
-solc --bin references/chapter9/contract/SimpleAdder.sol -o /tmp/out --overwrite
+solc --bin contract/SimpleAdder.sol -o /tmp/out --overwrite
 # 生成物: /tmp/out/Adder.bin
 ```
 
 ### 3) 関数セレクタと引数エンコード（add(uint256,uint256) の例: 2 + 3）
 ```bash
-SEL=$(solc --hashes references/chapter9/contract/SimpleAdder.sol | awk '/add\(uint256,uint256\)/{print $1}' | sed 's/://')
+SEL=$(solc --hashes contract/SimpleAdder.sol | awk '/add\(uint256,uint256\)/{print $1}' | sed 's/://')
 A=$(printf "%064x" 2)
 B=$(printf "%064x" 3)
 DATA=0x${SEL}${A}${B}
@@ -142,7 +148,7 @@ echo "$DATA"  # 先頭0xで、4+64+64=132桁のHEX
 ```bash
 zig build run -- \
   --listen 9000 \
-  --deploy $(cat /tmp/out/Adder.bin) 0x000000000000000000000000000000000000abcd \
+  --deploy "$(cat /tmp/out/Adder.bin)" 0x000000000000000000000000000000000000abcd \
   --call   0x000000000000000000000000000000000000abcd "$DATA" \
   --gas 3000000 \
   --sender 0x000000000000000000000000000000000000dead
@@ -154,7 +160,7 @@ zig build run -- \
 ```bash
 zig build run -- \
   --listen 9000 \
-  --deploy $(cat /tmp/out/Adder.bin) 0x000000000000000000000000000000000000abcd \
+  --deploy "$(cat /tmp/out/Adder.bin)" 0x000000000000000000000000000000000000abcd \
   --gas 3000000 \
   --sender 0x000000000000000000000000000000000000dead
 ```
@@ -169,33 +175,7 @@ zig build run -- \
 ```
 
 ### 5) 期待される結果
-- ログに `実行結果(hex): 0x...0005` と表示（u256=5）
-
-### 四則演算の呼び出し例（Adder.sol）
-- add(10,11): 上の作り方で `A=10, B=11` にして `--call` 実行
-- sub(10,3):
-  ```bash
-  SEL=$(solc --hashes references/chapter9/contract/SimpleAdder.sol | awk '/sub\(uint256,uint256\)/{print $1}' | sed 's/://')
-  A=$(printf "%064x" 10); B=$(printf "%064x" 3); DATA=0x${SEL}${A}${B}
-  zig build run -- --listen 9001 --connect 127.0.0.1:9000 --call 0x000000000000000000000000000000000000abcd "$DATA" --gas 100000 --sender 0x000000000000000000000000000000000000dead
-  # 期待: 結果=7
-  ```
-- mul(6,7):
-  ```bash
-  SEL=$(solc --hashes references/chapter9/contract/SimpleAdder.sol | awk '/mul\(uint256,uint256\)/{print $1}' | sed 's/://')
-  A=$(printf "%064x" 6); B=$(printf "%064x" 7); DATA=0x${SEL}${A}${B}
-  zig build run -- --listen 9001 --connect 127.0.0.1:9000 --call 0x000000000000000000000000000000000000abcd "$DATA" --gas 100000 --sender 0x000000000000000000000000000000000000dead
-  # 期待: 結果=42
-  ```
-- div(100,4):
-  ```bash
-  SEL=$(solc --hashes references/chapter9/contract/SimpleAdder.sol | awk '/div\(uint256,uint256\)/{print $1}' | sed 's/://')
-  A=$(printf "%064x" 100); B=$(printf "%064x" 4); DATA=0x${SEL}${A}${B}
-  zig build run -- --listen 9001 --connect 127.0.0.1:9000 --call 0x000000000000000000000000000000000000abcd "$DATA" --gas 100000 --sender 0x000000000000000000000000000000000000dead
-  # 期待: 結果=25
-  ```
-
-注意: `sub` は `b <= a` を前提に `require` でアンダーフローを防ぎ、`div` は 0 除算を `require` で拒否します。条件を満たさない場合は REVERT になります。
+- ログの32バイト値の末尾が`05`になり、u256表示が`5`になります。
 
 ### トラブルシューティング
 - hexToBytes の `InvalidCharacter` エラー: `--call` 直後の入力データHEXが空です。`echo "$DATA"` で値を確認してください。

@@ -59,7 +59,7 @@ pub fn listenLoop(port: u16) !void {
         if (pending_evm_txs.items.len > 0) {
             std.log.info("Flushing {d} pending EVM transactions to new peer {any}", .{ pending_evm_txs.items.len, conn.address });
             for (pending_evm_txs.items) |payload| {
-                sendEvmTx(peer, payload) catch |err| {
+                sendEvmTx(peer.stream.writer(), peer.address, payload) catch |err| {
                     std.log.err("Failed to flush queued EVM transaction: {any}", .{err});
                     // エラーが発生しても次のペイロードへ
                 };
@@ -110,7 +110,7 @@ pub fn connectToPeer(addr: std.net.Address) !void {
         if (pending_evm_txs.items.len > 0) {
             std.log.info("Flushing {d} pending EVM transactions to new peer {any}", .{ pending_evm_txs.items.len, addr });
             for (pending_evm_txs.items) |payload| {
-                sendEvmTx(peer, payload) catch |err| {
+                sendEvmTx(peer.stream.writer(), peer.address, payload) catch |err| {
                     std.log.err("Failed to flush queued EVM transaction: {any}", .{err});
                     // エラーが発生しても次のペイロードへ
                 };
@@ -192,17 +192,9 @@ pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
         if (send_success) sent = true;
     }
 
-    // 送信先のピアがないか、すべての送信が失敗した場合、キューに追加
-    if (available_peers == 0 or !sent) {
-        pending_blocks.append(blk) catch |err| {
-            std.log.err("Error adding block to pending queue: {any}", .{err});
-            return;
-        };
-        std.log.warn("No peers yet - queueing block index={d}", .{blk.index});
-    }
-
-    // 送信先のピアがないか、すべての送信が失敗した場合、キューに追加
-    if (available_peers == 0 or !sent) {
+    // ローカル生成ブロックだけを再送キューへ入れる。
+    // 受信ブロックを送信元以外へ中継できない場合は、同期との二重配信を避ける。
+    if (from_peer == null and (available_peers == 0 or !sent)) {
         pending_blocks.append(blk) catch |err| {
             std.log.err("Error adding block to pending queue: {any}", .{err});
             return;
@@ -236,18 +228,17 @@ pub fn sendBlock(peer: types.Peer, blk: types.Block) !void {
 ///
 /// エラー:
 ///     ストリーム書き込みエラー
-fn sendEvmTx(peer: types.Peer, payload: []const u8) !void {
-    var writer = peer.stream.writer();
+fn sendEvmTx(writer: anytype, address: std.net.Address, payload: []const u8) !void {
     writer.writeAll("EVM_TX:") catch |err| {
-        std.log.err("Error sending EVM_TX to peer {any}: {any}", .{ peer.address, err });
+        std.log.err("Error sending EVM_TX to peer {any}: {any}", .{ address, err });
         return err;
     };
     writer.writeAll(payload) catch |err| {
-        std.log.err("Error sending EVM_TX payload to peer {any}: {any}", .{ peer.address, err });
+        std.log.err("Error sending EVM_TX payload to peer {any}: {any}", .{ address, err });
         return err;
     };
     writer.writeAll("\n") catch |err| {
-        std.log.err("Error sending newline after EVM_TX to peer {any}: {any}", .{ peer.address, err });
+        std.log.err("Error sending newline after EVM_TX to peer {any}: {any}", .{ address, err });
         return err;
     };
 }
@@ -275,7 +266,7 @@ pub fn broadcastEvmTransaction(tx: types.Transaction) !void {
 
     for (peer_list.items, 0..) |peer, idx| {
         std.log.info("ピア {d}/{d} にEVMトランザクションを送信 [行:{d}]: {}", .{ idx + 1, peer_count, @src().line, peer.address });
-        sendEvmTx(peer, payload) catch |err| {
+        sendEvmTx(peer.stream.writer(), peer.address, payload) catch |err| {
             std.log.err("Error broadcasting EVM_TX to peer {any}: {any} (at 行:{d})", .{ peer.address, err, @src().line });
             continue; // エラーが発生しても次のピアへ
         };
@@ -548,13 +539,22 @@ pub fn textInputLoop() !void {
 ///
 /// エラー:
 ///     error.Invalid: 文字列フォーマットが無効な場合
-///     std.net.Address.resolveIpからのその他のエラー
+///     IP解析またはホスト名解決からのその他のエラー
 pub fn resolveHostPort(spec: []const u8) !std.net.Address {
     var it = std.mem.tokenizeScalar(u8, spec, ':');
     const host = it.next() orelse return error.Invalid;
     const port_s = it.next() orelse return error.Invalid;
+    if (it.next() != null) return error.Invalid;
     const port = try std.fmt.parseInt(u16, port_s, 10);
-    return std.net.Address.resolveIp(host, port);
+
+    return std.net.Address.parseIp(host, port) catch |err| {
+        if (err != error.InvalidIPAddressFormat) return err;
+
+        const list = try std.net.getAddressList(std.heap.page_allocator, host, port);
+        defer list.deinit();
+        if (list.addrs.len == 0) return error.UnknownHostName;
+        return list.addrs[0];
+    };
 }
 
 /// ピアとの通信を処理する
@@ -639,13 +639,64 @@ const MockStreamWriter = struct {
     }
 };
 
+test "block broadcast queues exactly once when no peer is available" {
+    peer_list.clearRetainingCapacity();
+    pending_blocks.clearRetainingCapacity();
+    defer pending_blocks.clearRetainingCapacity();
+
+    var transactions = std.ArrayList(types.Transaction).init(std.testing.allocator);
+    defer transactions.deinit();
+
+    const block = types.Block{
+        .index = 1,
+        .timestamp = 1_672_531_200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = transactions,
+        .nonce = 0,
+        .data = "queued once",
+        .hash = [_]u8{0} ** 32,
+    };
+
+    broadcastBlock(block, null);
+
+    try std.testing.expectEqual(@as(usize, 1), pending_blocks.items.len);
+    try std.testing.expectEqual(block.index, pending_blocks.items[0].index);
+}
+
+test "relayed block is not queued when only the source peer exists" {
+    peer_list.clearRetainingCapacity();
+    pending_blocks.clearRetainingCapacity();
+    defer pending_blocks.clearRetainingCapacity();
+
+    var transactions = std.ArrayList(types.Transaction).init(std.testing.allocator);
+    defer transactions.deinit();
+
+    const block = types.Block{
+        .index = 1,
+        .timestamp = 1_672_531_200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = transactions,
+        .nonce = 0,
+        .data = "relayed",
+        .hash = [_]u8{0} ** 32,
+    };
+    const source = types.Peer{
+        .address = try std.net.Address.parseIp4("127.0.0.1", 9000),
+        .stream = undefined,
+    };
+
+    broadcastBlock(block, source);
+
+    try std.testing.expectEqual(@as(usize, 0), pending_blocks.items.len);
+}
+
 test "EVM transaction queuing and flushing" {
     const allocator = std.testing.allocator;
 
     // Ensure clean state before test by clearing and freeing any existing items
     peer_list.clearRetainingCapacity(); // Does not free items
-    while (pending_evm_txs.items.len > 0) {
-        allocator.free(pending_evm_txs.pop());
+    while (pending_evm_txs.pop()) |item| {
+        std.heap.page_allocator.free(item);
     }
     try std.testing.expectEqual(@as(usize, 0), pending_evm_txs.items.len);
 
@@ -664,7 +715,7 @@ test "EVM transaction queuing and flushing" {
     };
     defer allocator.free(tx1.sender);
     defer allocator.free(tx1.receiver);
-    if (tx1.evm_data) |d| allocator.free(d); // Free original evm_data
+    defer if (tx1.evm_data) |d| allocator.free(d); // Free original evm_data after all uses
 
     // 1. Call broadcastEvmTransaction with no peers
     try broadcastEvmTransaction(tx1);
@@ -684,32 +735,20 @@ test "EVM transaction queuing and flushing" {
     var mock_stream_data_buffer = std.ArrayList(u8).init(allocator);
     defer mock_stream_data_buffer.deinit();
 
-    // Create a mock writer
-    var mock_writer_instance = MockStreamWriter{ .buffer = &mock_stream_data_buffer };
+    // sendEvmTx accepts a writer directly so the test does not need a socket.
+    const mock_writer_instance = MockStreamWriter{ .buffer = &mock_stream_data_buffer };
+    const dummy_address = try std.net.Address.parseIp("127.0.0.1", 8080);
 
-    // Create a mock stream source. Reader is not used by sendEvmTx.
-    const mock_stream_source = std.io.StreamSource{
-        .reader = undefined, // Not used by sendEvmTx
-        .writer = .{ .context = &mock_writer_instance, .writeFn = MockStreamWriter.write },
-    };
-
-    const mock_peer = types.Peer{
-        .address = try std.net.Address.parseIp("127.0.0.1", 8080), // Dummy address
-        .stream = mock_stream_source,
-    };
-    try peer_list.append(mock_peer);
-
-    // Manually call the flushing logic (as in listenLoop/connectToPeer)
-    std.log.info("Test: Flushing {d} pending EVM transactions to new mock peer", .{pending_evm_txs.items.len});
+    std.log.info("Test: Flushing {d} pending EVM transactions to mock writer", .{pending_evm_txs.items.len});
     for (pending_evm_txs.items) |payload_to_flush| {
-        try sendEvmTx(mock_peer, payload_to_flush);
+        try sendEvmTx(mock_writer_instance, dummy_address, payload_to_flush);
     }
 
     // The actual code uses pending_evm_txs.clearRetainingCapacity() which doesn't free items.
     // Items are freed because they are allocator.dupe'd into the queue.
     // So, here we must free them manually as they are popped.
-    while (pending_evm_txs.items.len > 0) {
-        allocator.free(pending_evm_txs.pop());
+    while (pending_evm_txs.pop()) |item| {
+        std.heap.page_allocator.free(item);
     }
     pending_evm_txs.clearRetainingCapacity(); // Match the main code's behavior
 
@@ -723,9 +762,6 @@ test "EVM transaction queuing and flushing" {
     try expected_sent_data_to_peer.writer().print("EVM_TX:{s}\n", .{expected_payload_tx1});
 
     try std.testing.expect(std.mem.eql(u8, expected_sent_data_to_peer.items, mock_stream_data_buffer.items));
-
-    // Clean up peer_list
-    _ = peer_list.pop(); // Remove mock_peer
 }
 
 test "EVM transaction JSON format consistency (serialize/parse)" {
@@ -748,7 +784,7 @@ test "EVM transaction JSON format consistency (serialize/parse)" {
     // Defer freeing fields of tx2
     defer allocator.free(tx2.sender);
     defer allocator.free(tx2.receiver);
-    if (tx2.evm_data) |d| allocator.free(d);
+    defer if (tx2.evm_data) |d| allocator.free(d);
 
     // 2. Serialize tx2
     const payload = try parser.serializeTransaction(allocator, tx2);
@@ -757,9 +793,9 @@ test "EVM transaction JSON format consistency (serialize/parse)" {
     // 3. Parse the payload
     const parsed_tx = try parser.parseTransactionJson(payload);
     // Defer freeing fields of parsed_tx
-    defer allocator.free(parsed_tx.sender);
-    defer allocator.free(parsed_tx.receiver);
-    if (parsed_tx.evm_data) |d| allocator.free(d);
+    defer std.heap.page_allocator.free(parsed_tx.sender);
+    defer std.heap.page_allocator.free(parsed_tx.receiver);
+    defer if (parsed_tx.evm_data) |d| std.heap.page_allocator.free(d);
 
     // 4. Assertions
     // Using expectEqualStrings for direct comparison. Assumes null termination or exact length match.

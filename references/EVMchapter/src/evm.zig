@@ -165,6 +165,10 @@ pub fn execute(allocator: std.mem.Allocator, code: []const u8, calldata: []const
                 if (context.error_msg != null) {
                     std.log.err("エラー詳細: {s}", .{context.error_msg.?});
                 }
+            } else if (err == EVMError.Revert) {
+                // REVERT is a normal contract-level halt and is asserted by
+                // negative-path tests, so keep it below Zig's error-log level.
+                std.log.debug("EVM REVERT at PC={d}", .{context.pc});
             } else {
                 std.log.err("EVM実行エラー: {any} at PC={d}", .{ err, context.pc });
             }
@@ -253,6 +257,67 @@ pub fn executeWithErrorInfo(allocator: std.mem.Allocator, code: []const u8, call
 }
 
 /// 単一のEVM命令を実行
+fn logicalShiftLeft(value: EVMu256, shift: EVMu256) EVMu256 {
+    if (shift.hi != 0 or shift.lo >= 256) return EVMu256.zero();
+    const amount: u8 = @intCast(shift.lo);
+    if (amount == 0) return value;
+    if (amount < 128) {
+        const right: u7 = @intCast(128 - amount);
+        const left: u7 = @intCast(amount);
+        return .{
+            .hi = (value.hi << left) | (value.lo >> right),
+            .lo = value.lo << left,
+        };
+    }
+    if (amount == 128) return .{ .hi = value.lo, .lo = 0 };
+    const left: u7 = @intCast(amount - 128);
+    return .{ .hi = value.lo << left, .lo = 0 };
+}
+
+fn logicalShiftRight(value: EVMu256, shift: EVMu256) EVMu256 {
+    if (shift.hi != 0 or shift.lo >= 256) return EVMu256.zero();
+    const amount: u8 = @intCast(shift.lo);
+    if (amount == 0) return value;
+    if (amount < 128) {
+        const right: u7 = @intCast(amount);
+        const left: u7 = @intCast(128 - amount);
+        return .{
+            .hi = value.hi >> right,
+            .lo = (value.lo >> right) | (value.hi << left),
+        };
+    }
+    if (amount == 128) return .{ .hi = 0, .lo = value.hi };
+    const right: u7 = @intCast(amount - 128);
+    return .{ .hi = 0, .lo = value.hi >> right };
+}
+
+fn arithmeticShiftRight(value: EVMu256, shift: EVMu256) EVMu256 {
+    const negative = (value.hi & (@as(u128, 1) << 127)) != 0;
+    const fill: u128 = if (negative) std.math.maxInt(u128) else 0;
+    if (shift.hi != 0 or shift.lo >= 256) return .{ .hi = fill, .lo = fill };
+
+    const amount: u8 = @intCast(shift.lo);
+    if (amount == 0) return value;
+    if (amount < 128) {
+        const right: u7 = @intCast(amount);
+        const left: u7 = @intCast(128 - amount);
+        const sign_mask: u128 = if (negative) @as(u128, std.math.maxInt(u128)) << left else 0;
+        return .{
+            .hi = (value.hi >> right) | sign_mask,
+            .lo = (value.lo >> right) | (value.hi << left),
+        };
+    }
+    if (amount == 128) return .{ .hi = fill, .lo = value.hi };
+
+    const right: u7 = @intCast(amount - 128);
+    const left: u7 = @intCast(256 - @as(u16, amount));
+    const sign_mask: u128 = if (negative) @as(u128, std.math.maxInt(u128)) << left else 0;
+    return .{
+        .hi = fill,
+        .lo = (value.hi >> right) | sign_mask,
+    };
+}
+
 fn executeStep(context: *EvmContext) !void {
     // 現在のオペコードを取得
     const opcode = context.code[context.pc];
@@ -585,42 +650,9 @@ fn executeStep(context: *EvmContext) !void {
 
         Opcode.SHL => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
-            // EVM仕様: スタック順序は [shift, value]
             const shift = try context.stack.pop();
             const value = try context.stack.pop();
-
-            // シフト量が256以上の場合は結果は0
-            if (shift.hi > 0 or shift.lo >= 256) {
-                try context.stack.push(EVMu256.zero());
-            } else {
-                const shift_amount = @as(u8, @intCast(shift.lo));
-
-                // 単純化した論理左シフトの実装
-                if (shift_amount == 0) {
-                    // シフトなし - 元の値を返す
-                    try context.stack.push(value);
-                } else if (shift_amount < 64) {
-                    // 64ビット未満のシフト
-                    const result = EVMu256{
-                        .hi = (value.hi << @intCast(shift_amount)) | (value.lo >> @intCast(64 - shift_amount)),
-                        .lo = value.lo << @intCast(shift_amount),
-                    };
-                    try context.stack.push(result);
-                } else if (shift_amount < 128) {
-                    // 64-127ビットのシフト - loの値がhiに移動
-                    const result = EVMu256{
-                        .hi = value.lo << @intCast(shift_amount - 64),
-                        .lo = 0,
-                    };
-                    try context.stack.push(result);
-                } else if (shift_amount < 256) {
-                    // 128-255ビットのシフト - すべて0
-                    try context.stack.push(EVMu256.zero());
-                } else {
-                    // 256ビット以上のシフト - すべて0
-                    try context.stack.push(EVMu256.zero());
-                }
-            }
+            try context.stack.push(logicalShiftLeft(value, shift));
             context.pc += 1;
         },
 
@@ -636,115 +668,22 @@ fn executeStep(context: *EvmContext) !void {
                 std.log.info("SHR: Input value - hi: 0x{x:0>32}, lo: 0x{x:0>32}", .{ value.hi, value.lo });
             }
 
-            // シフト量が256以上の場合は結果は0
-            if (shift.hi > 0 or shift.lo >= 256) {
-                try context.stack.push(EVMu256.zero());
-            } else {
-                const shift_amount = @as(u8, @intCast(shift.lo));
-                var result = EVMu256{ .hi = value.hi, .lo = value.lo };
-
-                // 論理右シフト実装
-                if (shift_amount == 0) {
-                    // シフト量が0の場合は値をそのまま返す
-                } else if (shift_amount < 64) {
-                    // 64ビット未満のシフト - シフト量を適切な型に変換
-                    const shift_u7 = @as(u7, @intCast(shift_amount)); // u7 can represent 0-127
-                    const complement_u6 = @as(u6, @intCast(64 - shift_amount)); // u6 can represent 0-63
-                    result.lo = (value.lo >> shift_u7) | (value.hi << complement_u6);
-                    result.hi = value.hi >> shift_u7;
-                } else if (shift_amount < 128) {
-                    // 64-127ビットのシフト
-                    const adjusted_shift = @as(u7, @intCast(shift_amount - 64));
-                    result.lo = value.hi >> adjusted_shift;
-                    result.hi = 0;
-                } else if (shift_amount < 256) {
-                    // 128-255ビットのシフト: value.hiの一部をresult.loに移す
-                    const high_shift = @as(u7, @intCast(shift_amount - 128));
-                    result.lo = value.hi >> high_shift;
-                    result.hi = 0;
-                } else {
-                    // 256ビット以上のシフト（全ビット消える）
-                    result.lo = 0;
-                    result.hi = 0;
+            const result = logicalShiftRight(value, shift);
+            if (shift.hi == 0 and shift.lo == 224) {
+                std.log.info("SHR: Result after 224-bit shift - hi: 0x{x:0>32}, lo: 0x{x:0>32}", .{ result.hi, result.lo });
+                if (result.lo <= 0xFFFFFFFF) {
+                    std.log.info("SHR: Extracted function selector: 0x{x:0>8}", .{@as(u32, @intCast(result.lo))});
                 }
-
-                // 関数セレクター抽出の場合の結果をログ出力
-                if (shift.lo == 224) {
-                    std.log.info("SHR: Result after 224-bit shift - hi: 0x{x:0>32}, lo: 0x{x:0>32}", .{ result.hi, result.lo });
-                    if (result.lo <= 0xFFFFFFFF) {
-                        std.log.info("SHR: Extracted function selector: 0x{x:0>8}", .{@as(u32, @intCast(result.lo))});
-                    }
-                }
-
-                try context.stack.push(result);
             }
+            try context.stack.push(result);
             context.pc += 1;
         },
 
         Opcode.SAR => {
             if (context.stack.depth() < 2) return EVMError.StackUnderflow;
-            // EVM仕様: スタック順序は [shift, value]
             const shift = try context.stack.pop();
             const value = try context.stack.pop();
-
-            // シフト量が256以上の場合の処理
-            if (shift.hi > 0 or shift.lo >= 256) {
-                // 最上位ビットが1（負数）の場合、すべてのビットが1になる（算術シフトの特性）
-                if (value.hi & (1 << 127) != 0) {
-                    try context.stack.push(EVMu256{ .hi = std.math.maxInt(u128), .lo = std.math.maxInt(u128) });
-                } else {
-                    try context.stack.push(EVMu256.zero());
-                }
-            } else {
-                const shift_amount = @as(u8, @intCast(shift.lo));
-                var result = EVMu256{ .hi = value.hi, .lo = value.lo };
-
-                // 最上位ビットを記録（符号ビット）
-                const sign_bit = (value.hi & (1 << 127)) != 0;
-
-                // 算術右シフト実装
-                if (shift_amount == 0) {
-                    // シフト量が0の場合は値をそのまま返す
-                } else if (shift_amount < 64) {
-                    // 64ビット未満のシフト
-                    const shift_u7 = @as(u7, @intCast(shift_amount));
-                    const complement_u6 = @as(u6, @intCast(64 - shift_amount));
-                    result.lo = (value.lo >> shift_u7) | (value.hi << complement_u6);
-
-                    // 符号拡張：符号が負の場合、上位ビットを1で埋める
-                    if (sign_bit) {
-                        // 最上位部分を右シフトし、最上位ビットを1で埋める
-                        const mask = ~@as(u128, 0) << @as(u7, @intCast(127 - shift_amount));
-                        result.hi = (value.hi >> shift_u7) | mask;
-                    } else {
-                        // 通常の論理右シフト
-                        result.hi = value.hi >> shift_u7;
-                    }
-                } else if (shift_amount < 128) {
-                    // 64-127ビットのシフト
-                    const adjusted_shift = @as(u7, @intCast(shift_amount - 64));
-                    result.lo = value.hi >> adjusted_shift;
-
-                    // 符号拡張：負数の場合はすべてのビットを1に
-                    if (sign_bit) {
-                        result.hi = std.math.maxInt(u128);
-                    } else {
-                        result.hi = 0;
-                    }
-                } else {
-                    // 128ビット以上のシフト
-                    // 符号拡張：負数の場合はすべてのビットを1に
-                    if (sign_bit) {
-                        result.lo = std.math.maxInt(u128);
-                        result.hi = std.math.maxInt(u128);
-                    } else {
-                        result.lo = 0;
-                        result.hi = 0;
-                    }
-                }
-
-                try context.stack.push(result);
-            }
+            try context.stack.push(arithmeticShiftRight(value, shift));
             context.pc += 1;
         },
 
@@ -865,30 +804,30 @@ fn executeStep(context: *EvmContext) !void {
             const length = try context.stack.pop();
 
             // REVERT時の詳細情報をログ出力
-            std.log.err("REVERT executed at PC={d}", .{context.pc});
-            std.log.err("REVERT parameters - offset: {d}, length: {d}", .{ offset.lo, length.lo });
+            std.log.debug("REVERT executed at PC={d}", .{context.pc});
+            std.log.debug("REVERT parameters - offset: {d}, length: {d}", .{ offset.lo, length.lo });
 
             // スタックの内容を表示
-            std.log.err("Stack depth at REVERT: {d}", .{context.stack.depth()});
+            std.log.debug("Stack depth at REVERT: {d}", .{context.stack.depth()});
             if (context.stack.depth() > 0) {
-                std.log.err("Stack contents (last 5 entries):", .{});
+                std.log.debug("Stack contents (last 5 entries):", .{});
                 const start_idx = if (context.stack.depth() >= 5) context.stack.depth() - 5 else 0;
                 for (start_idx..context.stack.depth()) |i| {
                     const value = context.stack.data[context.stack.sp - 1 - (context.stack.depth() - 1 - i)];
-                    std.log.err("  [{}]: hi=0x{x:0>32}, lo=0x{x:0>32}", .{ i, value.hi, value.lo });
+                    std.log.debug("  [{}]: hi=0x{x:0>32}, lo=0x{x:0>32}", .{ i, value.hi, value.lo });
                 }
             }
 
             // 周辺コードの逆アセンブル
             const start_pc = if (context.pc >= 10) context.pc - 10 else 0;
             const end_pc = if (context.pc + 10 < context.code.len) context.pc + 10 else context.code.len;
-            std.log.err("Code context around PC={d}:", .{context.pc});
+            std.log.debug("Code context around PC={d}:", .{context.pc});
             for (start_pc..end_pc) |pc| {
                 const opcode_val = context.code[pc];
                 if (pc == context.pc) {
-                    std.log.err("  PC={d}: [0x{x:0>2}] <-- REVERT HERE", .{ pc, opcode_val });
+                    std.log.debug("  PC={d}: [0x{x:0>2}] <-- REVERT HERE", .{ pc, opcode_val });
                 } else {
-                    std.log.err("  PC={d}: 0x{x:0>2}", .{ pc, opcode_val });
+                    std.log.debug("  PC={d}: 0x{x:0>2}", .{ pc, opcode_val });
                 }
             }
 
@@ -911,9 +850,9 @@ fn executeStep(context: *EvmContext) !void {
                 }
 
                 // リバートデータも表示
-                std.log.err("REVERT data ({d} bytes): {any}", .{ len, context.returndata.items });
+                std.log.debug("REVERT data ({d} bytes): {any}", .{ len, context.returndata.items });
             } else {
-                std.log.err("REVERT with no data", .{});
+                std.log.debug("REVERT with no data", .{});
             }
 
             context.stopped = true;
@@ -1203,6 +1142,48 @@ pub fn disassemble(code: []const u8, writer: anytype) !void {
     }
 }
 
+test "ABI calldataでadd関数を実行" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // selectorを検査し、ABIのオフセット4と36から引数を読む最小runtime code。
+    const runtime_bytecode = [_]u8{
+        0x60, 0x00, // PUSH1 0
+        0x35, // CALLDATALOAD
+        0x60, 0xe0, // PUSH1 224
+        0x1c, // SHR
+        0x63, 0x77, 0x16, 0x02, 0xf7, // PUSH4 add(uint256,uint256)
+        0x14, // EQ
+        0x60, 0x10, // PUSH1 0x10 (JUMPDEST)
+        0x57, // JUMPI
+        0x00, // STOP
+        0x5b, // JUMPDEST
+        0x60, 0x04, // PUSH1 4
+        0x35, // CALLDATALOAD
+        0x60, 0x24, // PUSH1 36
+        0x35, // CALLDATALOAD
+        0x01, // ADD
+        0x60, 0x00, // PUSH1 0
+        0x52, // MSTORE
+        0x60, 0x20, // PUSH1 32
+        0x60, 0x00, // PUSH1 0
+        0xf3, // RETURN
+    };
+
+    var calldata = [_]u8{0} ** 68;
+    @memcpy(calldata[0..4], &[_]u8{ 0x77, 0x16, 0x02, 0xf7 });
+    calldata[35] = 5;
+    calldata[67] = 3;
+
+    const result = try execute(allocator, &runtime_bytecode, &calldata, 100_000);
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 32), result.len);
+    for (result[0..31]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    try std.testing.expectEqual(@as(u8, 8), result[31]);
+}
+
 // シンプルなEVM実行テスト
 test "Simple EVM execution" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1393,6 +1374,47 @@ test "EVM multiple operations" {
     // 結果が31（(10+11)*3/2）になっていることを確認
     try std.testing.expect(value.hi == 0);
     try std.testing.expect(value.lo == 31);
+}
+
+test "EVM 256-bit shift boundaries" {
+    const one = EVMu256.fromU64(1);
+    const left_shifts = [_]u128{ 0, 1, 63, 64, 127, 128, 224, 255, 256 };
+    const left_expected = [_]EVMu256{
+        .{ .hi = 0, .lo = 1 },
+        .{ .hi = 0, .lo = 2 },
+        .{ .hi = 0, .lo = @as(u128, 1) << 63 },
+        .{ .hi = 0, .lo = @as(u128, 1) << 64 },
+        .{ .hi = 0, .lo = @as(u128, 1) << 127 },
+        .{ .hi = 1, .lo = 0 },
+        .{ .hi = @as(u128, 1) << 96, .lo = 0 },
+        .{ .hi = @as(u128, 1) << 127, .lo = 0 },
+        EVMu256.zero(),
+    };
+    for (left_shifts, left_expected) |amount, expected| {
+        try std.testing.expect(logicalShiftLeft(one, .{ .hi = 0, .lo = amount }).eql(expected));
+    }
+
+    const top_bit = EVMu256{ .hi = @as(u128, 1) << 127, .lo = 0 };
+    const right_shifts = [_]u128{ 0, 1, 63, 64, 127, 128, 224, 255, 256 };
+    const right_expected = [_]EVMu256{
+        top_bit,
+        .{ .hi = @as(u128, 1) << 126, .lo = 0 },
+        .{ .hi = @as(u128, 1) << 64, .lo = 0 },
+        .{ .hi = @as(u128, 1) << 63, .lo = 0 },
+        .{ .hi = 1, .lo = 0 },
+        .{ .hi = 0, .lo = @as(u128, 1) << 127 },
+        .{ .hi = 0, .lo = @as(u128, 1) << 31 },
+        .{ .hi = 0, .lo = 1 },
+        EVMu256.zero(),
+    };
+    for (right_shifts, right_expected) |amount, expected| {
+        try std.testing.expect(logicalShiftRight(top_bit, .{ .hi = 0, .lo = amount }).eql(expected));
+    }
+
+    const negative_one = EVMu256{ .hi = std.math.maxInt(u128), .lo = std.math.maxInt(u128) };
+    for (right_shifts) |amount| {
+        try std.testing.expect(arithmeticShiftRight(negative_one, .{ .hi = 0, .lo = amount }).eql(negative_one));
+    }
 }
 
 // SHR（論理右シフト）のテスト

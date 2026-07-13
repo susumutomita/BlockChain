@@ -55,8 +55,10 @@ pub fn calculateHash(block: *const types.Block) [32]u8 {
     }
 
     // ハッシュ計算にブロックフィールドを順番に追加
-    hasher.update(utils.toBytes(u32, block.index));
-    hasher.update(utils.toBytes(u64, block.timestamp));
+    const index_bytes = utils.toBytesU32(block.index);
+    const timestamp_bytes = utils.toBytesU64(block.timestamp);
+    hasher.update(&index_bytes);
+    hasher.update(&timestamp_bytes);
     hasher.update(nonce_bytes[0..]);
     hasher.update(&block.prev_hash);
 
@@ -98,10 +100,10 @@ pub fn calculateTransactionHash(tx: *const types.Transaction) [32]u8 {
 
     hasher.update(&[_]u8{tx.tx_type});
 
-    const gas_limit_bytes = utils.toBytes(usize, tx.gas_limit);
+    const gas_limit_bytes = utils.toBytesU64(@intCast(tx.gas_limit));
     const gas_price_bytes = utils.toBytesU64(tx.gas_price);
-    hasher.update(gas_limit_bytes[0..]);
-    hasher.update(gas_price_bytes[0..]);
+    hasher.update(&gas_limit_bytes);
+    hasher.update(&gas_price_bytes);
 
     if (tx.evm_data) |data| {
         hasher.update(data);
@@ -168,6 +170,10 @@ pub fn verifyBlockPow(b: *const types.Block) bool {
     // ハッシュを再計算し、保存されたハッシュと一致するか確認
     const recalculated = calculateHash(b);
     if (!std.mem.eql(u8, recalculated[0..], b.hash[0..])) {
+        std.log.err("Block hash mismatch: stored={s}, recalculated={s}", .{
+            std.fmt.bytesToHex(b.hash, .lower),
+            std.fmt.bytesToHex(recalculated, .lower),
+        });
         return false; // ハッシュフィールドが再計算されたハッシュと一致しない
     }
 
@@ -190,6 +196,13 @@ pub fn verifyBlockPow(b: *const types.Block) bool {
 /// 注意:
 ///     この関数は成功または失敗のメッセージをログに記録します
 pub fn addBlock(new_block: types.Block) void {
+    for (chain_store.items) |existing_block| {
+        if (std.mem.eql(u8, &existing_block.hash, &new_block.hash)) {
+            std.log.info("Block already exists; ignoring duplicate index={d}, hash={x}", .{ new_block.index, new_block.hash });
+            return;
+        }
+    }
+
     if (!verifyBlockPow(&new_block)) {
         std.log.err("Received block fails PoW check. Rejecting it.", .{});
         return;
@@ -248,6 +261,17 @@ pub fn addBlock(new_block: types.Block) void {
 
     // 新しいブロックを追加した後にチェーン全体を表示
     printChainState();
+}
+
+test "同じハッシュのブロックは重複追加しない" {
+    chain_store.clearRetainingCapacity();
+    defer chain_store.clearRetainingCapacity();
+
+    const block = try createTestGenesisBlock(std.heap.page_allocator);
+    addBlock(block);
+    addBlock(block);
+
+    try std.testing.expectEqual(@as(usize, 1), chain_store.items.len);
 }
 
 /// 前のブロックにリンクされた新しいブロックを作成する
@@ -537,39 +561,9 @@ pub fn processEvmTransaction(tx: *types.Transaction) ![]const u8 {
         },
     }
 
-    // コントラクトがデプロイされた場合、P2P同期のために特別なトランザクションを含むブロックを作成
+    // コントラクトがデプロイされた場合、P2P同期用のブロックを作成
     if (contract_deployed) {
-        // トランザクションを含む新しいブロックを作成
-        const last_block = if (chain_store.items.len > 0) chain_store.items[chain_store.items.len - 1] else try createTestGenesisBlock(allocator);
-        var new_block = createBlock("Contract Deployment", last_block);
-
-        // トランザクションを追加（元のバイトコードを含む）
-        try new_block.transactions.append(tx.*);
-
-        // コントラクトストレージも追加 - ランタイムコードをブロックに含める
-        var contracts = std.StringHashMap([]const u8).init(allocator);
-        try contracts.put(tx.receiver, result);
-        new_block.contracts = contracts;
-
-        // ブロックをマイニングして追加
-        mineBlock(&new_block, DIFFICULTY);
-
-        std.log.info("コントラクトデプロイブロック作成開始: アドレス={s}, トランザクション数={d}, コントラクト数={d}", .{ tx.receiver, new_block.transactions.items.len, contracts.count() });
-
-        // ブロックに追加する前にダンプして確認
-        if (contracts.get(tx.receiver)) |code| {
-            std.log.info("contracts内コード長: {d}bytes", .{code.len});
-        } else {
-            std.log.err("contracts内にコードがない", .{});
-        }
-
-        // ブロックを追加
-        addBlock(new_block);
-
-        // 新しいブロックをピアにブロードキャスト
-        @import("p2p.zig").broadcastBlock(new_block, null);
-
-        std.log.info("コントラクトデプロイブロックを作成しました: address={s}", .{tx.receiver});
+        try recordContractDeployment(tx, result, allocator);
     }
 
     return result;
@@ -617,6 +611,7 @@ pub fn processEvmTransactionWithErrorDetails(tx: *types.Transaction) ![]const u8
 
     const allocator = std.heap.page_allocator;
     var result: []const u8 = "";
+    var contract_deployed = false;
 
     switch (tx.tx_type) {
         // コントラクトデプロイの場合
@@ -679,6 +674,7 @@ pub fn processEvmTransactionWithErrorDetails(tx: *types.Transaction) ![]const u8
 
             // 返されたランタイムコードを保存（デプロイ時の実行結果がランタイムコード）
             try contract_storage.put(tx.receiver, result);
+            contract_deployed = true;
 
             std.log.info("コントラクトが正常にデプロイされました: アドレス={s}, コード長={d}バイト", .{ tx.receiver, result.len });
         },
@@ -762,7 +758,46 @@ pub fn processEvmTransactionWithErrorDetails(tx: *types.Transaction) ![]const u8
         },
     }
 
+    if (contract_deployed) {
+        try recordContractDeployment(tx, result, allocator);
+    }
+
     return result;
+}
+
+/// デプロイ結果を所有権の独立したブロックへ記録し、ピアへ伝播する。
+fn recordContractDeployment(tx: *const types.Transaction, runtime_code: []const u8, allocator: std.mem.Allocator) !void {
+    const last_block = if (chain_store.items.len > 0)
+        chain_store.items[chain_store.items.len - 1]
+    else
+        try createTestGenesisBlock(allocator);
+    var new_block = createBlock("Contract Deployment", last_block);
+
+    // CLIの入力バッファはdeployContract終了時に解放されるため、
+    // チェインが保持するトランザクションは文字列とバイト列を複製する。
+    var stored_tx = tx.*;
+    stored_tx.sender = try allocator.dupe(u8, tx.sender);
+    stored_tx.receiver = try allocator.dupe(u8, tx.receiver);
+    stored_tx.evm_data = if (tx.evm_data) |data|
+        try allocator.dupe(u8, data)
+    else
+        null;
+    try new_block.transactions.append(stored_tx);
+
+    var contracts = std.StringHashMap([]const u8).init(allocator);
+    const stored_address = try allocator.dupe(u8, tx.receiver);
+    try contracts.put(stored_address, runtime_code);
+    new_block.contracts = contracts;
+
+    mineBlock(&new_block, DIFFICULTY);
+    addBlock(new_block);
+    @import("p2p.zig").broadcastBlock(new_block, null);
+
+    std.log.info("コントラクトデプロイブロックを作成しました: address={s}, transactions={d}, contracts={d}", .{
+        tx.receiver,
+        new_block.transactions.items.len,
+        contracts.count(),
+    });
 }
 
 // ヘルパー関数: 文字列を指定回数繰り返す

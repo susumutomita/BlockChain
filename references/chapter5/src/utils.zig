@@ -37,13 +37,12 @@ pub fn toBytesU64(value: u64) [8]u8 {
 }
 
 // publicにする: main.zigから呼べるようにする
-pub fn toBytes(comptime T: type, value: T) []const u8 {
+pub fn toBytes(comptime T: type, value: T) [@sizeOf(T)]u8 {
     if (T == u32) {
-        return toBytesU32(@as(u32, value))[0..];
+        return toBytesU32(@as(u32, value));
     } else if (T == u64) {
-        return toBytesU64(@as(u64, value))[0..];
+        return toBytesU64(@as(u64, value));
     } else {
-        const bytes: [@sizeOf(T)]u8 = @bitCast(value);
-        return bytes[0..];
+        @compileError("toBytes supports only u32 and u64");
     }
 }

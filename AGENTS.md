@@ -37,7 +37,7 @@
 ## macOS でのビルド注意（zig 0.14.0）
 - macOS 26 系ではネイティブの `zig build`/`zig test` が libSystem スタブ未対応でリンク失敗する。回避は OS バージョンを完全指定でピン: `zig test src/<file>.zig -target aarch64-macos.15.0.0`（生成物は macOS 26 でも実行可）。
 - `zig build` はビルドランナー自体が native リンクのため当該環境では不可 → **docker（Alpine, linux/amd64）を使う**。
-- 補足: CI (`zig build test`) は `main.zig`/`root.zig` 起点のため、`refAllDecls` されない各ファイル内テストは実行されない。ファイル単体の検証は `zig test src/<file>.zig -target aarch64-macos.15.0.0` を使う。
+- 補足: ルート`build.zig`は全13個の`src/*.zig`を個別のテストルートとして登録する。CIの`zig build test`はEVM、P2P、型のファイル内テストも実行する。macOSで単一ファイルを確認する場合は`zig test src/<file>.zig -target aarch64-macos.15.0.0`を使う。
 
 ## Coding Style & Naming Conventions
 - Formatter: Always run `zig fmt` before committing.

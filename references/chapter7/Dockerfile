@@ -5,17 +5,23 @@ FROM alpine:latest
 # xz パッケージを追加して tar が .tar.xz を解凍できるようにする
 RUN apk add --no-cache curl tar xz
 
-# Zig のバージョンを指定可能にするビルド引数（デフォルトは 0.14.0）
+# ZigとコンテナのCPUアーキテクチャを指定する
 ARG ZIG_VERSION=0.14.0
-# ここでは x86_64 用のバイナリを使用する例です
-ENV ZIG_DIST=zig-linux-x86_64-${ZIG_VERSION}
+ARG TARGETARCH
 ENV ZIG_VERSION=${ZIG_VERSION}
 
-# 指定された Zig のバージョンを公式サイトからダウンロードして解凍し、PATH に追加
-RUN curl -LO https://ziglang.org/download/${ZIG_VERSION}/${ZIG_DIST}.tar.xz && \
-  tar -xf ${ZIG_DIST}.tar.xz && \
-  rm ${ZIG_DIST}.tar.xz
-ENV PATH="/${ZIG_DIST}:${PATH}"
+# amd64とarm64のどちらでも、対応する公式バイナリを展開する
+RUN case "${TARGETARCH}" in \
+      amd64) ZIG_ARCH=x86_64 ;; \
+      arm64) ZIG_ARCH=aarch64 ;; \
+      *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    ZIG_DIST="zig-linux-${ZIG_ARCH}-${ZIG_VERSION}" && \
+    curl -fLO "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_DIST}.tar.xz" && \
+    mkdir -p /opt/zig && \
+    tar -xf "${ZIG_DIST}.tar.xz" -C /opt/zig --strip-components=1 && \
+    rm "${ZIG_DIST}.tar.xz"
+ENV PATH="/opt/zig:${PATH}"
 
 # 一般ユーザー appuser を作成し、作業用ディレクトリを設定
 RUN addgroup -S appgroup && \

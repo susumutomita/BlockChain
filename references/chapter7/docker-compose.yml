@@ -3,13 +3,12 @@
 # 使い方:
 # 1. 起動: docker compose up -d
 # 2. コンテナでコマンド実行: docker exec -it <container_name> <command>
-#    例: docker exec -it node2 sh -c "./zig-out/bin/block_client node1 3000 'Hello'"
+#    例: docker exec -it node2 /tmp/zig-out/bin/chapter7 --connect node1:3000
 #
 # 注意: 新しいコンテナを起動するには docker compose run ではなく docker exec を使用してください
 
 # 共通設定
 x-common-config: &common-config
-  platform: linux/amd64
   volumes:
     - ./:/app
   build: .
@@ -22,7 +21,12 @@ services:
       - "3001:3000"
     environment:
       - NODE_ID=1
-    command: sh -c "./zig-out/bin/chapter7 --listen 3000"
+    command: >-
+      sh -c "zig build
+      --cache-dir /tmp/zig-cache
+      --global-cache-dir /tmp/zig-global-cache
+      --prefix /tmp/zig-out
+      && /tmp/zig-out/bin/chapter7 --listen 3000"
 
   node2:
     <<: *common-config
@@ -33,8 +37,12 @@ services:
       - NODE_ID=2
     tty: true
     stdin_open: true
-    # 長時間実行するコマンドを追加してコンテナを停止させない
-    command: sh -c "tail -f /dev/null"
+    command: >-
+      sh -c "zig build
+      --cache-dir /tmp/zig-cache
+      --global-cache-dir /tmp/zig-global-cache
+      --prefix /tmp/zig-out
+      && tail -f /dev/null"
 
   node3:
     <<: *common-config
@@ -45,5 +53,9 @@ services:
       - NODE_ID=3
     tty: true
     stdin_open: true
-    # 長時間実行するコマンドを追加してコンテナを停止させない
-    command: sh -c "tail -f /dev/null"
+    command: >-
+      sh -c "zig build
+      --cache-dir /tmp/zig-cache
+      --global-cache-dir /tmp/zig-global-cache
+      --prefix /tmp/zig-out
+      && tail -f /dev/null"

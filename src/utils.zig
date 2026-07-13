@@ -87,31 +87,6 @@ pub fn toBytesU64(value: u64) [8]u8 {
     return buf;
 }
 
-/// 任意の型をそのバイト表現に変換する汎用関数
-///
-/// この関数は、異なる型の値をそれらのバイト表現に変換する汎用的な方法を提供します。
-/// 入力型に基づいて、適切な特殊化された関数にディスパッチします。
-///
-/// 引数:
-///     T: 変換する値の型（推論される）
-///     value: バイトに変換する値
-///
-/// 戻り値:
-///     []const u8: 値を表すバイトのスライス
-///
-/// 注意:
-///     u32とu64以外の型の場合、この関数は値をバイトに変換するために@bitCastを使用します。
-pub fn toBytes(comptime T: type, value: T) []const u8 {
-    if (T == u32) {
-        return toBytesU32(@as(u32, value))[0..];
-    } else if (T == u64) {
-        return toBytesU64(@as(u64, value))[0..];
-    } else {
-        const bytes: [@sizeOf(T)]u8 = @bitCast(value);
-        return bytes[0..];
-    }
-}
-
 /// 16進数文字列をバイト配列に変換する
 ///
 /// 引数:

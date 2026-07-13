@@ -26,40 +26,30 @@ pub const EVMu256 = struct {
     /// 加算演算
     pub fn add(self: EVMu256, other: EVMu256) EVMu256 {
         var result = EVMu256{ .hi = self.hi, .lo = self.lo };
-        // 修正: Zigの最新バージョンに合わせて@addWithOverflow呼び出しを変更
         var overflow: u1 = 0;
         result.lo, overflow = @addWithOverflow(result.lo, other.lo);
-        // オーバーフローした場合は上位ビットに1を加算
-        result.hi = result.hi + other.hi + overflow;
+        result.hi = result.hi +% other.hi +% @as(u128, overflow);
         return result;
     }
 
     /// 減算演算
     pub fn sub(self: EVMu256, other: EVMu256) EVMu256 {
         var result = EVMu256{ .hi = self.hi, .lo = self.lo };
-        // 修正: Zigの最新バージョンに合わせて@subWithOverflow呼び出しを変更
         var underflow: u1 = 0;
         result.lo, underflow = @subWithOverflow(result.lo, other.lo);
-        // アンダーフローした場合は上位ビットから1を引く
-        result.hi = result.hi - other.hi - underflow;
+        result.hi = result.hi -% other.hi -% @as(u128, underflow);
         return result;
     }
 
-    /// 乗算演算（シンプル実装 - 実際には最適化が必要）
+    /// 乗算演算（mod 2^256）
     pub fn mul(self: EVMu256, other: EVMu256) EVMu256 {
-        // 簡易実装: 下位ビットのみの乗算
-        // 注：完全な256ビット乗算は複雑なため、ここでは省略
-        if (self.hi == 0 and other.hi == 0) {
-            const result_lo = self.lo * other.lo;
-            // シフト演算で上位ビットを取得
-            // 128ビットシフトを避けるために、別の方法で計算
-            // 注: u128に入らない上位ビットは無視される
-            const result_hi = @as(u128, 0); // 簡略化した実装では上位ビットは0として扱う
-            return EVMu256{ .hi = result_hi, .lo = result_lo };
-        } else {
-            // 簡易実装のため、上位ビットがある場合は詳細計算を省略
-            return EVMu256{ .hi = 0, .lo = 0 };
-        }
+        const lhs = (@as(u256, self.hi) << 128) | @as(u256, self.lo);
+        const rhs = (@as(u256, other.hi) << 128) | @as(u256, other.lo);
+        const product = lhs *% rhs;
+        return .{
+            .hi = @truncate(product >> 128),
+            .lo = @truncate(product),
+        };
     }
 
     /// 等価比較
@@ -473,15 +463,22 @@ test "EVMu256 operations" {
     try std.testing.expect(diff.hi == 0);
     try std.testing.expect(diff.lo == 50);
 
-    // アンダーフロー減算テストは省略
-    // 注：アンダーフローテストは複雑なため、このテストケースでは簡略化します
-    // 256ビット演算では - 減算で大きな値から小さな値を引く場合、
-    // 正しいアンダーフロー処理が必要です
+    // 256ビット境界ではmod 2^256でラップする
+    const max_u256 = EVMu256{ .hi = std.math.maxInt(u128), .lo = std.math.maxInt(u128) };
+    try std.testing.expect(max_u256.add(one).eql(EVMu256.zero()));
+    try std.testing.expect(EVMu256.zero().sub(one).eql(max_u256));
 
     // 乗算テスト
     const product = value_a.mul(value_b);
     try std.testing.expect(product.hi == 0);
     try std.testing.expect(product.lo == 5000);
+
+    const crosses_half = (EVMu256{ .hi = 0, .lo = @as(u128, 1) << 127 }).mul(EVMu256.fromU64(2));
+    try std.testing.expect(crosses_half.eql(.{ .hi = 1, .lo = 0 }));
+    try std.testing.expect(max_u256.mul(EVMu256.fromU64(2)).eql(.{
+        .hi = std.math.maxInt(u128),
+        .lo = std.math.maxInt(u128) - 1,
+    }));
 
     // 等価比較テスト
     try std.testing.expect(value_a.eql(value_a));
