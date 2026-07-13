@@ -9,11 +9,20 @@ mkdir -p "$ZIG_BOOK_CACHE_DIR"
 chmod 0777 "$ZIG_BOOK_CACHE_DIR"
 
 tmp_dir=$(mktemp -d)
+fixture1=/app/fixtures/block1.frame
+fixture2=/app/fixtures/block2.frame
+
 cleanup() {
   docker compose down --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT INT TERM
+
+fail() {
+  echo "P2P_ACCEPTANCE FAIL: $*" >&2
+  docker compose logs --no-color >&2 || true
+  exit 1
+}
 
 query_chain() {
   service=$1
@@ -23,49 +32,79 @@ query_chain() {
     >"$output" 2>/dev/null || true
 }
 
+send_fixture() {
+  service=$1
+  fixture=$2
+  docker compose exec -T "$service" sh -ec \
+    'cat "$1" | nc -w 2 127.0.0.1 3000 || true' \
+    sh "$fixture" >/dev/null 2>&1
+}
+
+wait_for_topology() {
+  attempt=0
+  while [ "$attempt" -lt 45 ]; do
+    node2_connections=$(docker compose logs --no-color node2 2>/dev/null |
+      grep -c 'Connected to peer:' || true)
+    node3_connections=$(docker compose logs --no-color node3 2>/dev/null |
+      grep -c 'Connected to peer:' || true)
+    if [ "$node2_connections" -ge 1 ] && [ "$node3_connections" -ge 2 ]; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  fail "three-node peer topology did not become ready"
+}
+
+wait_for_convergence() {
+  expected=$1
+  attempt=0
+  while [ "$attempt" -lt 45 ]; do
+    query_chain node1 "$tmp_dir/node1.chain"
+    query_chain node2 "$tmp_dir/node2.chain"
+    query_chain node3 "$tmp_dir/node3.chain"
+
+    node1_blocks=$(grep -c '^BLOCK:' "$tmp_dir/node1.chain" || true)
+    node2_blocks=$(grep -c '^BLOCK:' "$tmp_dir/node2.chain" || true)
+    node3_blocks=$(grep -c '^BLOCK:' "$tmp_dir/node3.chain" || true)
+
+    if [ "$node1_blocks" -eq "$expected" ] &&
+      [ "$node2_blocks" -eq "$expected" ] &&
+      [ "$node3_blocks" -eq "$expected" ] &&
+      cmp -s "$tmp_dir/node1.chain" "$tmp_dir/node2.chain" &&
+      cmp -s "$tmp_dir/node1.chain" "$tmp_dir/node3.chain"; then
+      return 0
+    fi
+
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  fail "three chains did not converge at height $expected"
+}
+
 docker compose up --build -d
 
-attempt=0
-while [ "$attempt" -lt 45 ]; do
-  query_chain node1 "$tmp_dir/node1.chain"
-  query_chain node2 "$tmp_dir/node2.chain"
-  query_chain node3 "$tmp_dir/node3.chain"
-
-  node1_blocks=$(grep -c '^BLOCK:' "$tmp_dir/node1.chain" || true)
-  node2_blocks=$(grep -c '^BLOCK:' "$tmp_dir/node2.chain" || true)
-  node3_blocks=$(grep -c '^BLOCK:' "$tmp_dir/node3.chain" || true)
-
-  if [ "$node1_blocks" -eq 2 ] &&
-    [ "$node2_blocks" -eq 2 ] &&
-    [ "$node3_blocks" -eq 2 ] &&
-    cmp -s "$tmp_dir/node1.chain" "$tmp_dir/node2.chain" &&
-    cmp -s "$tmp_dir/node1.chain" "$tmp_dir/node3.chain"; then
-    break
-  fi
-
-  attempt=$((attempt + 1))
-  sleep 1
-done
-
-if [ "$attempt" -eq 45 ]; then
-  echo "P2P_ACCEPTANCE FAIL: three chains did not converge" >&2
-  docker compose logs --no-color >&2
-  exit 1
-fi
+# Mining difficulty 2 has unbounded wall-clock time. The acceptance gate sends
+# fixed, already-mined frames so CI verifies networking and consensus rules
+# without depending on how quickly a particular runner finds a nonce.
+wait_for_topology
+send_fixture node1 "$fixture1"
+wait_for_convergence 1
+send_fixture node3 "$fixture2"
+wait_for_convergence 2
 
 for service in node1 node2 node3; do
-  added=$(docker compose logs --no-color "$service" | grep -c 'Added new block index=2' || true)
-  if [ "$added" -ne 1 ]; then
-    echo "P2P_ACCEPTANCE FAIL: $service added index=2 $added times" >&2
-    docker compose logs --no-color "$service" >&2
-    exit 1
-  fi
+  for index in 1 2; do
+    added=$(docker compose logs --no-color "$service" |
+      grep -c "Added new block index=$index" || true)
+    if [ "$added" -ne 1 ]; then
+      fail "$service added index=$index $added times"
+    fi
+  done
 done
 
 if ! docker compose logs --no-color | grep -q 'BLOCK_REJECTED reason=duplicate'; then
-  echo "P2P_ACCEPTANCE FAIL: triangular gossip did not exercise duplicate rejection" >&2
-  docker compose logs --no-color >&2
-  exit 1
+  fail "triangular gossip did not exercise duplicate rejection"
 fi
 
 cp "$tmp_dir/node1.chain" "$tmp_dir/before-invalid.chain"

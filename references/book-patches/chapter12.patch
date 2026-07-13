@@ -200,19 +200,18 @@ index 0000000000000000000000000000000000000000..e5b47a929ae6663b817a65f064178d54
 +    }
 +}
 diff --git a/docker-compose.yml b/docker-compose.yml
-index 2dedb1df5786e57b7aa18fda1321e33b20342944..5de748b4f9873576f6124580409256ca81777a4e 100644
+index c6d9e015eb8bb2f0ed7596708c6b81b3638d259d..5de748b4f9873576f6124580409256ca81777a4e 100644
 --- a/docker-compose.yml
 +++ b/docker-compose.yml
-@@ -1,63 +1,50 @@
+@@ -1,59 +1,50 @@
 -# 第8章から引き継ぐ3ノードP2P構成（第11章チェックポイント用）
 +# Docker Compose構成ファイル - ブロックチェーンノードネットワーク
  #
  # 使い方:
 -# 1. 起動: docker compose up -d
 -# 2. ログ確認: docker compose logs -f
--# node1がseedブロックを作り、後発のnode3がGET_CHAINで追いついた後、
--# node3がgossipブロックを作ります。node3はnode1/node2の両方へ接続するため、
--# 重複ブロックが戻ってきても各チェインへ1回だけ追加されることを確認できます。
+-# このComposeは3ノードの接続だけを作ります。ブロック生成を標準入力の
+-# タイミングに結び付けず、検証側から決定的な入力を送れる構成にします。
 +# 1. node1をビルドして起動: docker compose up --build -d node1
 +# 2. ログを確認: docker compose logs -f node1
  
@@ -236,8 +235,7 @@ index 2dedb1df5786e57b7aa18fda1321e33b20342944..5de748b4f9873576f6124580409256ca
 -      --cache-dir /book-cache/$$NODE_ID/local
 -      --global-cache-dir /book-cache/global
 -      --prefix /book-cache/$$NODE_ID/out
--      && (sleep 4; printf 'seed\n'; sleep 60)
--      | /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000"
+-      && exec /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000"
 +      --cache-dir /tmp/zig-cache
 +      --global-cache-dir /tmp/zig-global-cache
 +      --prefix /tmp/zig-out
@@ -257,7 +255,7 @@ index 2dedb1df5786e57b7aa18fda1321e33b20342944..5de748b4f9873576f6124580409256ca
 -      --cache-dir /book-cache/$$NODE_ID/local
 -      --global-cache-dir /book-cache/global
 -      --prefix /book-cache/$$NODE_ID/out
--      && /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000 --connect node1:3000"
+-      && exec /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000 --connect node1:3000"
 +    tty: true
 +    stdin_open: true
 +    # 長時間実行するコマンドを追加してコンテナを停止させない
@@ -277,9 +275,7 @@ index 2dedb1df5786e57b7aa18fda1321e33b20342944..5de748b4f9873576f6124580409256ca
 -      --cache-dir /book-cache/$$NODE_ID/local
 -      --global-cache-dir /book-cache/global
 -      --prefix /book-cache/$$NODE_ID/out
--      && sleep 8
--      && (sleep 3; printf 'gossip\n'; sleep 60)
--      | /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000
+-      && exec /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000
 -      --connect node1:3000 --connect node2:3000"
 +    tty: true
 +    stdin_open: true

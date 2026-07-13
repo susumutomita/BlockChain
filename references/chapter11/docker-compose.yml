@@ -3,9 +3,8 @@
 # 使い方:
 # 1. 起動: docker compose up -d
 # 2. ログ確認: docker compose logs -f
-# node1がseedブロックを作り、後発のnode3がGET_CHAINで追いついた後、
-# node3がgossipブロックを作ります。node3はnode1/node2の両方へ接続するため、
-# 重複ブロックが戻ってきても各チェインへ1回だけ追加されることを確認できます。
+# このComposeは3ノードの接続だけを作ります。ブロック生成を標準入力の
+# タイミングに結び付けず、検証側から決定的な入力を送れる構成にします。
 
 # 共通設定
 x-common-config: &common-config
@@ -26,8 +25,7 @@ services:
       --cache-dir /book-cache/$$NODE_ID/local
       --global-cache-dir /book-cache/global
       --prefix /book-cache/$$NODE_ID/out
-      && (sleep 4; printf 'seed\n'; sleep 60)
-      | /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000"
+      && exec /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000"
 
   node2:
     <<: *common-config
@@ -42,7 +40,7 @@ services:
       --cache-dir /book-cache/$$NODE_ID/local
       --global-cache-dir /book-cache/global
       --prefix /book-cache/$$NODE_ID/out
-      && /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000 --connect node1:3000"
+      && exec /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000 --connect node1:3000"
 
   node3:
     <<: *common-config
@@ -57,7 +55,5 @@ services:
       --cache-dir /book-cache/$$NODE_ID/local
       --global-cache-dir /book-cache/global
       --prefix /book-cache/$$NODE_ID/out
-      && sleep 8
-      && (sleep 3; printf 'gossip\n'; sleep 60)
-      | /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000
+      && exec /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000
       --connect node1:3000 --connect node2:3000"
