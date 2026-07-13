@@ -21,6 +21,83 @@ pub var peer_list = std.ArrayList(types.Peer).init(std.heap.page_allocator);
 pub var pending_blocks = std.ArrayList(types.Block).init(std.heap.page_allocator);
 pub var pending_evm_txs = std.ArrayList([]const u8).init(std.heap.page_allocator);
 
+var peer_list_mutex = std.Thread.Mutex{};
+var pending_mutex = std.Thread.Mutex{};
+// 改行までのTCP frameとfull-chain応答を直列化する専用mutex。
+// blockchain/peer/pendingの状態mutexを保持したまま取得してはいけない。
+var frame_write_mutex = std.Thread.Mutex{};
+
+fn addPeer(peer: types.Peer) !void {
+    peer_list_mutex.lock();
+    defer peer_list_mutex.unlock();
+    try peer_list.append(peer);
+}
+
+fn copyPeerSnapshot() ![]types.Peer {
+    peer_list_mutex.lock();
+    defer peer_list_mutex.unlock();
+    return std.heap.page_allocator.dupe(types.Peer, peer_list.items);
+}
+
+fn queuePendingBlock(block: types.Block) !void {
+    pending_mutex.lock();
+    defer pending_mutex.unlock();
+    try pending_blocks.append(block);
+}
+
+fn queuePendingEvmTx(payload: []const u8) !void {
+    pending_mutex.lock();
+    defer pending_mutex.unlock();
+    try pending_evm_txs.append(payload);
+}
+
+fn takePendingBlocks() ![]types.Block {
+    pending_mutex.lock();
+    defer pending_mutex.unlock();
+    const snapshot = try std.heap.page_allocator.dupe(types.Block, pending_blocks.items);
+    pending_blocks.clearRetainingCapacity();
+    return snapshot;
+}
+
+fn takePendingEvmTxs() ![][]const u8 {
+    pending_mutex.lock();
+    defer pending_mutex.unlock();
+    const snapshot = try std.heap.page_allocator.dupe([]const u8, pending_evm_txs.items);
+    pending_evm_txs.clearRetainingCapacity();
+    return snapshot;
+}
+
+fn flushPending(peer: types.Peer) !void {
+    // queue mutexを解放してからTCP frame lockを取る。
+    const blocks = try takePendingBlocks();
+    defer std.heap.page_allocator.free(blocks);
+    if (blocks.len > 0) {
+        std.log.info("Flushing {d} pending blocks to new peer {any}", .{ blocks.len, peer.address });
+    }
+    for (blocks) |block| {
+        sendBlock(peer, block) catch |err| {
+            std.log.err("Failed to flush queued block index={d}: {any}", .{ block.index, err });
+        };
+    }
+
+    const evm_payloads = try takePendingEvmTxs();
+    defer std.heap.page_allocator.free(evm_payloads);
+    if (evm_payloads.len > 0) {
+        std.log.info("Flushing {d} pending EVM transactions to new peer {any}", .{ evm_payloads.len, peer.address });
+    }
+    for (evm_payloads) |payload| {
+        sendEvmTx(peer.stream.writer(), peer.address, payload) catch |err| {
+            std.log.err("Failed to flush queued EVM transaction: {any}", .{err});
+        };
+        std.heap.page_allocator.free(payload);
+    }
+}
+
+/// 1つの改行区切りP2Pフレームとして受信できる最大サイズ。
+/// Solidityのcreation bytecodeとruntime bytecodeを含むデプロイブロックは
+/// 4 KiBを超えるため、学習用コントラクトを余裕を持って同期できる64 KiBとする。
+pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+
 /// リッスンソケットを開始し、着信接続を受け入れる
 ///
 /// 指定されたポートで着信接続を待機するTCPサーバーを作成します。
@@ -41,31 +118,9 @@ pub fn listenLoop(port: u16) !void {
     while (true) {
         const conn = try listener.accept();
         const peer = types.Peer{ .address = conn.address, .stream = conn.stream };
-        try peer_list.append(peer);
+        try addPeer(peer);
         std.log.info("Accepted connection from: {any}", .{conn.address});
-
-        // 待機中のブロックを新しいピアに送信
-        if (pending_blocks.items.len > 0) {
-            std.log.info("Flushing {d} pending blocks to new peer {any}", .{ pending_blocks.items.len, conn.address });
-            for (pending_blocks.items) |blk| {
-                sendBlock(peer, blk) catch |err| {
-                    std.log.err("Failed to flush queued block index={d}: {any}", .{ blk.index, err });
-                };
-            }
-            pending_blocks.clearRetainingCapacity();
-        }
-
-        // 待機中のEVMトランザクションを新しいピアに送信
-        if (pending_evm_txs.items.len > 0) {
-            std.log.info("Flushing {d} pending EVM transactions to new peer {any}", .{ pending_evm_txs.items.len, conn.address });
-            for (pending_evm_txs.items) |payload| {
-                sendEvmTx(peer.stream.writer(), peer.address, payload) catch |err| {
-                    std.log.err("Failed to flush queued EVM transaction: {any}", .{err});
-                    // エラーが発生しても次のペイロードへ
-                };
-            }
-            pending_evm_txs.clearRetainingCapacity();
-        }
+        try flushPending(peer);
 
         // ピアとの通信を処理するスレッドを生成
         _ = try std.Thread.spawn(.{}, peerCommunicationLoop, .{peer});
@@ -93,30 +148,8 @@ pub fn connectToPeer(addr: std.net.Address) !void {
 
         std.log.info("Connected to peer: {any}", .{addr});
         const peer = types.Peer{ .address = addr, .stream = sock };
-        try peer_list.append(peer);
-
-        // 待機中のブロックを新しいピアに送信
-        if (pending_blocks.items.len > 0) {
-            std.log.info("Flushing {d} pending blocks to new peer {any}", .{ pending_blocks.items.len, addr });
-            for (pending_blocks.items) |blk| {
-                sendBlock(peer, blk) catch |err| {
-                    std.log.err("Failed to flush queued block index={d}: {any}", .{ blk.index, err });
-                };
-            }
-            pending_blocks.clearRetainingCapacity();
-        }
-
-        // 待機中のEVMトランザクションを新しいピアに送信
-        if (pending_evm_txs.items.len > 0) {
-            std.log.info("Flushing {d} pending EVM transactions to new peer {any}", .{ pending_evm_txs.items.len, addr });
-            for (pending_evm_txs.items) |payload| {
-                sendEvmTx(peer.stream.writer(), peer.address, payload) catch |err| {
-                    std.log.err("Failed to flush queued EVM transaction: {any}", .{err});
-                    // エラーが発生しても次のペイロードへ
-                };
-            }
-            pending_evm_txs.clearRetainingCapacity();
-        }
+        try addPeer(peer);
+        try flushPending(peer);
 
         // 新しく接続されたピアからチェーン同期をリクエスト
         try requestChain(peer);
@@ -138,6 +171,8 @@ pub fn connectToPeer(addr: std.net.Address) !void {
 /// エラー:
 ///     ストリーム書き込みエラー
 fn requestChain(peer: types.Peer) !void {
+    frame_write_mutex.lock();
+    defer frame_write_mutex.unlock();
     try peer.stream.writer().writeAll("GET_CHAIN\n");
     std.log.info("Requested chain from {any}", .{peer.address});
 }
@@ -153,49 +188,35 @@ fn requestChain(peer: types.Peer) !void {
 ///     from_peer: ブロードキャストから除外するオプションのソースピア
 pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
     const payload = parser.serializeBlock(blk) catch return;
+    defer std.heap.page_allocator.free(payload);
     var sent = false;
     var available_peers: usize = 0;
 
-    for (peer_list.items) |peer| {
+    const peers = copyPeerSnapshot() catch |err| {
+        std.log.err("Failed to snapshot peers for block broadcast: {any}", .{err});
+        if (from_peer == null) queuePendingBlock(blk) catch {};
+        return;
+    };
+    defer std.heap.page_allocator.free(peers);
+
+    for (peers) |peer| {
         // 指定された場合、送信元のピアをスキップ
         if (from_peer) |sender| {
             if (peer.address.getPort() == sender.address.getPort()) continue;
         }
 
         available_peers += 1;
-        var writer = peer.stream.writer();
-        var send_success = true;
-
-        // 各部分を個別に送信し、エラーがあればcatchする
-        writer.writeAll("BLOCK:") catch |err| {
+        writeBlockFrame(peer, payload) catch |err| {
             std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
-            send_success = false;
             continue;
         };
-
-        if (send_success) {
-            writer.writeAll(payload) catch |err| {
-                std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
-                send_success = false;
-                continue;
-            };
-        }
-
-        if (send_success) {
-            writer.writeAll("\n") catch |err| {
-                std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
-                send_success = false;
-                continue;
-            };
-        }
-
-        if (send_success) sent = true;
+        sent = true;
     }
 
     // ローカル生成ブロックだけを再送キューへ入れる。
     // 受信ブロックを送信元以外へ中継できない場合は、同期との二重配信を避ける。
     if (from_peer == null and (available_peers == 0 or !sent)) {
-        pending_blocks.append(blk) catch |err| {
+        queuePendingBlock(blk) catch |err| {
             std.log.err("Error adding block to pending queue: {any}", .{err});
             return;
         };
@@ -213,11 +234,18 @@ pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
 ///     シリアル化またはネットワークエラー
 pub fn sendBlock(peer: types.Peer, blk: types.Block) !void {
     const payload = try parser.serializeBlock(blk);
+    defer std.heap.page_allocator.free(payload);
+    try writeBlockFrame(peer, payload);
+    std.log.info("Sent block index={d} to {any}", .{ blk.index, peer.address });
+}
+
+fn writeBlockFrame(peer: types.Peer, payload: []const u8) !void {
+    frame_write_mutex.lock();
+    defer frame_write_mutex.unlock();
     var writer = peer.stream.writer();
     try writer.writeAll("BLOCK:");
     try writer.writeAll(payload);
     try writer.writeAll("\n");
-    std.log.info("Sent block index={d} to {any}", .{ blk.index, peer.address });
 }
 
 /// 指定されたピアにEVMトランザクションを送信する
@@ -229,6 +257,8 @@ pub fn sendBlock(peer: types.Peer, blk: types.Block) !void {
 /// エラー:
 ///     ストリーム書き込みエラー
 fn sendEvmTx(writer: anytype, address: std.net.Address, payload: []const u8) !void {
+    frame_write_mutex.lock();
+    defer frame_write_mutex.unlock();
     writer.writeAll("EVM_TX:") catch |err| {
         std.log.err("Error sending EVM_TX to peer {any}: {any}", .{ address, err });
         return err;
@@ -261,10 +291,12 @@ pub fn broadcastEvmTransaction(tx: types.Transaction) !void {
     std.log.debug("生成されたJSONペイロード: {s}", .{payload});
 
     var sent = false;
-    const peer_count = peer_list.items.len;
+    const peers = try copyPeerSnapshot();
+    defer allocator.free(peers);
+    const peer_count = peers.len;
     std.log.info("接続済みピア数: {d}", .{peer_count});
 
-    for (peer_list.items, 0..) |peer, idx| {
+    for (peers, 0..) |peer, idx| {
         std.log.info("ピア {d}/{d} にEVMトランザクションを送信 [行:{d}]: {}", .{ idx + 1, peer_count, @src().line, peer.address });
         sendEvmTx(peer.stream.writer(), peer.address, payload) catch |err| {
             std.log.err("Error broadcasting EVM_TX to peer {any}: {any} (at 行:{d})", .{ peer.address, err, @src().line });
@@ -275,7 +307,9 @@ pub fn broadcastEvmTransaction(tx: types.Transaction) !void {
     }
 
     if (!sent) {
-        try pending_evm_txs.append(try allocator.dupe(u8, payload));
+        const queued_payload = try allocator.dupe(u8, payload);
+        errdefer allocator.free(queued_payload);
+        try queuePendingEvmTx(queued_payload);
         std.log.warn("No peers available or sending failed for all peers. EVM_TX queued.", .{});
     }
 }
@@ -291,31 +325,38 @@ pub fn broadcastEvmTransaction(tx: types.Transaction) !void {
 /// エラー:
 ///     シリアル化またはネットワークエラー
 pub fn sendFullChain(peer: types.Peer) !void {
-    std.log.info("Sending full chain (height={d}) to {any}", .{ blockchain.chain_store.items.len, peer.address });
+    // blockchain mutex内ではコピーだけ行い、送信lockとは重ねない。
+    const chain = try blockchain.copyChainSnapshot(std.heap.page_allocator);
+    defer std.heap.page_allocator.free(chain);
+    const contract_snapshot = try blockchain.copyContractSnapshot(std.heap.page_allocator);
+    defer std.heap.page_allocator.free(contract_snapshot);
+    std.log.info("Sending full chain (height={d}) to {any}", .{ chain.len, peer.address });
 
     // チェーン送信前に現在のコントラクト状態をログに出力
-    var contract_count: usize = 0;
-    var contract_it = blockchain.contract_storage.iterator();
-    while (contract_it.next()) |entry| {
-        contract_count += 1;
-        std.log.info("Contract in storage before chain sync: address={s}, code_length={d}", .{ entry.key_ptr.*, entry.value_ptr.*.len });
+    for (contract_snapshot) |entry| {
+        std.log.info("Contract in storage before chain sync: address={s}, code_length={d}", .{ entry.address, entry.code.len });
     }
-    std.log.info("Current contract storage has {d} contracts", .{contract_count});
+    std.log.info("Current contract storage has {d} contracts", .{contract_snapshot.len});
 
     // チェーン内の各ブロックのコントラクト情報をチェック
-    for (blockchain.chain_store.items) |block| {
+    for (chain) |block| {
         if (block.contracts) |contracts| {
             std.log.info("Block {d} contains {d} contracts to be sent", .{ block.index, contracts.count() });
         }
     }
 
+    frame_write_mutex.lock();
+    defer frame_write_mutex.unlock();
     var writer = peer.stream.writer();
 
-    for (blockchain.chain_store.items) |block| {
-        const block_json = try parser.serializeBlock(block);
-        try writer.writeAll("BLOCK:");
-        try writer.writeAll(block_json);
-        try writer.writeAll("\n"); // メッセージフレーミングのための改行
+    for (chain) |block| {
+        {
+            const block_json = try parser.serializeBlock(block);
+            defer std.heap.page_allocator.free(block_json);
+            try writer.writeAll("BLOCK:");
+            try writer.writeAll(block_json);
+            try writer.writeAll("\n"); // メッセージフレーミングのための改行
+        }
     }
 
     // チェーン送信の最後に同期完了のメッセージを送る
@@ -329,6 +370,8 @@ pub fn sendFullChain(peer: types.Peer) !void {
 /// 引数:
 ///     target: 削除するピア
 fn removePeerFromList(target: types.Peer) void {
+    peer_list_mutex.lock();
+    defer peer_list_mutex.unlock();
     var i: usize = 0;
     while (i < peer_list.items.len) : (i += 1) {
         if (peer_list.items[i].address.getPort() == target.address.getPort()) {
@@ -352,7 +395,7 @@ fn removePeerFromList(target: types.Peer) void {
 fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
     if (std.mem.startsWith(u8, msg, "BLOCK:")) {
         // BLOCKメッセージを処理
-        const blk = parser.parseBlockJson(msg[6..]) catch |err| {
+        var blk = parser.parseBlockJson(msg[6..]) catch |err| {
             std.log.err("Error parsing block from {any}: {any}", .{ from_peer.address, err });
             return;
         };
@@ -366,11 +409,14 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
             }
         }
 
-        // チェーンにブロックを追加
-        blockchain.addBlock(blk);
-
-        // 他のピアにブロックをブロードキャスト
-        broadcastBlock(blk, from_peer);
+        // 検証を通り、実際に追加できたブロックだけを中継する。
+        const add_result = blockchain.addBlock(blk);
+        if (add_result == .added) {
+            broadcastBlock(blk, from_peer);
+        } else {
+            std.log.warn("Received block was not relayed: result={s}, index={d}", .{ @tagName(add_result), blk.index });
+            parser.deinitParsedBlock(&blk);
+        }
     } else if (std.mem.startsWith(u8, msg, "GET_CHAIN")) {
         // GET_CHAINメッセージを処理
         std.log.info("Received GET_CHAIN from {any}", .{from_peer.address});
@@ -380,16 +426,17 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
         std.log.info("Chain synchronization completed with peer {any}", .{from_peer.address});
 
         // コントラクトストレージの状態をログに出力（デバッグ用）
-        var contract_count: usize = 0;
-        var it = blockchain.contract_storage.iterator();
-        while (it.next()) |entry| {
-            contract_count += 1;
-            std.log.info("Contract in storage after sync: address={s}, code_length={d}", .{ entry.key_ptr.*, entry.value_ptr.*.len });
+        const contract_snapshot = try blockchain.copyContractSnapshot(std.heap.page_allocator);
+        defer std.heap.page_allocator.free(contract_snapshot);
+        for (contract_snapshot) |entry| {
+            std.log.info("Contract in storage after sync: address={s}, code_length={d}", .{ entry.address, entry.code.len });
         }
-        std.log.info("Current contract storage has {d} contracts", .{contract_count});
+        std.log.info("Current contract storage has {d} contracts", .{contract_snapshot.len});
 
         // チェーン内の全ブロックを検査してコントラクトを探す（デバッグ用）
-        for (blockchain.chain_store.items) |block| {
+        const chain_snapshot = try blockchain.copyChainSnapshot(std.heap.page_allocator);
+        defer std.heap.page_allocator.free(chain_snapshot);
+        for (chain_snapshot) |block| {
             if (block.contracts) |contracts| {
                 std.log.info("Block {d} contains {d} contracts", .{ block.index, contracts.count() });
                 var block_contract_it = contracts.iterator();
@@ -400,20 +447,21 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
         }
 
         // コントラクト呼び出しがペンディングの場合、実行する
-        if (main.global_call_pending) {
-            std.log.info("Executing pending contract call to {s}", .{main.global_contract_address});
+        if (main.getPendingCall()) |pending_call| {
+            // ここから先は1回取得したimmutable snapshotだけを使う。
+            std.log.info("Executing pending contract call to {s}", .{pending_call.contract_address});
 
             // チェーン内の全ブロックを検査して特定のコントラクトを探す
-            std.log.info("Searching for contract at address {s} in all blocks...", .{main.global_contract_address});
+            std.log.info("Searching for contract at address {s} in all blocks...", .{pending_call.contract_address});
             var found_in_block = false;
-            for (blockchain.chain_store.items) |block| {
+            for (chain_snapshot) |block| {
                 if (block.contracts) |contracts| {
-                    if (contracts.get(main.global_contract_address)) |code| {
+                    if (contracts.get(pending_call.contract_address)) |code| {
                         std.log.info("Contract found in block {d}, but might not be in storage. Code length: {d}", .{ block.index, code.len });
                         found_in_block = true;
 
                         // コントラクトコードが見つかったら、明示的にストレージに追加
-                        blockchain.contract_storage.put(main.global_contract_address, code) catch |err| {
+                        blockchain.putContractCode(pending_call.contract_address, code) catch |err| {
                             std.log.err("Failed to add contract to storage: {any}", .{err});
                         };
                     }
@@ -425,37 +473,38 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
             }
 
             // すでに同期されたチェーン上でコントラクトが存在するか確認
-            if (blockchain.contract_storage.get(main.global_contract_address)) |contract_code| {
-                std.log.info("Contract found at address {s}, executing call... (contract code length: {d} bytes)", .{ main.global_contract_address, contract_code.len });
+            if (blockchain.getContractCode(pending_call.contract_address)) |contract_code| {
+                std.log.info("Contract found at address {s}, executing call... (contract code length: {d} bytes)", .{ pending_call.contract_address, contract_code.len });
 
                 // トランザクションを作成
                 var tx = types.Transaction{
-                    .sender = main.global_sender_address, // 動的な送信者アドレスを使用
-                    .receiver = main.global_contract_address,
+                    .sender = pending_call.sender_address,
+                    .receiver = pending_call.contract_address,
                     .amount = 0,
                     .tx_type = 2, // コントラクト呼び出し
-                    .evm_data = main.global_evm_input,
-                    .gas_limit = main.global_gas_limit,
+                    .evm_data = pending_call.evm_input,
+                    .gas_limit = pending_call.gas_limit,
                     .gas_price = 10, // デフォルトのガス価格を設定
                 };
 
                 // EVMトランザクションを直接処理
                 const result = blockchain.processEvmTransaction(&tx) catch |err| {
                     std.log.err("Error executing contract call after chain sync: {any}", .{err});
-                    main.global_call_pending = false; // エラーでもフラグを下ろす
+                    main.clearPendingCall(pending_call);
                     return;
                 };
+                defer std.heap.page_allocator.free(result);
 
                 // 処理結果をログに出力
                 blockchain.logEvmResult(&tx, result) catch |err| {
                     std.log.err("Error logging EVM result: {any}", .{err});
                 };
 
-                // フラグを下ろす
-                main.global_call_pending = false;
+                main.clearPendingCall(pending_call);
                 std.log.info("Contract call executed successfully after chain synchronization", .{});
             } else {
-                std.log.warn("Contract not found at address {s} after chain sync", .{main.global_contract_address});
+                // 見つからない場合は従来どおり保持し、次の同期完了で再試行する。
+                std.log.warn("Contract not found at address {s} after chain sync", .{pending_call.contract_address});
             }
         }
     } else if (std.mem.startsWith(u8, msg, "EVM_TX:")) {
@@ -469,6 +518,7 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
             std.log.err("Error parsing EVM transaction from {any}: {any} (at 行:{d})", .{ from_peer.address, err, @src().line });
             return;
         };
+        defer parser.deinitParsedTransaction(&evm_tx);
         std.log.info("解析完了: トランザクションタイプ={d}, 送信者={s}, 受信者={s}", .{ evm_tx.tx_type, evm_tx.sender, evm_tx.receiver });
 
         // EVMトランザクションを処理
@@ -477,6 +527,9 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
             std.log.err("Error processing EVM transaction from {any}: {any} (at 行:{d})", .{ from_peer.address, err, @src().line });
             return;
         };
+        // デプロイ結果は新しいブロックのcontract codeとしてチェーンへ移譲される。
+        // call結果だけはこのハンドラが所有する。
+        defer if (evm_tx.tx_type != 1) std.heap.page_allocator.free(result);
         std.log.info("処理完了: EVMトランザクション処理結果", .{});
 
         // 処理結果をログに出力
@@ -500,6 +553,17 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
 ///
 /// 注意:
 ///     この関数は独自のスレッドで無期限に実行されます
+fn createMinedInputBlock(line: []const u8, last_block: types.Block) !types.Block {
+    // readUntilDelimiterOrEofが返すsliceは次の入力で上書きされる。
+    // 採掘済みchainが入力バッファの寿命に依存しないよう、block自身が保持する。
+    const owned_line = try std.heap.page_allocator.dupe(u8, line);
+    errdefer std.heap.page_allocator.free(owned_line);
+
+    var new_block = blockchain.createBlock(owned_line, last_block);
+    blockchain.mineBlock(&new_block, 2);
+    return new_block;
+}
+
 pub fn textInputLoop() !void {
     var reader = std.io.getStdIn().reader();
     var buf: [256]u8 = undefined;
@@ -509,19 +573,28 @@ pub fn textInputLoop() !void {
         const maybe_line = reader.readUntilDelimiterOrEof(buf[0..], '\n') catch null;
 
         if (maybe_line) |line| {
-            // チェーンが空の場合は最新のブロックを取得するか、ジェネシスを作成
-            const last_block = if (blockchain.chain_store.items.len == 0)
-                try blockchain.createTestGenesisBlock(std.heap.page_allocator)
-            else
-                blockchain.chain_store.items[blockchain.chain_store.items.len - 1];
+            // 空チェーンには決定的ジェネシスを先に追加・伝播する。
+            if (blockchain.getChainHeight() == 0) {
+                const genesis = try blockchain.createTestGenesisBlock(std.heap.page_allocator);
+                if (blockchain.addBlock(genesis) == .added) {
+                    broadcastBlock(genesis, null);
+                } else {
+                    return error.GenesisRejected;
+                }
+            }
+
+            const last_block = blockchain.getChainTip() orelse return error.MissingGenesis;
 
             // 新しいブロックを作成してマイニング
-            var new_block = blockchain.createBlock(line, last_block);
-            blockchain.mineBlock(&new_block, 2); // 難易度2でマイニング
-            blockchain.addBlock(new_block);
-
-            // 作成したブロックをブロードキャスト
-            broadcastBlock(new_block, null);
+            var new_block = try createMinedInputBlock(line, last_block);
+            // 実際にローカルチェーンへ追加できた場合だけブロードキャストする。
+            if (blockchain.addBlock(new_block) == .added) {
+                broadcastBlock(new_block, null);
+            } else {
+                new_block.transactions.deinit();
+                std.heap.page_allocator.free(new_block.data);
+                std.log.warn("Locally mined block was rejected before broadcast", .{});
+            }
         } else break;
     }
 }
@@ -574,7 +647,7 @@ fn peerCommunicationLoop(peer: types.Peer) !void {
     }
 
     var reader = peer.stream.reader();
-    var buf: [4096]u8 = undefined; // 受信メッセージ用のバッファ
+    var buf: [MAX_FRAME_BYTES]u8 = undefined; // 受信メッセージ用のバッファ
     var total_bytes: usize = 0;
 
     while (true) {
@@ -663,6 +736,20 @@ test "block broadcast queues exactly once when no peer is available" {
     try std.testing.expectEqual(block.index, pending_blocks.items[0].index);
 }
 
+test "locally mined block owns input after the source buffer is reused" {
+    var source = [_]u8{ 'a', 'l', 'p', 'h', 'a' };
+    var genesis = try blockchain.createTestGenesisBlock(std.testing.allocator);
+    defer genesis.transactions.deinit();
+
+    var block = try createMinedInputBlock(source[0..], genesis);
+    defer block.transactions.deinit();
+    defer std.heap.page_allocator.free(block.data);
+
+    @memcpy(source[0..], "bravo");
+    try std.testing.expectEqualStrings("alpha", block.data);
+    try std.testing.expect(blockchain.verifyBlockPow(&block));
+}
+
 test "relayed block is not queued when only the source peer exists" {
     peer_list.clearRetainingCapacity();
     pending_blocks.clearRetainingCapacity();
@@ -687,6 +774,37 @@ test "relayed block is not queued when only the source peer exists" {
 
     broadcastBlock(block, source);
 
+    try std.testing.expectEqual(@as(usize, 0), pending_blocks.items.len);
+}
+
+test "invalid received block is neither added nor relayed" {
+    peer_list.clearRetainingCapacity();
+    pending_blocks.clearRetainingCapacity();
+    blockchain.chain_store.clearRetainingCapacity();
+    defer pending_blocks.clearRetainingCapacity();
+    defer blockchain.chain_store.clearRetainingCapacity();
+
+    const genesis = try blockchain.createTestGenesisBlock(std.heap.page_allocator);
+    defer genesis.transactions.deinit();
+    try std.testing.expectEqual(blockchain.AddBlockResult.added, blockchain.addBlock(genesis));
+
+    var tampered = blockchain.createBlock("before tamper", genesis);
+    defer tampered.transactions.deinit();
+    blockchain.mineBlock(&tampered, 2);
+    tampered.data = "after tamper";
+
+    const payload = try parser.serializeBlock(tampered);
+    defer std.heap.page_allocator.free(payload);
+    const message = try std.fmt.allocPrint(std.testing.allocator, "BLOCK:{s}", .{payload});
+    defer std.testing.allocator.free(message);
+
+    const source = types.Peer{
+        .address = try std.net.Address.parseIp4("127.0.0.1", 9000),
+        .stream = undefined,
+    };
+    try handleMessage(message, source);
+
+    try std.testing.expectEqual(@as(usize, 1), blockchain.chain_store.items.len);
     try std.testing.expectEqual(@as(usize, 0), pending_blocks.items.len);
 }
 
@@ -744,13 +862,11 @@ test "EVM transaction queuing and flushing" {
         try sendEvmTx(mock_writer_instance, dummy_address, payload_to_flush);
     }
 
-    // The actual code uses pending_evm_txs.clearRetainingCapacity() which doesn't free items.
-    // Items are freed because they are allocator.dupe'd into the queue.
-    // So, here we must free them manually as they are popped.
+    // 実装と同様、送信後にqueueが所有する複製payloadを解放する。
     while (pending_evm_txs.pop()) |item| {
         std.heap.page_allocator.free(item);
     }
-    pending_evm_txs.clearRetainingCapacity(); // Match the main code's behavior
+    pending_evm_txs.clearRetainingCapacity();
 
     // Assertions after flushing:
     // 1. Assert that pending_evm_txs is now empty
@@ -762,6 +878,49 @@ test "EVM transaction queuing and flushing" {
     try expected_sent_data_to_peer.writer().print("EVM_TX:{s}\n", .{expected_payload_tx1});
 
     try std.testing.expect(std.mem.eql(u8, expected_sent_data_to_peer.items, mock_stream_data_buffer.items));
+}
+
+test "Solidity deployment block fits in one P2P frame" {
+    const allocator = std.testing.allocator;
+
+    // SimpleAdder.sol相当のcreation/runtime bytecodeを同じブロックへ保持すると、
+    // JSONではそれぞれHEX化され、従来の4 KiB受信バッファを超える。
+    const creation_code = [_]u8{0xab} ** 1300;
+    const runtime_code = [_]u8{0xcd} ** 1300;
+
+    var transactions = std.ArrayList(types.Transaction).init(allocator);
+    defer transactions.deinit();
+    try transactions.append(.{
+        .sender = "0x000000000000000000000000000000000000dead",
+        .receiver = "0x000000000000000000000000000000000000abcd",
+        .amount = 0,
+        .tx_type = 1,
+        .evm_data = &creation_code,
+        .gas_limit = 3_000_000,
+        .gas_price = 10,
+    });
+
+    var contracts = std.StringHashMap([]const u8).init(allocator);
+    defer contracts.deinit();
+    try contracts.put("0x000000000000000000000000000000000000abcd", &runtime_code);
+
+    const block = types.Block{
+        .index = 1,
+        .timestamp = 1_672_531_200,
+        .prev_hash = [_]u8{0} ** 32,
+        .transactions = transactions,
+        .nonce = 0,
+        .data = "Contract Deployment",
+        .hash = [_]u8{0} ** 32,
+        .contracts = contracts,
+    };
+
+    const payload = try parser.serializeBlock(block);
+    defer std.heap.page_allocator.free(payload);
+
+    const framed_len = "BLOCK:".len + payload.len + 1; // 末尾の改行を含む
+    try std.testing.expect(framed_len > 4096);
+    try std.testing.expect(framed_len <= MAX_FRAME_BYTES);
 }
 
 test "EVM transaction JSON format consistency (serialize/parse)" {
@@ -791,11 +950,8 @@ test "EVM transaction JSON format consistency (serialize/parse)" {
     defer allocator.free(payload);
 
     // 3. Parse the payload
-    const parsed_tx = try parser.parseTransactionJson(payload);
-    // Defer freeing fields of parsed_tx
-    defer std.heap.page_allocator.free(parsed_tx.sender);
-    defer std.heap.page_allocator.free(parsed_tx.receiver);
-    defer if (parsed_tx.evm_data) |d| std.heap.page_allocator.free(d);
+    var parsed_tx = try parser.parseTransactionJson(payload);
+    defer parser.deinitParsedTransaction(&parsed_tx);
 
     // 4. Assertions
     // Using expectEqualStrings for direct comparison. Assumes null termination or exact length match.

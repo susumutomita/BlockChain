@@ -15,13 +15,48 @@ const evm = @import("evm.zig");
 const evm_types = @import("evm_types.zig");
 const utils = @import("utils.zig");
 
-// グローバル変数で保存しておく（p2p.zigから使用）
-pub var global_call_pending: bool = false;
-pub var global_contract_address: []const u8 = "";
-pub var global_evm_input: []const u8 = undefined;
-pub var global_gas_limit: usize = 0;
-pub var global_allocator: std.mem.Allocator = undefined;
-pub var global_sender_address: []const u8 = "";
+/// チェーン同期後に再試行するコントラクト呼び出しのimmutable snapshot。
+pub const PendingCall = struct {
+    contract_address: []const u8,
+    evm_input: []const u8,
+    gas_limit: usize,
+    sender_address: []const u8,
+    generation: u64,
+};
+
+var pending_call_mutex = std.Thread.Mutex{};
+var pending_call: ?PendingCall = null;
+var pending_call_generation: u64 = 0;
+
+pub fn setPendingCall(contract_address: []const u8, evm_input: []const u8, gas_limit: usize, sender_address: []const u8) PendingCall {
+    pending_call_mutex.lock();
+    defer pending_call_mutex.unlock();
+    pending_call_generation +%= 1;
+    const call = PendingCall{
+        .contract_address = contract_address,
+        .evm_input = evm_input,
+        .gas_limit = gas_limit,
+        .sender_address = sender_address,
+        .generation = pending_call_generation,
+    };
+    pending_call = call;
+    return call;
+}
+
+pub fn getPendingCall() ?PendingCall {
+    pending_call_mutex.lock();
+    defer pending_call_mutex.unlock();
+    return pending_call;
+}
+
+/// snapshot取得後に別のcallが登録されても、新しいcallを誤って消さない。
+pub fn clearPendingCall(expected: PendingCall) void {
+    pending_call_mutex.lock();
+    defer pending_call_mutex.unlock();
+    if (pending_call) |current| {
+        if (current.generation == expected.generation) pending_call = null;
+    }
+}
 
 /// アプリケーションエントリーポイント
 ///
@@ -184,9 +219,6 @@ pub fn main() !void {
         }
     }
 
-    // 送信者アドレスをグローバル変数に設定
-    global_sender_address = sender_address;
-
     // EVMモードの場合はEVMを実行して終了する
     if (evm_mode) {
         try runEvm(gpa, evm_bytecode, evm_input, evm_gas_limit);
@@ -329,13 +361,8 @@ fn callContract(allocator: std.mem.Allocator, contract_address: []const u8, inpu
     // 16進数文字列をバイト配列に変換
     const input_data = try utils.hexToBytes(allocator, input_hex);
 
-    // グローバル変数に設定して保存しておく
-    global_contract_address = contract_address;
-    global_evm_input = input_data; // Don't free this memory as we'll use it later
-    global_gas_limit = gas_limit;
-    global_allocator = allocator;
-    global_sender_address = sender_address;
-    global_call_pending = true;
+    // P2P同期threadと共有する値は、複数fieldを1つのmutex下で公開する。
+    const pending_snapshot = setPendingCall(contract_address, input_data, gas_limit, sender_address);
 
     std.log.info("コントラクトアドレス: {s}", .{contract_address});
     std.log.info("送信者アドレス: {s}", .{sender_address});
@@ -359,7 +386,7 @@ fn callContract(allocator: std.mem.Allocator, contract_address: []const u8, inpu
     std.log.info("呼び出しトランザクションをブロードキャストしました", .{});
 
     // ブロードキャストと同時に、ローカルにもコントラクトがあるか確認
-    if (blockchain.contract_storage.get(contract_address)) |_| {
+    if (blockchain.getContractCode(contract_address)) |_| {
         std.log.info("コントラクトがローカルに見つかりました: アドレス={s}", .{contract_address});
 
         // ローカルでトランザクションを実行（詳細なエラー情報付き）
@@ -368,6 +395,7 @@ fn callContract(allocator: std.mem.Allocator, contract_address: []const u8, inpu
             // 詳細なエラー情報はprocessEvmTransactionWithErrorDetails内で出力されるため、
             // ここでは簡潔なエラーのみ表示
             std.log.err("ローカルでのコントラクト呼び出しエラー: {any}", .{err});
+            clearPendingCall(pending_snapshot);
             return;
         };
 
@@ -377,16 +405,30 @@ fn callContract(allocator: std.mem.Allocator, contract_address: []const u8, inpu
         };
 
         // コールのフラグを下ろす（ローカル実行成功）
-        global_call_pending = false;
+        clearPendingCall(pending_snapshot);
     } else {
         std.log.info("コントラクトがローカルに見つかりません。チェーン同期後に実行します: アドレス={s}", .{contract_address});
-        // global_call_pending はtrueのまま、チェーン同期後に実行される
+        // pending callは保持し、チェーン同期後に実行される。
     }
 }
 
 //------------------------------------------------------------------------------
 // テスト
 //------------------------------------------------------------------------------
+test "pending call snapshot and generation-safe clear" {
+    const first = setPendingCall("0xfirst", "first-input", 10, "0xsender1");
+    const first_snapshot = getPendingCall().?;
+    try std.testing.expectEqual(first.generation, first_snapshot.generation);
+    try std.testing.expectEqualStrings("0xfirst", first_snapshot.contract_address);
+
+    const second = setPendingCall("0xsecond", "second-input", 20, "0xsender2");
+    clearPendingCall(first_snapshot);
+    try std.testing.expectEqual(second.generation, getPendingCall().?.generation);
+
+    clearPendingCall(second);
+    try std.testing.expect(getPendingCall() == null);
+}
+
 test "トランザクションの初期化テスト" {
     const tx = types.Transaction{
         .sender = "Alice",

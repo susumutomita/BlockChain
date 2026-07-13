@@ -5,6 +5,13 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ZIG_VERSION=${ZIG_VERSION:-0.14.0}
 RUNNER=${BOOK_CODE_RUNNER:-auto}
 IMAGE=${BOOK_CODE_IMAGE:-zig-blockchain-book-toolchain:${ZIG_VERSION}}
+CACHE_ROOT=${BOOK_CODE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/zig-blockchain-book/verify}
+DOCKER_USER=${BOOK_DOCKER_USER:-$(id -u):$(id -g)}
+
+case "$CACHE_ROOT" in
+    /*) ;;
+    *) CACHE_ROOT="$ROOT/$CACHE_ROOT" ;;
+esac
 
 all_projects='.
 references/chapter2
@@ -24,6 +31,8 @@ references/chapter6/step2/nodeA
 references/chapter7
 references/chapter8
 references/chapter9
+references/chapter10
+references/chapter11
 references/EVMchapter'
 
 if [ "$#" -gt 0 ]; then
@@ -42,6 +51,8 @@ if [ "$RUNNER" = auto ]; then
     fi
 fi
 
+mkdir -p "$CACHE_ROOT"
+
 if [ "$RUNNER" = docker ]; then
     docker build \
         --build-arg "ZIG_VERSION=${ZIG_VERSION}" \
@@ -54,29 +65,53 @@ fi
 
 verify_local() {
     project=$1
+    cache_key=$(printf '%s' "$project" | tr '/.' '__')
+    local_cache="$CACHE_ROOT/local/$cache_key"
+    out_dir="$CACHE_ROOT/out/$cache_key"
+    global_cache="$CACHE_ROOT/global"
+    mkdir -p "$local_cache" "$out_dir" "$global_cache"
     (
         cd "$ROOT/$project"
-        zig build
+        zig build \
+            --prefix "$out_dir" \
+            --cache-dir "$local_cache" \
+            --global-cache-dir "$global_cache"
         help_file="${TMPDIR:-/tmp}/zig-book-help-$$"
         trap 'rm -f "$help_file"' EXIT
-        zig build --help >"$help_file"
+        zig build \
+            --prefix "$out_dir" \
+            --cache-dir "$local_cache" \
+            --global-cache-dir "$global_cache" \
+            --help >"$help_file"
         if grep -q '^  test ' "$help_file"; then
-            zig build test
+            zig build \
+                --prefix "$out_dir" \
+                --cache-dir "$local_cache" \
+                --global-cache-dir "$global_cache" \
+                test
         fi
     )
 }
 
 verify_docker() {
     project=$1
+    cache_key=$(printf '%s' "$project" | tr '/.' '__')
     docker run --rm \
+        --user "$DOCKER_USER" \
         --mount "type=bind,src=$ROOT/$project,dst=/work,readonly" \
+        --mount "type=bind,src=$CACHE_ROOT,dst=/book-cache" \
+        --env "BOOK_CACHE_KEY=$cache_key" \
         --workdir /work \
         "$IMAGE" \
         sh -ec '
-            common="--prefix /tmp/zig-out --cache-dir /tmp/zig-cache --global-cache-dir /tmp/zig-global-cache"
+            local_cache="/book-cache/local/$BOOK_CACHE_KEY"
+            out_dir="/book-cache/out/$BOOK_CACHE_KEY"
+            global_cache="/book-cache/global"
+            mkdir -p "$local_cache" "$out_dir" "$global_cache"
+            common="--prefix $out_dir --cache-dir $local_cache --global-cache-dir $global_cache"
             zig build $common
-            zig build $common --help >/tmp/zig-build-help
-            if grep -q "^  test " /tmp/zig-build-help; then
+            zig build $common --help >"/book-cache/help-$BOOK_CACHE_KEY"
+            if grep -q "^  test " "/book-cache/help-$BOOK_CACHE_KEY"; then
                 zig build $common test
             fi
         '

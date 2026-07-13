@@ -13,6 +13,31 @@ const parser = @import("parser.zig");
 /// 接続済みピアのグローバルリスト
 /// ネットワーク内の他のノードへのアクティブな接続を維持します
 pub var peer_list = std.ArrayList(types.Peer).init(std.heap.page_allocator);
+var peer_list_mutex = std.Thread.Mutex{};
+// TCPの1フレーム（改行まで）を分割書き込みしても、別threadのframeと混ざらない。
+// chain/peerのmutexとは分離し、状態snapshotを取得してからこのmutexを取る。
+var frame_write_mutex = std.Thread.Mutex{};
+
+fn addPeer(peer: types.Peer) !void {
+    peer_list_mutex.lock();
+    defer peer_list_mutex.unlock();
+    try peer_list.append(peer);
+}
+
+fn copyPeerSnapshot() ![]types.Peer {
+    peer_list_mutex.lock();
+    defer peer_list_mutex.unlock();
+    return std.heap.page_allocator.dupe(types.Peer, peer_list.items);
+}
+
+fn writeBlockFrame(peer: types.Peer, payload: []const u8) !void {
+    frame_write_mutex.lock();
+    defer frame_write_mutex.unlock();
+    var writer = peer.stream.writer();
+    try writer.writeAll("BLOCK:");
+    try writer.writeAll(payload);
+    try writer.writeAll("\n");
+}
 
 /// リッスンソケットを開始し、着信接続を受け入れる
 ///
@@ -34,7 +59,7 @@ pub fn listenLoop(port: u16) !void {
     while (true) {
         const conn = try listener.accept();
         const peer = types.Peer{ .address = conn.address, .stream = conn.stream };
-        try peer_list.append(peer);
+        try addPeer(peer);
         std.log.info("Accepted connection from: {any}", .{conn.address});
 
         // ピアとの通信を処理するスレッドを生成
@@ -63,7 +88,7 @@ pub fn connectToPeer(addr: std.net.Address) !void {
 
         std.log.info("Connected to peer: {any}", .{addr});
         const peer = types.Peer{ .address = addr, .stream = sock };
-        try peer_list.append(peer);
+        try addPeer(peer);
 
         // 新しく接続されたピアからチェーン同期をリクエスト
         try requestChain(peer);
@@ -85,6 +110,8 @@ pub fn connectToPeer(addr: std.net.Address) !void {
 /// エラー:
 ///     ストリーム書き込みエラー
 fn requestChain(peer: types.Peer) !void {
+    frame_write_mutex.lock();
+    defer frame_write_mutex.unlock();
     try peer.stream.writer().writeAll("GET_CHAIN\n");
     std.log.info("Requested chain from {any}", .{peer.address});
 }
@@ -99,23 +126,21 @@ fn requestChain(peer: types.Peer) !void {
 ///     from_peer: ブロードキャストから除外するオプションのソースピア
 pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
     const payload = parser.serializeBlock(blk) catch return;
+    defer std.heap.page_allocator.free(payload);
 
-    for (peer_list.items) |peer| {
+    const peers = copyPeerSnapshot() catch |err| {
+        std.log.err("Failed to snapshot peers for broadcast: {any}", .{err});
+        return;
+    };
+    defer std.heap.page_allocator.free(peers);
+
+    for (peers) |peer| {
         // 指定された場合、送信元のピアをスキップ
         if (from_peer) |sender| {
             if (peer.address.getPort() == sender.address.getPort()) continue;
         }
 
-        var writer = peer.stream.writer();
-        _ = writer.writeAll("BLOCK:") catch |err| {
-            std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
-            continue;
-        };
-        _ = writer.writeAll(payload) catch |err| {
-            std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
-            continue;
-        };
-        _ = writer.writeAll("\n") catch |err| {
+        writeBlockFrame(peer, payload) catch |err| {
             std.log.err("Error broadcasting to peer {any}: {any}", .{ peer.address, err });
             continue;
         };
@@ -133,15 +158,22 @@ pub fn broadcastBlock(blk: types.Block, from_peer: ?types.Peer) void {
 /// エラー:
 ///     シリアル化またはネットワークエラー
 pub fn sendFullChain(peer: types.Peer) !void {
-    std.log.info("Sending full chain (height={d}) to {any}", .{ blockchain.chain_store.items.len, peer.address });
+    const chain = try blockchain.copyChainSnapshot(std.heap.page_allocator);
+    defer std.heap.page_allocator.free(chain);
+    std.log.info("Sending full chain (height={d}) to {any}", .{ chain.len, peer.address });
 
+    frame_write_mutex.lock();
+    defer frame_write_mutex.unlock();
     var writer = peer.stream.writer();
 
-    for (blockchain.chain_store.items) |block| {
-        const block_json = try parser.serializeBlock(block);
-        try writer.writeAll("BLOCK:");
-        try writer.writeAll(block_json);
-        try writer.writeAll("\n"); // メッセージフレーミングのための改行
+    for (chain) |block| {
+        {
+            const block_json = try parser.serializeBlock(block);
+            defer std.heap.page_allocator.free(block_json);
+            try writer.writeAll("BLOCK:");
+            try writer.writeAll(block_json);
+            try writer.writeAll("\n"); // メッセージフレーミングのための改行
+        }
     }
 }
 
@@ -152,6 +184,9 @@ pub fn sendFullChain(peer: types.Peer) !void {
 /// 引数:
 ///     target: 削除するピア
 fn removePeerFromList(target: types.Peer) void {
+    peer_list_mutex.lock();
+    defer peer_list_mutex.unlock();
+
     var i: usize = 0;
     while (i < peer_list.items.len) : (i += 1) {
         if (peer_list.items[i].address.getPort() == target.address.getPort()) {
@@ -175,16 +210,18 @@ fn removePeerFromList(target: types.Peer) void {
 fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
     if (std.mem.startsWith(u8, msg, "BLOCK:")) {
         // BLOCKメッセージを処理
-        const blk = parser.parseBlockJson(msg[6..]) catch |err| {
+        var blk = parser.parseBlockJson(msg[6..]) catch |err| {
             std.log.err("Error parsing block from {any}: {any}", .{ from_peer.address, err });
             return;
         };
 
-        // チェーンにブロックを追加
-        blockchain.addBlock(blk);
-
-        // 他のピアにブロックをブロードキャスト
-        broadcastBlock(blk, from_peer);
+        // 新規かつ正しく連結したブロックだけを追加・再伝播する。
+        // 重複や改ざんブロックを再送しないことでゴシップの循環を止める。
+        if (blockchain.addBlock(blk) == .added) {
+            broadcastBlock(blk, from_peer);
+        } else {
+            parser.deinitParsedBlock(&blk);
+        }
     } else if (std.mem.startsWith(u8, msg, "GET_CHAIN")) {
         // GET_CHAINメッセージを処理
         std.log.info("Received GET_CHAIN from {any}", .{from_peer.address});
@@ -202,6 +239,17 @@ fn handleMessage(msg: []const u8, from_peer: types.Peer) !void {
 ///
 /// 注意:
 ///     この関数は独自のスレッドで無期限に実行されます
+fn createMinedInputBlock(line: []const u8, last_block: types.Block) !types.Block {
+    // readUntilDelimiterOrEofが返すsliceは次の入力で上書きされる。
+    // 採掘済みchainが入力バッファの寿命に依存しないよう、block自身が保持する。
+    const owned_line = try std.heap.page_allocator.dupe(u8, line);
+    errdefer std.heap.page_allocator.free(owned_line);
+
+    var new_block = blockchain.createBlock(owned_line, last_block);
+    blockchain.mineBlock(&new_block, 2);
+    return new_block;
+}
+
 pub fn textInputLoop() !void {
     var reader = std.io.getStdIn().reader();
     var buf: [256]u8 = undefined;
@@ -212,18 +260,18 @@ pub fn textInputLoop() !void {
 
         if (maybe_line) |line| {
             // チェーンが空の場合は最新のブロックを取得するか、ジェネシスを作成
-            const last_block = if (blockchain.chain_store.items.len == 0)
-                try blockchain.createTestGenesisBlock(std.heap.page_allocator)
-            else
-                blockchain.chain_store.items[blockchain.chain_store.items.len - 1];
+            const last_block = blockchain.getChainTip() orelse
+                try blockchain.createTestGenesisBlock(std.heap.page_allocator);
 
             // 新しいブロックを作成してマイニング
-            var new_block = blockchain.createBlock(line, last_block);
-            blockchain.mineBlock(&new_block, 2); // 難易度2でマイニング
-            blockchain.addBlock(new_block);
-
-            // 作成したブロックをブロードキャスト
-            broadcastBlock(new_block, null);
+            var new_block = try createMinedInputBlock(line, last_block);
+            if (blockchain.addBlock(new_block) == .added) {
+                // 作成したブロックをブロードキャスト
+                broadcastBlock(new_block, null);
+            } else {
+                new_block.transactions.deinit();
+                std.heap.page_allocator.free(new_block.data);
+            }
         } else break;
     }
 }
@@ -338,4 +386,18 @@ fn peerCommunicationLoop(peer: types.Peer) !void {
     }
 
     std.log.info("Peer {any} disconnected.", .{peer.address});
+}
+
+test "locally mined block owns input after the source buffer is reused" {
+    var source = [_]u8{ 'a', 'l', 'p', 'h', 'a' };
+    var genesis = try blockchain.createTestGenesisBlock(std.testing.allocator);
+    defer genesis.transactions.deinit();
+
+    var block = try createMinedInputBlock(source[0..], genesis);
+    defer block.transactions.deinit();
+    defer std.heap.page_allocator.free(block.data);
+
+    @memcpy(source[0..], "bravo");
+    try std.testing.expectEqualStrings("alpha", block.data);
+    try std.testing.expect(blockchain.verifyBlockPow(&block));
 }

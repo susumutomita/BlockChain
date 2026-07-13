@@ -101,13 +101,14 @@ pub fn verifyBlockPow(b: *const types.Block) bool {
 }
 
 // addBlock: 受け取ったブロックをチェインに追加（検証付き）
-pub fn addBlock(new_block: types.Block) void {
+pub fn addBlock(new_block: types.Block) bool {
     if (!verifyBlockPow(&new_block)) {
-        std.log.err("Received block fails PoW check. Rejecting it.", .{});
-        return;
+        std.log.warn("Received block fails PoW check. Rejecting it.", .{});
+        return false;
     }
-    chain_store.append(new_block) catch {};
-    std.log.info("Added new block index={d}, nonce={d}, hash={x}", .{ new_block.index, new_block.nonce, new_block.hash });
+    chain_store.append(new_block) catch return false;
+    std.log.info("Added new block index={d}, nonce={d}, hash={x:0>2}", .{ new_block.index, new_block.nonce, new_block.hash });
+    return true;
 }
 
 pub fn sendBlock(block: types.Block, remote_addr: std.net.Address) !void {
@@ -115,9 +116,15 @@ pub fn sendBlock(block: types.Block, remote_addr: std.net.Address) !void {
         std.debug.print("Serialize error: {any}\n", .{err});
         return err;
     };
+    defer std.heap.page_allocator.free(json_data);
+
     var socket = try std.net.tcpConnectToAddress(remote_addr);
+    defer socket.close();
+
     var writer = socket.writer();
-    try writer.writeAll("BLOCK:" ++ json_data);
+    try writer.writeAll("BLOCK:");
+    try writer.writeAll(json_data);
+    try writer.writeAll("\n");
 }
 
 /// createBlock: 新しいブロックを生成
@@ -153,35 +160,53 @@ pub fn createTestGenesisBlock(allocator: std.mem.Allocator) !types.Block {
 // メッセージ受信処理: ConnHandler
 //--------------------------------------
 pub const ConnHandler = struct {
+    fn handleMessage(message: []const u8) void {
+        std.log.info("[Received complete message] {s}", .{message});
+
+        if (!std.mem.startsWith(u8, message, "BLOCK:")) {
+            std.log.info("Unknown message: {s}", .{message});
+            return;
+        }
+
+        var new_block = parser.parseBlockJson(message[6..]) catch |err| {
+            std.log.err("Failed parseBlockJson: {any}", .{err});
+            return;
+        };
+        if (!addBlock(new_block)) parser.deinitParsedBlock(&new_block);
+    }
+
     pub fn run(conn: std.net.Server.Connection) !void {
         defer conn.stream.close();
         std.log.info("Accepted: {any}", .{conn.address});
 
         var reader = conn.stream.reader();
-        var buf: [256]u8 = undefined;
+        var buf: [4096]u8 = undefined;
+        var buffered: usize = 0;
 
         while (true) {
-            const n = try reader.read(&buf);
+            const n = try reader.read(buf[buffered..]);
             if (n == 0) {
                 std.log.info("Peer {any} disconnected.", .{conn.address});
                 break;
             }
-            const msg_slice = buf[0..n];
-            std.log.info("[Received] {s}", .{msg_slice});
 
-            // 簡易メッセージ解析
-            if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
-                // "BLOCK:" の後ろを取り出してJSONパースする
-                const json_part = msg_slice[6..];
-                const new_block = parser.parseBlockJson(json_part) catch |err| {
-                    std.log.err("Failed parseBlockJson: {any}", .{err});
-                    continue;
-                };
-                // チェインに追加
-                addBlock(new_block);
-            } else {
-                // それ以外はログだけ
-                std.log.info("Unknown message: {s}", .{msg_slice});
+            buffered += n;
+            var consumed: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, buf[0..buffered], consumed, '\n')) |newline| {
+                const message = std.mem.trimRight(u8, buf[consumed..newline], "\r");
+                handleMessage(message);
+                consumed = newline + 1;
+            }
+
+            if (consumed > 0) {
+                const remaining = buffered - consumed;
+                std.mem.copyForwards(u8, buf[0..remaining], buf[consumed..buffered]);
+                buffered = remaining;
+            }
+
+            if (buffered == buf.len) {
+                std.log.err("Message too long; rejecting connection from {any}", .{conn.address});
+                break;
             }
         }
     }
@@ -194,6 +219,7 @@ pub const ClientHandler = struct {
     pub fn run(peer: types.Peer) !void {
         // クライアントはローカルに Genesis ブロックを保持（本来はサーバーから同期する）
         var lastBlock = try createTestGenesisBlock(std.heap.page_allocator);
+        defer lastBlock.transactions.deinit();
         clientSendLoop(peer, &lastBlock) catch unreachable;
     }
 };
@@ -211,16 +237,28 @@ fn clientSendLoop(peer: types.Peer, lastBlock: *types.Block) !void {
         mineBlock(&new_block, DIFFICULTY);
         var writer = peer.stream.writer();
         const block_json = parser.serializeBlock(new_block) catch unreachable;
-        // 必要なサイズのバッファを用意して "BLOCK:" と block_json を連結する
-        var buf = try std.heap.page_allocator.alloc(u8, "BLOCK:".len + block_json.len);
-        defer std.heap.page_allocator.free(buf);
+        defer std.heap.page_allocator.free(block_json);
 
-        // バッファに連結
-        @memcpy(buf[0.."BLOCK:".len], "BLOCK:");
-        @memcpy(buf["BLOCK:".len..], block_json);
-
-        // 1回の書き出しで送信
-        try writer.writeAll(buf);
+        try writer.writeAll("BLOCK:");
+        try writer.writeAll(block_json);
+        try writer.writeAll("\n");
+        lastBlock.transactions.deinit();
         lastBlock.* = new_block;
     }
+}
+
+test "tampered block is rejected without changing chain height" {
+    chain_store.clearRetainingCapacity();
+    defer chain_store.clearRetainingCapacity();
+
+    var genesis = try createTestGenesisBlock(std.testing.allocator);
+    defer genesis.transactions.deinit();
+
+    var block = createBlock("valid", genesis);
+    defer block.transactions.deinit();
+    mineBlock(&block, DIFFICULTY);
+    block.data = "tampered";
+
+    try std.testing.expect(!addBlock(block));
+    try std.testing.expectEqual(@as(usize, 0), chain_store.items.len);
 }

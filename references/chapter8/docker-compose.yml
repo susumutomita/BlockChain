@@ -2,60 +2,58 @@
 #
 # 使い方:
 # 1. 起動: docker compose up -d
-# 2. コンテナでコマンド実行: docker exec -it <container_name> <command>
-#    例: docker compose exec node2 /tmp/zig-out/bin/chapter8 --listen 3000 --connect node1:3000
-#
-# 注意: 新しいコンテナを起動するには docker compose run ではなく docker exec を使用してください
+# 2. ログ確認: docker compose logs -f
+# このComposeは3ノードの接続だけを作ります。acceptance.shは採掘時間に依存しない
+# 固定済みPoWブロックを実TCPでnode1、node3の順に送り、同期と重複拒否を検証します。
 
 # 共通設定
 x-common-config: &common-config
   volumes:
     - ./:/app
+    - ${ZIG_BOOK_CACHE_DIR:-./.book-cache}:/book-cache
   build: .
 
 services:
   node1:
     <<: *common-config
-    container_name: node1
     ports:
       - "3001:3000"
     environment:
       - NODE_ID=1
     command: >-
       sh -c "zig build
-      --cache-dir /tmp/zig-cache
-      --global-cache-dir /tmp/zig-global-cache
-      --prefix /tmp/zig-out
-      && /tmp/zig-out/bin/chapter8 --listen 3000"
+      --cache-dir /book-cache/$$NODE_ID/local
+      --global-cache-dir /book-cache/global
+      --prefix /book-cache/$$NODE_ID/out
+      && exec /book-cache/$$NODE_ID/out/bin/chapter8 --listen 3000"
 
   node2:
     <<: *common-config
-    container_name: node2
+    depends_on:
+      - node1
     ports:
       - "3002:3000"
     environment:
       - NODE_ID=2
-    tty: true
-    stdin_open: true
     command: >-
       sh -c "zig build
-      --cache-dir /tmp/zig-cache
-      --global-cache-dir /tmp/zig-global-cache
-      --prefix /tmp/zig-out
-      && tail -f /dev/null"
+      --cache-dir /book-cache/$$NODE_ID/local
+      --global-cache-dir /book-cache/global
+      --prefix /book-cache/$$NODE_ID/out
+      && exec /book-cache/$$NODE_ID/out/bin/chapter8 --listen 3000 --connect node1:3000"
 
   node3:
     <<: *common-config
-    container_name: node3
+    depends_on:
+      - node2
     ports:
       - "3003:3000"
     environment:
       - NODE_ID=3
-    tty: true
-    stdin_open: true
     command: >-
       sh -c "zig build
-      --cache-dir /tmp/zig-cache
-      --global-cache-dir /tmp/zig-global-cache
-      --prefix /tmp/zig-out
-      && tail -f /dev/null"
+      --cache-dir /book-cache/$$NODE_ID/local
+      --global-cache-dir /book-cache/global
+      --prefix /book-cache/$$NODE_ID/out
+      && exec /book-cache/$$NODE_ID/out/bin/chapter8 --listen 3000
+      --connect node1:3000 --connect node2:3000"

@@ -1,0 +1,59 @@
+# 第8章から引き継ぐ3ノードP2P構成（第11章チェックポイント用）
+#
+# 使い方:
+# 1. 起動: docker compose up -d
+# 2. ログ確認: docker compose logs -f
+# このComposeは3ノードの接続だけを作ります。ブロック生成を標準入力の
+# タイミングに結び付けず、検証側から決定的な入力を送れる構成にします。
+
+# 共通設定
+x-common-config: &common-config
+  volumes:
+    - ./:/app
+    - ${ZIG_BOOK_CACHE_DIR:-./.book-cache}:/book-cache
+  build: .
+
+services:
+  node1:
+    <<: *common-config
+    ports:
+      - "3001:3000"
+    environment:
+      - NODE_ID=1
+    command: >-
+      sh -c "zig build
+      --cache-dir /book-cache/$$NODE_ID/local
+      --global-cache-dir /book-cache/global
+      --prefix /book-cache/$$NODE_ID/out
+      && exec /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000"
+
+  node2:
+    <<: *common-config
+    depends_on:
+      - node1
+    ports:
+      - "3002:3000"
+    environment:
+      - NODE_ID=2
+    command: >-
+      sh -c "zig build
+      --cache-dir /book-cache/$$NODE_ID/local
+      --global-cache-dir /book-cache/global
+      --prefix /book-cache/$$NODE_ID/out
+      && exec /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000 --connect node1:3000"
+
+  node3:
+    <<: *common-config
+    depends_on:
+      - node2
+    ports:
+      - "3003:3000"
+    environment:
+      - NODE_ID=3
+    command: >-
+      sh -c "zig build
+      --cache-dir /book-cache/$$NODE_ID/local
+      --global-cache-dir /book-cache/global
+      --prefix /book-cache/$$NODE_ID/out
+      && exec /book-cache/$$NODE_ID/out/bin/evmchapter --listen 3000
+      --connect node1:3000 --connect node2:3000"

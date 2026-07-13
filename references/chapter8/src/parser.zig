@@ -64,7 +64,10 @@ pub fn hexEncode(slice: []const u8, allocator: std.mem.Allocator) ![]const u8 {
 ///     chainError.InvalidHexLength: 入力の長さが偶数でない場合
 ///     chainError.InvalidHexChar: 入力に16進文字以外が含まれる場合
 fn hexDecode(src: []const u8, dst: *[256]u8) !usize {
-    if (src.len % 2 != 0) return chainError.InvalidHexLength;
+    // 書き込みを始める前に入力全体が固定長バッファへ収まるか確認する。
+    // P2P入力は信頼できないため、偶数長でも256バイトを超えるhexを
+    // dstへ書くとprocessがpanicしてしまう。
+    if (src.len % 2 != 0 or src.len / 2 > dst.len) return chainError.InvalidHexLength;
     var i: usize = 0;
     while (i < src.len) : (i += 2) {
         const hi = parseHexDigit(src[i]) catch return chainError.InvalidHexChar;
@@ -72,6 +75,19 @@ fn hexDecode(src: []const u8, dst: *[256]u8) !usize {
         dst[i / 2] = (hi << 4) | lo;
     }
     return src.len / 2;
+}
+
+test "hex decoder rejects input larger than its destination" {
+    var destination: [256]u8 = undefined;
+    const oversized = [_]u8{'0'} ** 514;
+    try std.testing.expectError(chainError.InvalidHexLength, hexDecode(&oversized, &destination));
+}
+
+test "block parser rejects non-integer or out-of-range consensus numbers" {
+    try std.testing.expectError(error.InvalidFormat, parseBlockJson("{\"index\":1.5}"));
+    try std.testing.expectError(error.InvalidFormat, parseBlockJson("{\"index\":4294967296}"));
+    try std.testing.expectError(error.InvalidFormat, parseBlockJson("{\"timestamp\":-1.5}"));
+    try std.testing.expectError(error.InvalidFormat, parseBlockJson("{\"nonce\":1.5}"));
 }
 
 /// 単一の16進数字文字を解析する
@@ -93,6 +109,59 @@ fn parseHexDigit(c: u8) !u8 {
         'A'...'F' => return 10 + (c - 'A'),
         else => return error.InvalidHexChar,
     }
+}
+
+fn deinitOwnedTransaction(allocator: std.mem.Allocator, tx: *types.Transaction) void {
+    allocator.free(tx.sender);
+    allocator.free(tx.receiver);
+    tx.* = undefined;
+}
+
+fn deinitOwnedBlock(allocator: std.mem.Allocator, block: *types.Block) void {
+    for (block.transactions.items) |*tx| deinitOwnedTransaction(allocator, tx);
+    block.transactions.deinit();
+    allocator.free(block.data);
+    block.* = undefined;
+}
+
+/// `parseBlockJson` が返したブロックをチェーンへ移譲しなかった場合に解放する。
+pub fn deinitParsedBlock(block: *types.Block) void {
+    deinitOwnedBlock(std.heap.page_allocator, block);
+}
+
+fn cloneOwnedTransaction(allocator: std.mem.Allocator, tx: types.Transaction) !types.Transaction {
+    const sender = try allocator.dupe(u8, tx.sender);
+    errdefer allocator.free(sender);
+    const receiver = try allocator.dupe(u8, tx.receiver);
+    errdefer allocator.free(receiver);
+    return .{ .sender = sender, .receiver = receiver, .amount = tx.amount };
+}
+
+fn appendClonedTransaction(
+    transactions: *std.ArrayList(types.Transaction),
+    allocator: std.mem.Allocator,
+    tx: types.Transaction,
+) !void {
+    var cloned = try cloneOwnedTransaction(allocator, tx);
+    errdefer deinitOwnedTransaction(allocator, &cloned);
+    try transactions.append(cloned);
+}
+
+fn cloneOwnedBlock(allocator: std.mem.Allocator, block: types.Block) !types.Block {
+    var cloned = types.Block{
+        .index = block.index,
+        .timestamp = block.timestamp,
+        .prev_hash = block.prev_hash,
+        .transactions = std.ArrayList(types.Transaction).init(allocator),
+        .nonce = block.nonce,
+        .data = try allocator.dupe(u8, block.data),
+        .hash = block.hash,
+    };
+    errdefer deinitOwnedBlock(allocator, &cloned);
+    for (block.transactions.items) |tx| {
+        try appendClonedTransaction(&cloned.transactions, allocator, tx);
+    }
+    return cloned;
 }
 
 /// トランザクションリストをJSON配列文字列にシリアル化する
@@ -122,7 +191,11 @@ fn serializeTransactions(transactions: std.ArrayList(types.Transaction), allocat
         if (i > 0) {
             try list.appendSlice(",");
         }
-        const tx_json = try std.fmt.allocPrintZ(allocator, "{{\"sender\":\"{s}\",\"receiver\":\"{s}\",\"amount\":{d}}}", .{ tx.sender, tx.receiver, tx.amount });
+        const sender_json = try std.json.stringifyAlloc(allocator, tx.sender, .{});
+        defer allocator.free(sender_json);
+        const receiver_json = try std.json.stringifyAlloc(allocator, tx.receiver, .{});
+        defer allocator.free(receiver_json);
+        const tx_json = try std.fmt.allocPrintZ(allocator, "{{\"sender\":{s},\"receiver\":{s},\"amount\":{d}}}", .{ sender_json, receiver_json, tx.amount });
         defer allocator.free(tx_json);
         try list.appendSlice(tx_json);
     }
@@ -154,8 +227,12 @@ pub fn serializeBlock(block: types.Block) ![]const u8 {
     // トランザクション配列をシリアル化
     const tx_str = try serializeTransactions(block.transactions, allocator);
 
+    // dataは利用者入力を含むため、引用符やバックスラッシュをJSON escapeする
+    const data_json = try std.json.stringifyAlloc(allocator, block.data, .{});
+    defer allocator.free(data_json);
+
     // すべてのフィールドをJSONオブジェクト文字列に結合
-    const json = try std.fmt.allocPrintZ(allocator, "{{\"index\":{d},\"timestamp\":{d},\"nonce\":{d},\"data\":\"{s}\",\"prev_hash\":\"{s}\",\"hash\":\"{s}\",\"transactions\":{s}}}", .{ block.index, block.timestamp, block.nonce, block.data, prev_hash_str, hash_str, tx_str });
+    const json = try std.fmt.allocPrintZ(allocator, "{{\"index\":{d},\"timestamp\":{d},\"nonce\":{d},\"data\":{s},\"prev_hash\":\"{s}\",\"hash\":\"{s}\",\"transactions\":{s}}}", .{ block.index, block.timestamp, block.nonce, data_json, prev_hash_str, hash_str, tx_str });
 
     // 一時的な割り当てを解放
     allocator.free(hash_str);
@@ -163,6 +240,34 @@ pub fn serializeBlock(block: types.Block) ![]const u8 {
     allocator.free(tx_str);
 
     return json;
+}
+
+test "block JSON round trip escapes quoted text" {
+    var transactions = std.ArrayList(types.Transaction).init(std.testing.allocator);
+    defer transactions.deinit();
+    try transactions.append(.{
+        .sender = "Alice \\\"A\\\"",
+        .receiver = "Bob\\\\B",
+        .amount = 42,
+    });
+    const block = types.Block{
+        .index = 1,
+        .timestamp = 1_672_531_201,
+        .prev_hash = [_]u8{0x11} ** 32,
+        .transactions = transactions,
+        .nonce = 7,
+        .data = "say \\\"hello\\\" \\\\ path",
+        .hash = [_]u8{0x22} ** 32,
+    };
+
+    const json = try serializeBlock(block);
+    defer std.heap.page_allocator.free(json);
+    var decoded = try parseBlockJson(json);
+    defer deinitParsedBlock(&decoded);
+
+    try std.testing.expectEqualStrings(block.data, decoded.data);
+    try std.testing.expectEqualStrings(block.transactions.items[0].sender, decoded.transactions.items[0].sender);
+    try std.testing.expectEqualStrings(block.transactions.items[0].receiver, decoded.transactions.items[0].receiver);
 }
 
 /// JSON文字列をブロック構造体に解析する
@@ -185,7 +290,10 @@ pub fn serializeBlock(block: types.Block) ![]const u8 {
 ///     ブロックが不要になった時点で、呼び出し元が解放する必要があります。
 pub fn parseBlockJson(json_slice: []const u8) !types.Block {
     std.log.debug("parseBlockJson start", .{});
-    const block_allocator = std.heap.page_allocator;
+    const output_allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(output_allocator);
+    defer arena.deinit();
+    const block_allocator = arena.allocator();
 
     // JSON文字列を汎用JSON値に解析
     std.log.debug("parseBlockJson start parsed", .{});
@@ -217,7 +325,6 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
     if (obj.get("index")) |idx_val| {
         const idx_num: i64 = switch (idx_val) {
             .integer => idx_val.integer,
-            .float => @as(i64, @intFromFloat(idx_val.float)),
             else => return error.InvalidFormat,
         };
         if (idx_num < 0 or idx_num > @as(i64, std.math.maxInt(u32))) {
@@ -230,7 +337,6 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
     if (obj.get("timestamp")) |ts_val| {
         const ts_num: i64 = switch (ts_val) {
             .integer => if (ts_val.integer < 0) return error.InvalidFormat else ts_val.integer,
-            .float => @intFromFloat(ts_val.float),
             else => return error.InvalidFormat,
         };
         b.timestamp = @intCast(ts_num);
@@ -240,7 +346,6 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
     if (obj.get("nonce")) |nonce_val| {
         const nonce_num: i64 = switch (nonce_val) {
             .integer => nonce_val.integer,
-            .float => @intFromFloat(nonce_val.float),
             else => return error.InvalidFormat,
         };
         if (nonce_num < 0 or nonce_num > @as(f64, std.math.maxInt(u64))) {
@@ -343,9 +448,8 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
                             return error.InvalidFormat;
                         }) {
                             .integer => |val| if (val < 0) return error.InvalidFormat else @intCast(val),
-                            .float => |val| if (val < 0) return error.InvalidFormat else @intFromFloat(val),
                             else => {
-                                std.log.err("Transaction element {d}: 'amount' field is neither integer nor float.", .{idx});
+                                std.log.err("Transaction element {d}: 'amount' field is not an integer.", .{idx});
                                 return error.InvalidFormat;
                             },
                         };
@@ -384,5 +488,5 @@ pub fn parseBlockJson(json_slice: []const u8) !types.Block {
 
     std.log.debug("Block info: index={d}, timestamp={d}, prev_hash={any}, transactions={any} nonce={d}, data={s}, hash={any} ", .{ b.index, b.timestamp, b.prev_hash, b.transactions, b.nonce, b.data, b.hash });
     std.log.debug("parseBlockJson end", .{});
-    return b;
+    return cloneOwnedBlock(output_allocator, b);
 }

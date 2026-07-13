@@ -4,6 +4,21 @@ const types = @import("types.zig");
 const parser = @import("parser.zig");
 const net = std.net;
 
+fn handlePeerMessage(message: []const u8) void {
+    std.log.info("[Recv complete] {s}", .{message});
+
+    if (!std.mem.startsWith(u8, message, "BLOCK:")) {
+        std.log.info("Unknown msg: {s}", .{message});
+        return;
+    }
+
+    var new_block = parser.parseBlockJson(message["BLOCK:".len..]) catch |err| {
+        std.log.err("Failed parseBlockJson: {any}", .{err});
+        return;
+    };
+    if (!blockchain.addBlock(new_block)) parser.deinitParsedBlock(&new_block);
+}
+
 //------------------------------------------------------------------------------
 // メイン処理およびテスト実行
 //------------------------------------------------------------------------------
@@ -76,21 +91,36 @@ pub fn main() !void {
         };
         _ = try std.Thread.spawn(.{}, blockchain.ClientHandler.run, .{peer});
         var reader = socket.reader();
-        var buf: [256]u8 = undefined;
+        var buf: [4096]u8 = undefined;
+        var buffered: usize = 0;
+
         while (true) {
-            const n = try reader.read(&buf);
+            const n = try reader.read(buf[buffered..]);
             if (n == 0) {
+                if (buffered > 0) {
+                    std.log.warn("Ignoring unterminated message from {s}:{d}", .{ host_str, port_num });
+                }
                 std.log.info("Server disconnected.", .{});
                 break;
             }
-            const msg_slice = buf[0..n];
-            std.log.info("[Recv] {s}", .{msg_slice});
-            if (std.mem.startsWith(u8, msg_slice, "BLOCK:")) {
-                const json_part = msg_slice[6..];
-                const new_block = try parser.parseBlockJson(json_part);
-                blockchain.addBlock(new_block);
-            } else {
-                std.log.info("Unknown msg: {s}", .{msg_slice});
+
+            buffered += n;
+            var consumed: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, buf[0..buffered], consumed, '\n')) |newline| {
+                const message = std.mem.trimRight(u8, buf[consumed..newline], "\r");
+                handlePeerMessage(message);
+                consumed = newline + 1;
+            }
+
+            if (consumed > 0) {
+                const remaining = buffered - consumed;
+                std.mem.copyForwards(u8, buf[0..remaining], buf[consumed..buffered]);
+                buffered = remaining;
+            }
+
+            if (buffered == buf.len) {
+                std.log.err("Message too long from {s}:{d}; closing connection", .{ host_str, port_num });
+                break;
             }
         }
     }

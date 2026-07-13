@@ -7,4 +7,9 @@ references/**/.zig-cache
 references/**/zig-cache
 references/**/zig-out
 .zig-book-out
+.zig-book-rebuild.*
+.chapter6-acceptance.*
+.chapter7-acceptance.*
+.evm-acceptance.*
 .tmp-e2e
+references/**/.book-cache
