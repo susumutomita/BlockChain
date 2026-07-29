@@ -1,150 +1,141 @@
-<!-- textlint-enable ja-technical-writing/sentence-length -->
+English | [Japanese](README.ja.md)
+
 ![GitHub last commit (by committer)](https://img.shields.io/github/last-commit/susumutomita/BlockChain)
 ![GitHub top language](https://img.shields.io/github/languages/top/susumutomita/BlockChain)
 ![GitHub pull requests](https://img.shields.io/github/issues-pr/susumutomita/BlockChain)
 ![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/susumutomita/BlockChain)
 ![GitHub repo size](https://img.shields.io/github/repo-size/susumutomita/BlockChain)
 [![Zig CI](https://github.com/susumutomita/BlockChain/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/susumutomita/BlockChain/actions/workflows/ci.yml)
-<!-- textlint-enable ja-technical-writing/sentence-length -->
 
 # Zig Simple Blockchain
 
-シンプルなブロックチェーンの Zig 言語による実装です。
-ブロックチェーンの基本的な概念を学ぶためのプロジェクトです。
+A small blockchain, TCP-based peer-to-peer network, and learning-oriented Ethereum Virtual Machine implemented in Zig.
 
-## 機能
+This repository is the executable companion to the book [Zig言語で学ぶブロックチェイン](https://zenn.dev/bull/books/zig-blockchain). An English edition, *Build a Blockchain and a Minimal EVM from Scratch in Zig*, is being prepared in [zenn-article issue #287](https://github.com/susumutomita/zenn-article/issues/287).
 
-- ブロック生成
-- トランザクション管理
-- SHA-256 ハッシュ計算
-- Proof of Work (PoW) マイニング
-- TCPベースのP2Pブロック伝播とチェイン同期
-- 学習用の簡易EVMとSolidityコントラクトのデプロイ/コール
-- デバッグログ機能
+The project is designed for learning. It makes block hashing, Proof of Work, validation, propagation, synchronization, bytecode execution, and failure handling visible through runnable checkpoints and tests.
 
-## 主要なコンポーネント
+## What is included
 
-### ブロック (Block)
+- block and transaction data structures
+- SHA-256 block hashing
+- learning-oriented Proof-of-Work mining
+- block, link, and Proof-of-Work validation
+- TCP message framing and peer connections
+- P2P block propagation and relay
+- multi-peer chain synchronization
+- a minimal EVM with 256-bit values, stack, memory, storage, execution context, and selected opcodes
+- Solidity contract compilation, deployment, and function calls
+- chapter snapshots, companion patches, reconstruction gates, and real multi-node acceptance tests
 
-- インデックス番号
-- タイムスタンプ
-- 前ブロックのハッシュ
-- トランザクションリスト
-- Nonce値（マイニング用）
-- データ
-- 自身のハッシュ値
+## Version and reproducibility
 
-### トランザクション (Transaction)
+The book and all checked-in chapter snapshots are pinned to Zig `0.14.0`.
 
-- 送信者 (sender)
-- 受信者 (receiver)
-- 取引金額 (amount)
-
-## ビルドと実行方法
+Use the supplied Docker environment when you need reproducible results, especially on macOS 26 or when your installed Zig version is newer.
 
 ```bash
-# プロジェクトのビルド
-zig build
+docker build --build-arg ZIG_VERSION=0.14.0 -t zig-blockchain-book .
+docker run --rm zig-blockchain-book zig build test
+```
 
-# （P2Pノードとして起動する例）
+With a local Zig `0.14.0` installation:
+
+```bash
+zig fmt --check .
+zig build test
+zig build
+```
+
+## Start a node
+
+```bash
 zig build run -- --listen 9000
 ```
 
-## デバッグモード
-
-`src/logger.zig` にある `debug_logging` 定数を変更することで、
-デバッグ情報の出力を制御できます：
-
-```zig
-const debug_logging = true;  // デバッグ情報を出力
-const debug_logging = false; // デバッグ情報を出力しない
-```
-
-## 学習ポイント
-
-このプロジェクトでは以下の概念を学ぶことができます：
-
-1. **ブロックチェーンの基本構造**
-   - ブロックの連鎖
-   - ハッシュによる連携
-   - トランザクションの管理
-
-2. **暗号技術の基礎**
-   - SHA-256ハッシュ関数
-   - Proof of Work (PoW)
-
-3. **Zigプログラミング**
-   - 構造体の定義と使用
-   - メモリ管理
-   - ジェネリックプログラミング
-   - コンパイル時の最適化
-
-## 今後の拡張案
-
-- [ ] ブロックチェーンの永続化
-- [x] 学習用P2Pネットワーク機能
-- [ ] 認証・フォーク選択・完全なチェイン検証
-- [ ] 高度な暗号化機能
-- [ ] WebAPI インターフェース
-- [ ] ウォレット機能
-
-## テスト実行
-
-### 基本的なテスト実行
+Start a second node and connect it to the first:
 
 ```bash
-# テストを実行する
-zig build test
+zig build run -- --listen 9001 --connect 127.0.0.1:9000
+```
 
-# 書籍の章・節チェックポイントも含めて検証する
+## Repository layout
+
+```text
+src/                         Evolving completed implementation
+contract/                    Solidity example contract
+references/                  Self-contained chapter and section snapshots
+references/book-patches/     Complete patches used by Chapters 11 and 12
+scripts/verify-book-code.sh  Format, build, and test book checkpoints
+scripts/rebuild-book-code.sh Reconstruct Chapters 11 and 12 and detect drift
+```
+
+The root `src/` may advance through bug fixes and improvements. Use `references/` when reproducing a specific point in the book. Do not copy the current root implementation into an early checkpoint, because it may contain types and behavior that the chapter has not introduced yet.
+
+## Verify the book checkpoints
+
+Run every supported chapter and section gate:
+
+```bash
 sh scripts/verify-book-code.sh
 ```
 
-## ライセンス
+Rebuild Chapters 11 and 12 from their documented starting points and public companion patches:
 
-MIT License
+```bash
+sh scripts/rebuild-book-code.sh
+```
 
-## 貢献
+Include the one-node and two-node TCP/EVM acceptance scenarios:
 
-プルリクエストや問題報告は歓迎します。
-以下の手順で貢献できます：
+```bash
+BOOK_REBUILD_ACCEPTANCE=1 sh scripts/rebuild-book-code.sh
+```
 
-1. このリポジトリをフォーク
-2. 新しいブランチを作成
-3. 変更をコミット
-4. プルリクエストを送信
+Run the completed EVM snapshot acceptance directly:
 
-## EVM の使い方（SimpleAdder をデプロイ＆呼び出し）
+```bash
+sh references/EVMchapter/scripts/acceptance.sh .
+```
 
-以下は `contract/SimpleAdder.sol`（Adder）を使った最短手順です。
+CI also runs the chapter 6 request/acknowledgment scenario, chapter 7 block transfer and tamper rejection, chapter 8 three-node convergence, exact chapter reconstruction, and completed EVM acceptance.
 
-### 前提
-- Zig 0.14.0 が入っている（macOSでは後述のDocker手順も利用可能）
-- solc が入っている（`solc --version` で確認）
-- このリポジトリ直下で実行
+## Deploy and call the `SimpleAdder` contract
 
-### 1) ビルド
+### Prerequisites
+
+- Zig `0.14.0`, or the Docker workflow above
+- the Solidity compiler `solc`
+- commands executed from the repository root
+
+### 1. Build the node
+
 ```bash
 zig build
 ```
 
-### 2) コントラクトのバイトコード生成（creation bytecode）
+### 2. Compile the contract creation bytecode
+
 ```bash
 mkdir -p /tmp/out
 solc --bin contract/SimpleAdder.sol -o /tmp/out --overwrite
-# 生成物: /tmp/out/Adder.bin
+# Output: /tmp/out/Adder.bin
 ```
 
-### 3) 関数セレクタと引数エンコード（add(uint256,uint256) の例: 2 + 3）
+### 3. Encode `add(uint256,uint256)` for `2 + 3`
+
 ```bash
 SEL=$(solc --hashes contract/SimpleAdder.sol | awk '/add\(uint256,uint256\)/{print $1}' | sed 's/://')
 A=$(printf "%064x" 2)
 B=$(printf "%064x" 3)
 DATA=0x${SEL}${A}${B}
-echo "$DATA"  # 先頭0xで、4+64+64=132桁のHEX
+echo "$DATA"
 ```
 
-### 4-A) 1プロセスでデプロイ→コールを実行（簡単）
+The calldata begins with `0x`, followed by the four-byte function selector and two 32-byte ABI words.
+
+### 4. Deploy and call in one process
+
 ```bash
 zig build run -- \
   --listen 9000 \
@@ -153,10 +144,13 @@ zig build run -- \
   --gas 3000000 \
   --sender 0x000000000000000000000000000000000000dead
 ```
-注: 現状 `--gas` は単一値のため、最後に指定した値が両方（deploy/call）に適用されます。困らないよう十分大きめにしてください（例: 3000000）。
 
-### 4-B) 2プロセスで接続して実行（deploy と call のガスを分けたい場合）
-ターミナル1（デプロイ側）:
+The current CLI has one `--gas` value. The last value applies to both deployment and the call, so use a limit that is large enough for both operations.
+
+### 5. Deploy and call across two connected processes
+
+Terminal 1, deployment node:
+
 ```bash
 zig build run -- \
   --listen 9000 \
@@ -165,7 +159,8 @@ zig build run -- \
   --sender 0x000000000000000000000000000000000000dead
 ```
 
-ターミナル2（コール側）:
+Terminal 2, calling node:
+
 ```bash
 zig build run -- \
   --listen 9001 --connect 127.0.0.1:9000 \
@@ -174,13 +169,87 @@ zig build run -- \
   --sender 0x000000000000000000000000000000000000dead
 ```
 
-### 5) 期待される結果
-- ログの32バイト値の末尾が`05`になり、u256表示が`5`になります。
+The expected 32-byte result ends in `05`, and the decoded unsigned 256-bit value is `5`.
 
-### トラブルシューティング
-- hexToBytes の `InvalidCharacter` エラー: `--call` 直後の入力データHEXが空です。`echo "$DATA"` で値を確認してください。
-- `コントラクトがローカルに見つかりません` と出る: 別プロセスで動かしている場合は `--connect` でピア接続して同期するか、4-A のように1プロセスで実行してください。
+### Troubleshooting
 
-## 注意事項
+- `hexToBytes` reports `InvalidCharacter`: The hexadecimal argument after `--call` is empty or malformed. Check `echo "$DATA"`.
+- The node reports that the contract is not available locally: Connect the processes with `--connect` and allow the deployment to synchronize, or use the one-process example.
 
-これは学習用のプロジェクトです。実運用は想定していません。
+## Debug logging
+
+Change `debug_logging` in `src/logger.zig`:
+
+```zig
+const debug_logging = true;  // Enable debug output
+const debug_logging = false; // Disable debug output
+```
+
+## Security and compatibility boundary
+
+This is not a production blockchain and is not an Ethereum-compatible client.
+
+The current learning node validates block content, hashes, Proof of Work, height, parent links, selected network frames, and the EVM subset used by the examples. It intentionally does not provide the complete security and consensus model required by a real public network.
+
+Notable non-goals include:
+
+- transaction signatures and authenticated sender derivation
+- account nonces and replay protection
+- balances and a complete deterministic account state transition
+- cumulative-work fork choice and robust reorganization handling
+- finality
+- persistent chain and consensus state
+- authenticated or encrypted peer transport
+- complete EVM opcode, gas, precompile, and Ethereum state semantics
+
+Do not use this project to hold assets, execute untrusted contracts, or operate a production network.
+
+## Learning goals
+
+The repository is intended to make the following concepts concrete:
+
+1. Blockchain structure
+   - hash-linked blocks
+   - transactions and block contents
+   - mining and validation
+2. Distributed systems
+   - TCP framing
+   - peer discovery boundaries
+   - propagation, relay, duplicate rejection, and synchronization
+3. Zig systems programming
+   - structs and modules
+   - explicit allocation and ownership
+   - error handling
+   - concurrency and shared state
+   - testing and build tooling
+4. Virtual machines
+   - 256-bit values
+   - stack, memory, and storage
+   - bytecode decoding and execution
+   - Solidity ABI calldata
+
+## Roadmap
+
+- [ ] persistent blockchain storage
+- [x] learning-oriented P2P networking
+- [ ] transaction authentication and replay protection
+- [ ] explicit consensus engine and fork-choice abstraction
+- [ ] Web API
+- [ ] learning-oriented wallet and key flow
+- [ ] migration of the book and checkpoints to a newer Zig edition
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+1. Fork the repository.
+2. Create a focused branch.
+3. Add or update the nearest tests.
+4. Run the relevant chapter and root gates.
+5. Open a pull request that explains the behavior and learning impact.
+
+Changes to a book checkpoint should keep the manuscript, snapshot, companion patch, and reconstruction gate aligned.
+
+## License
+
+MIT License
